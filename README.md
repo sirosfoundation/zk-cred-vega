@@ -29,14 +29,22 @@ verifiers) and a UniFFI round trip through the actual exported functions.
 Android cross-compile, AAR packaging, and a `go-zk-circuits` catalog
 publication (currently `--unpublished`) are done.
 
+**Real ISO 18013-5 MSO/COSE_Sign1 byte framing.** The ECDSA signature
+covers the actual signed structure a verifier checks against a real
+mdoc: `Sig_structure(protected_header, external_aad,
+payload=#6.24(bstr MSO))`, with the MSO body following its real CDDL
+field order (`version`, `digestAlgorithm`, `docType`, `valueDigests`,
+`deviceKeyInfo`, `validityInfo`). See `src/mso.rs`'s module doc for how
+the byte template was derived and verified against a real signed test
+vector, and `mdoc_core.rs`'s module doc for the fixed-template +
+witness-splice circuit design (no in-circuit CBOR parser needed).
+`x5chain`-based issuer-key trust still happens outside this circuit
+(the issuer public key `Q` is a circuit input, not derived from a
+certificate chain in-circuit) — same division of responsibility as
+Longfellow.
+
 **Not yet done, and important if you're evaluating this crate:**
 
-- **Not real ISO 18013-5 MSO framing.** The ECDSA message digest is
-  currently `SHA-256` of the concatenated per-claim digests — a
-  representative stand-in, not a real MSO `Sig_structure`/COSE_Sign1
-  wrapper (no docType/digestAlgorithm/validityInfo/deviceKeyInfo framing,
-  no `x5chain`-based issuer key). Proofs from this crate are **not**
-  spec-compliant mdoc presentations yet. See `mdoc_core.rs`'s module doc.
 - **No independent security review** of the ECDSA/BigNat/EC-point
   gadgets. Flagged explicitly in `ecdsa.rs`'s and `p256_ecc.rs`'s own
   module docs.
