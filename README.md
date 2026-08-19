@@ -78,3 +78,12 @@ cargo build --release --features uniffi
 make bindings-kotlin   # generates bindings/kotlin/ (gitignored, vendored by SDK repos)
 make aar                # cross-compiles for Android + packages an AAR
 ```
+
+To regenerate the `setup()` prover/verifier keys for publishing to
+`go-zk-circuits` (needed any time the circuit shape changes — number of
+claims, claim byte limit, or the MSO/ECDSA framing itself):
+
+```
+make dump-setup   # writes target/setup-artifacts/vega-mc-p256-v1-{prover,verifier}-key.bin
+zstd -19 target/setup-artifacts/vega-mc-p256-v1-prover-key.bin -o ...   # then circuitctl add
+```

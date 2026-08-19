@@ -31,9 +31,14 @@ KOTLIN_DIR   := $(BINDINGS_DIR)/kotlin
 # Android targets (via cargo-ndk)
 ANDROID_TARGETS := aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-.PHONY: all bindings-kotlin android aar pom publish-local clean check-bindings
+.PHONY: all bindings-kotlin android aar pom publish-local clean check-bindings dump-setup
 
 all: bindings-kotlin
+
+# ── Setup-artifact generation (for go-zk-circuits publication) ───────
+
+dump-setup:
+	cargo run --release --bin dump_setup
 
 # ── Binding generation ───────────────────────────────────────────────
 
