@@ -4,25 +4,24 @@
 //! `vega-prover` supplies the proving system (NeutronNova-folding Spartan
 //! over R1CS, no trusted setup) but has zero credential-specific code. This
 //! crate supplies the mdoc-shaped circuit and the mobile-facing API on top
-//! of it: one `VegaCircuit` "step" per disclosed/checked mdoc element,
-//! verifying its SHA-256 digest against the corresponding entry read from
-//! the mobile security object (MSO), folded together via `vega_mc_zkp`.
-//!
-//! Phase 1 (this file): digest-matching step circuits only, wired through a
-//! real `setup`/`prep_prove`/`prove`/`verify` round-trip, with a stub core
-//! circuit standing in for MSO signature verification. The core circuit's
-//! `issuer_auth` ECDSA-P256 check (the actual "is this MSO genuinely signed
-//! by the issuer" step) is Phase 2 — see `docs/plan.md`. Until Phase 2
-//! lands, a proof from this crate demonstrates knowledge of preimages
-//! matching claimed digests; it does **not** yet demonstrate that those
-//! digests came from a validly-signed MSO. Do not treat it as a credential
-//! presentation proof until Phase 2 is done.
+//! of it: one `VegaCircuit` "step" per disclosed/checked mdoc element
+//! (`ClaimDigestStepCircuit`, this file), verifying its SHA-256 digest, and
+//! one "core" circuit (`mdoc_core::MdocCoreCircuit`) proving a real
+//! ECDSA-P256 signature over those digests, folded together via
+//! `vega_mc_zkp`. See `HANDOFF.md` for full status against the tracked
+//! plan (real MSO byte framing and a security review are still open) and
+//! `ffi_api` for the UniFFI-exported surface consumed by the native SDKs.
 
 pub mod ecdsa;
+#[cfg(feature = "uniffi")]
+pub mod ffi_api;
 pub mod gadget_utils;
 pub mod mdoc_core;
 pub mod nonnative;
 pub mod p256_ecc;
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
 
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
@@ -335,11 +334,25 @@ fn pad_claims(claims: &[ClaimWitness]) -> Result<Vec<ClaimWitness>, VegaMdocErro
 /// next call for the same credential, and `prep_prove` is skipped.
 pub struct VegaMdocPrepState(vega_prover::vega_mc_zkp::VegaMcPrepZkSNARK<Engine_>);
 
+impl VegaMdocPrepState {
+  /// Unwraps to the inner `vega-prover` type — used by `ffi_api` to
+  /// (de)serialize the prep state to bytes for `ZkProofSystem`'s
+  /// `priorState`/`nextState` fields.
+  pub fn into_inner(self) -> vega_prover::vega_mc_zkp::VegaMcPrepZkSNARK<Engine_> {
+    self.0
+  }
+
+  /// See [`Self::into_inner`].
+  pub fn from_inner(inner: vega_prover::vega_mc_zkp::VegaMcPrepZkSNARK<Engine_>) -> Self {
+    Self(inner)
+  }
+}
+
 /// Builds the core circuit's `claim_digests` witness from a (pre-padding)
 /// claim set, in the same padded order `prep_prove`/`prove` use for the
 /// step circuits — the two must agree for `verify_and_check_binding` to
 /// pass.
-fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]>, VegaMdocError> {
+pub(crate) fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]>, VegaMdocError> {
   let padded = pad_claims(claims)?;
   Ok(
     padded

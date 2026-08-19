@@ -1,2 +1,8 @@
 /target
 **/*.rs.bk
+
+# UniFFI-generated bindings (see Makefile's `bindings-kotlin` target) — not
+# committed here, matching zk-cred-longfellow/siros-wscd-manager's own
+# precedent: consuming SDK repos vendor a generated copy into their own
+# source tree instead.
+/bindings/
