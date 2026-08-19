@@ -91,6 +91,42 @@ impl TryFrom<FfiEcdsaWitness> for MdocEcdsaWitness {
   }
 }
 
+/// Big-endian-byte-encoded twin of [`crate::mso::MsoBodyWitness`] — the
+/// per-credential MSO data (device key, validity timestamps) not
+/// otherwise carried by [`FfiClaim`]/[`FfiEcdsaWitness`]. `device_x`/
+/// `device_y` must be exactly 32 bytes; the three timestamps exactly
+/// [`crate::mso::TIMESTAMP_LEN`] (20) ASCII bytes, e.g.
+/// `"2026-08-20T00:00:00Z"`.
+#[derive(Clone, uniffi::Record)]
+pub struct FfiMsoBodyWitness {
+  pub device_x: Vec<u8>,
+  pub device_y: Vec<u8>,
+  pub signed_ts: Vec<u8>,
+  pub valid_from_ts: Vec<u8>,
+  pub valid_until_ts: Vec<u8>,
+}
+
+fn fixed_len<const N: usize>(bytes: Vec<u8>, label: &str) -> Result<[u8; N], VegaFfiError> {
+  let len = bytes.len();
+  bytes
+    .try_into()
+    .map_err(|_| VegaFfiError(anyhow::anyhow!("{label} must be exactly {N} bytes, got {len}")))
+}
+
+impl TryFrom<FfiMsoBodyWitness> for crate::mso::MsoBodyWitness {
+  type Error = VegaFfiError;
+
+  fn try_from(w: FfiMsoBodyWitness) -> Result<Self, VegaFfiError> {
+    Ok(crate::mso::MsoBodyWitness {
+      device_x: fixed_len(w.device_x, "device_x")?,
+      device_y: fixed_len(w.device_y, "device_y")?,
+      signed_ts: fixed_len(w.signed_ts, "signed_ts")?,
+      valid_from_ts: fixed_len(w.valid_from_ts, "valid_from_ts")?,
+      valid_until_ts: fixed_len(w.valid_until_ts, "valid_until_ts")?,
+    })
+  }
+}
+
 #[derive(uniffi::Record)]
 pub struct FfiProveResult {
   /// The proof, ready to send to a verifier.
@@ -160,10 +196,12 @@ pub fn prep_prove(
   pk: &VegaProverKey,
   claims: Vec<FfiClaim>,
   ecdsa_witness: FfiEcdsaWitness,
+  mso_body: FfiMsoBodyWitness,
 ) -> Result<Vec<u8>, VegaFfiError> {
   let claims: Vec<ClaimWitness> = claims.into_iter().map(Into::into).collect();
   let ecdsa_witness: MdocEcdsaWitness = ecdsa_witness.try_into()?;
-  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness)
+  let mso_body: crate::mso::MsoBodyWitness = mso_body.try_into()?;
+  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness, &mso_body)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
   bincode::serialize(&prep.into_inner()).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
 }
@@ -176,15 +214,17 @@ pub fn prove(
   pk: &VegaProverKey,
   claims: Vec<FfiClaim>,
   ecdsa_witness: FfiEcdsaWitness,
+  mso_body: FfiMsoBodyWitness,
   prior_state: Vec<u8>,
 ) -> Result<FfiProveResult, VegaFfiError> {
   let claims: Vec<ClaimWitness> = claims.into_iter().map(Into::into).collect();
   let ecdsa_witness: MdocEcdsaWitness = ecdsa_witness.try_into()?;
+  let mso_body: crate::mso::MsoBodyWitness = mso_body.try_into()?;
   let prep_snark: VegaMcPrepZkSNARK<Engine_> =
     bincode::deserialize(&prior_state).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
   let prep = VegaMdocPrepState::from_inner(prep_snark);
 
-  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, prep)
+  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, &mso_body, prep)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   let proof_bytes = bincode::serialize(&proof).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
@@ -279,13 +319,25 @@ mod tests {
     let claim_digests =
       vega_mdoc::core_claim_digests(&claim_witnesses).expect("core_claim_digests");
 
+    let mso_body_native = crate::mso::MsoBodyWitness {
+      device_x: [0x11u8; 32],
+      device_y: [0x22u8; 32],
+      signed_ts: *b"2026-08-20T00:00:00Z",
+      valid_from_ts: *b"2026-08-20T00:00:00Z",
+      valid_until_ts: *b"2036-08-20T00:00:00Z",
+    };
+    let mso_body = FfiMsoBodyWitness {
+      device_x: mso_body_native.device_x.to_vec(),
+      device_y: mso_body_native.device_y.to_vec(),
+      signed_ts: mso_body_native.signed_ts.to_vec(),
+      valid_from_ts: mso_body_native.valid_from_ts.to_vec(),
+      valid_until_ts: mso_body_native.valid_until_ts.to_vec(),
+    };
+
     let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).expect("valid scalar");
     let verifying_key = VerifyingKey::from(&signing_key);
-    let mut hasher = Sha256::new();
-    for d in &claim_digests {
-      hasher.update(d);
-    }
-    let z_bytes: [u8; 32] = hasher.finalize().into();
+    let sig_structure = crate::mso::native_sig_structure_bytes(&claim_digests, &mso_body_native);
+    let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
     let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
     let n = p256_order();
     let s = bytes_to_bigint(&signature.s().to_bytes());
@@ -302,18 +354,35 @@ mod tests {
       s_inv: bigint_to_bytes(&s_inv),
     };
 
-    let prep_state = prep_prove(&pk, claims.clone(), ffi_witness_clone(&ecdsa_witness))
-      .expect("prep_prove");
-    let result1 = prove(&pk, claims.clone(), ffi_witness_clone(&ecdsa_witness), prep_state)
-      .expect("prove 1");
+    let prep_state = prep_prove(
+      &pk,
+      claims.clone(),
+      ffi_witness_clone(&ecdsa_witness),
+      mso_body.clone(),
+    )
+    .expect("prep_prove");
+    let result1 = prove(
+      &pk,
+      claims.clone(),
+      ffi_witness_clone(&ecdsa_witness),
+      mso_body.clone(),
+      prep_state,
+    )
+    .expect("prove 1");
     let verified1 = verify(&vk, result1.proof_bytes).expect("verify 1");
     assert_eq!(verified1.qx, ecdsa_witness.qx);
     assert_eq!(verified1.qy, ecdsa_witness.qy);
     assert_eq!(verified1.step_digests.len(), crate::MAX_CLAIMS_V1);
 
     // Second presentation reusing next_state (the fold-and-reuse path).
-    let result2 = prove(&pk, claims, ffi_witness_clone(&ecdsa_witness), result1.next_state)
-      .expect("prove 2 (reused prep state)");
+    let result2 = prove(
+      &pk,
+      claims,
+      ffi_witness_clone(&ecdsa_witness),
+      mso_body,
+      result1.next_state,
+    )
+    .expect("prove 2 (reused prep state)");
     let verified2 = verify(&vk, result2.proof_bytes).expect("verify 2");
     assert_eq!(verified2.qx, ecdsa_witness.qx);
   }

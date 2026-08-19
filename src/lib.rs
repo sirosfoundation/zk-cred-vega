@@ -17,6 +17,7 @@ pub mod ecdsa;
 pub mod ffi_api;
 pub mod gadget_utils;
 pub mod mdoc_core;
+pub mod mso;
 pub mod nonnative;
 pub mod p256_ecc;
 
@@ -216,13 +217,13 @@ pub struct MdocEcdsaWitness {
   pub s_inv: BigInt,
 }
 
-/// A real, valid P-256 ECDSA signature over
-/// `SHA-256([0u8; 32] repeated MAX_CLAIMS_V1 times)` — i.e. genuinely
-/// satisfying the ECDSA relation for exactly the `z` that
-/// `MdocCoreCircuit::native_z_bytes` computes for setup's own all-zero
-/// `claim_digests` prototype below — generated once via RustCrypto's
-/// `p256` crate and frozen here as constants. Used only as [`setup`]'s
-/// prototype circuit witness.
+/// A real, valid P-256 ECDSA signature over the real MSO `Sig_structure`
+/// (`crate::mso`) for setup's own all-zero `claim_digests` prototype and
+/// [`setup_prototype_mso_body`] below — i.e. genuinely satisfying the
+/// ECDSA relation for exactly the `z` that
+/// `MdocCoreCircuit::native_z_bytes` computes for that prototype —
+/// generated once via RustCrypto's `p256` crate and frozen here as
+/// constants. Used only as [`setup`]'s prototype circuit witness.
 ///
 /// Genuinely satisfying the relation (not just "non-degenerate") matters:
 /// an internally-inconsistent prototype (valid-looking scalars that don't
@@ -247,11 +248,24 @@ fn setup_prototype_ecdsa_witness() -> MdocEcdsaWitness {
       "107332639522564059748513735225121084070027309383763098932131650999881938986788",
     ))
     .unwrap(),
-    r: parse("34158886365188924995576805369414955546695446637758572275049680737384481638550"),
-    s: parse("50742202422105296391539965653035028790698587237099104849136725216325886541360"),
+    r: parse("111142013211556514970479643709817588854004335857781381385833107319892960023198"),
+    s: parse("76862587808802066344087557197401376424252937358072577297572652819487433674663"),
     s_inv: parse(
-      "96193774504579357202359351098485493149433497819343073080230082391271389319288",
+      "78445439557468585260457937215718822506055505801566399563185238095534357761252",
     ),
+  }
+}
+
+/// The (fixed, arbitrary) MSO body data [`setup_prototype_ecdsa_witness`]'s
+/// signature was actually computed over — see that function's doc for why
+/// this must genuinely match, not just be "non-degenerate".
+fn setup_prototype_mso_body() -> crate::mso::MsoBodyWitness {
+  crate::mso::MsoBodyWitness {
+    device_x: [0u8; 32],
+    device_y: [0u8; 32],
+    signed_ts: *b"2026-08-20T00:00:00Z",
+    valid_from_ts: *b"2026-08-20T00:00:00Z",
+    valid_until_ts: *b"2036-08-20T00:00:00Z",
   }
 }
 
@@ -273,6 +287,7 @@ pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
     w.s,
     w.s_inv,
     vec![[0u8; 32]; MAX_CLAIMS_V1],
+    setup_prototype_mso_body(),
   );
   let (pk, vk) = VegaMcZkSNARK::<Engine_>::setup(&step_proto, &core_proto, MAX_CLAIMS_V1)?;
   Ok(VegaMdocKeys { pk, vk })
@@ -363,11 +378,14 @@ pub(crate) fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]
 }
 
 /// Runs `prep_prove` once for a given credential's claim set and ECDSA
-/// witness.
+/// witness. `mso_body` is the per-credential MSO data (device key,
+/// validity timestamps) that isn't otherwise carried by `claims` or
+/// `ecdsa_witness` — see `crate::mso`.
 pub fn prep_prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
   ecdsa_witness: &MdocEcdsaWitness,
+  mso_body: &crate::mso::MsoBodyWitness,
 ) -> Result<VegaMdocPrepState, VegaMdocError> {
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
@@ -381,6 +399,7 @@ pub fn prep_prove(
     ecdsa_witness.s.clone(),
     ecdsa_witness.s_inv.clone(),
     core_claim_digests(claims)?,
+    mso_body.clone(),
   );
   let prep = VegaMcZkSNARK::<Engine_>::prep_prove(pk, &step_circuits, &core_circuit, false)?;
   Ok(VegaMdocPrepState(prep))
@@ -392,6 +411,7 @@ pub fn prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
   ecdsa_witness: &MdocEcdsaWitness,
+  mso_body: &crate::mso::MsoBodyWitness,
   prep: VegaMdocPrepState,
 ) -> Result<(VegaMcZkSNARK<Engine_>, VegaMdocPrepState), VegaMdocError> {
   let padded = pad_claims(claims)?;
@@ -406,6 +426,7 @@ pub fn prove(
     ecdsa_witness.s.clone(),
     ecdsa_witness.s_inv.clone(),
     core_claim_digests(claims)?,
+    mso_body.clone(),
   );
   let (proof, next_prep) =
     VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, false)?;
@@ -423,51 +444,94 @@ pub fn verify(
   Ok(proof.verify(vk, MAX_CLAIMS_V1)?)
 }
 
+/// Packs a public-value bit slice (each entry `Scalar::ONE`/`ZERO`,
+/// big-endian, 8 per byte) back into bytes — the inverse of
+/// `mdoc_core::native_bytes_to_bits`.
+fn bits_to_bytes(bits: &[<Engine_ as Engine>::Scalar]) -> Vec<u8> {
+  bits
+    .chunks(8)
+    .map(|byte_bits| {
+      byte_bits.iter().enumerate().fold(0u8, |byte, (i, bit)| {
+        if *bit == <Engine_ as Engine>::Scalar::ONE {
+          byte | (1 << (7 - i))
+        } else {
+          byte
+        }
+      })
+    })
+    .collect()
+}
+
 /// The step<->core binding check `mdoc_core`'s module doc describes: given
-/// `verify`'s two outputs, confirms the core circuit's exposed ECDSA
-/// message digest `z` actually equals `SHA-256` of the step circuits'
-/// exposed digests concatenated in order. This is the check that gives
-/// "the ECDSA signature core proved is valid" and "these are the digests
-/// step proved" any actual connection to each other — without it, a
-/// prover could mix a valid core proof for one claim set with valid step
-/// proofs for a *different* one. Returns the parsed `(qx, qy)` public key
-/// on success, since a caller will need it (e.g. to check `Q` against a
-/// trust anchor) once framing is real (see `mdoc_core`'s module doc).
+/// `verify`'s two outputs, independently reconstructs the real MSO
+/// `Sig_structure` (`crate::mso`) from *only* public data — the step
+/// circuits' exposed per-claim digests plus the core circuit's exposed
+/// MSO-body fields (device key, validity timestamps) — and confirms its
+/// `SHA-256` equals the core circuit's exposed `z`. This is the check
+/// that gives "the ECDSA signature core proved is valid" and "these are
+/// the digests step proved" any actual connection to each other — without
+/// it, a prover could mix a valid core proof for one claim set with valid
+/// step proofs for a *different* one. Returns the parsed `(qx, qy)`
+/// public key on success, since a caller will need it (e.g. to check `Q`
+/// against a trust anchor — see `mdoc_core`'s module doc).
 pub fn verify_and_check_binding(
   step_public_values: &[Vec<<Engine_ as Engine>::Scalar>],
   core_public_values: &[<Engine_ as Engine>::Scalar],
 ) -> Result<(<Engine_ as Engine>::Scalar, <Engine_ as Engine>::Scalar), VegaMdocError> {
-  if core_public_values.len() != 2 + 256 {
+  // qx, qy, z(256), device_x(256), device_y(256), signed_ts(160),
+  // valid_from_ts(160), valid_until_ts(160) — must match
+  // MdocCoreCircuit::public_values's exact order.
+  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + 160 + 160 + 160;
+  if core_public_values.len() != EXPECTED_LEN {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
   let qx = core_public_values[0];
   let qy = core_public_values[1];
-  let core_z_bits = &core_public_values[2..2 + 256];
+  let mut cursor = 2;
+  let mut take = |len: usize| {
+    let slice = &core_public_values[cursor..cursor + len];
+    cursor += len;
+    slice
+  };
+  let core_z_bits = take(256);
+  let device_x: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
+  let device_y: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
+  let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
+  let valid_from_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
+  let valid_until_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
 
-  let mut hasher = Sha256::new();
-  for step_values in step_public_values {
-    for byte_bits in step_values.chunks(8) {
-      let mut byte = 0u8;
-      for (i, bit) in byte_bits.iter().enumerate() {
-        if *bit == <Engine_ as Engine>::Scalar::ONE {
-          byte |= 1 << (7 - i);
-        }
-      }
-      hasher.update([byte]);
-    }
-  }
-  let expected_z_bytes: [u8; 32] = hasher.finalize().into();
-  let expected_z_bits: Vec<<Engine_ as Engine>::Scalar> = expected_z_bytes
+  let claim_digests: Vec<[u8; 32]> = step_public_values
     .iter()
-    .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
-    .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
+    .map(|v| bits_to_bytes(v).try_into().unwrap())
     .collect();
+  if claim_digests.len() != MAX_CLAIMS_V1 {
+    return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+  }
+
+  let mso_body = mso::MsoBodyWitness {
+    device_x,
+    device_y,
+    signed_ts,
+    valid_from_ts,
+    valid_until_ts,
+  };
+  let sig_structure = mso::native_sig_structure_bytes(&claim_digests, &mso_body);
+  let expected_z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
+  let expected_z_bits = native_bytes_to_bits_pub(&expected_z_bytes);
 
   if core_z_bits != expected_z_bits.as_slice() {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
 
   Ok((qx, qy))
+}
+
+fn native_bytes_to_bits_pub(bytes: &[u8]) -> Vec<<Engine_ as Engine>::Scalar> {
+  bytes
+    .iter()
+    .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+    .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
+    .collect()
 }
 
 #[cfg(test)]
@@ -478,18 +542,26 @@ mod tests {
   use num_bigint::Sign;
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
 
-  /// Signs `SHA-256(claim_digests concatenated)` — matching
+  fn test_mso_body() -> crate::mso::MsoBodyWitness {
+    crate::mso::MsoBodyWitness {
+      device_x: [0x11u8; 32],
+      device_y: [0x22u8; 32],
+      signed_ts: *b"2026-08-20T00:00:00Z",
+      valid_from_ts: *b"2026-08-20T00:00:00Z",
+      valid_until_ts: *b"2036-08-20T00:00:00Z",
+    }
+  }
+
+  /// Signs the real MSO `Sig_structure` (`crate::mso`) over
+  /// `claim_digests` and [`test_mso_body`] — matching
   /// `MdocCoreCircuit`'s own `native_z_bytes` exactly — with a fresh real
   /// P-256 key, and returns the resulting `MdocEcdsaWitness`.
   fn real_ecdsa_witness_over(claim_digests: &[[u8; 32]]) -> MdocEcdsaWitness {
     let signing_key = SigningKey::from_bytes(&[42u8; 32].into()).expect("valid scalar");
     let verifying_key = VerifyingKey::from(&signing_key);
 
-    let mut hasher = Sha256::new();
-    for d in claim_digests {
-      hasher.update(d);
-    }
-    let z_bytes: [u8; 32] = hasher.finalize().into();
+    let sig_structure = crate::mso::native_sig_structure_bytes(claim_digests, &test_mso_body());
+    let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
 
     let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
     let r = BigInt::from_bytes_be(Sign::Plus, &signature.r().to_bytes());
@@ -545,8 +617,8 @@ mod tests {
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
     let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
 
-    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness).expect("prep_prove");
-    let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, prep).expect("prove");
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
+    let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
     let (step_public_values, _core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     // Confirm the circuit is actually constraining the real digest, not
@@ -590,8 +662,8 @@ mod tests {
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
     let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
 
-    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness).expect("prep_prove");
-    let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, prep).expect("prove");
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
+    let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
     let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     let (qx, qy) = verify_and_check_binding(&step_public_values, &core_public_values)
@@ -603,7 +675,7 @@ mod tests {
     // presentation of the same credential (a different verifier, say) —
     // exercising `nextState`'s round-trip, not just a single `prove` call.
     let (proof2, _next_prep2) =
-      prove(&keys.pk, &claims, &ecdsa_witness, next_prep).expect("second prove reusing prep state");
+      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), next_prep).expect("second prove reusing prep state");
     let (step_public_values2, core_public_values2) = verify(&proof2, &keys.vk).expect("verify 2");
     verify_and_check_binding(&step_public_values2, &core_public_values2)
       .expect("binding check must also pass for the reused-prep-state proof");
@@ -650,6 +722,7 @@ mod tests {
       ecdsa_witness.s,
       ecdsa_witness.s_inv,
       mismatched_digests,
+      test_mso_body(),
     );
 
     let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
