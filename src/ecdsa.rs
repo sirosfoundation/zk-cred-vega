@@ -32,6 +32,39 @@
 //! Skipping this on a fresh raw input is exactly the kind of
 //! under-constrained-wire bug the crate's docs already flag this gadget as
 //! needing a security review for.
+//!
+//! Two such bugs were found by that review (2026-08-19) and fixed here,
+//! both total breaks (forge a proof for a fabricated document under any
+//! issuer's identity, no private key needed) confirmed via
+//! `TestConstraintSystem` proof-of-concept witnesses before being fixed:
+//!
+//! 1. `Q`'s `is_infinity` flag was a free prover-supplied witness bit
+//!    (via a generic `AllocatedPoint::alloc`, meant for genuinely-optional
+//!    points elsewhere in [`crate::p256_ecc`]), constrained only to be a
+//!    bit — not to be `0`. With `is_infinity = 1`,
+//!    [`crate::p256_ecc::AllocatedPoint::check_on_curve`]'s constraints
+//!    both multiply by `(1 - is_infinity) = 0` and become vacuous for
+//!    *any* `(qx, qy)`, and `scalar_mul` collapses `u2*Q` to the identity
+//!    regardless of `u2` — letting a prover pick any `k`, set
+//!    `r = x(k*G) mod n`, and solve `s = z*k^-1 mod n` for *any* digest
+//!    `z` (i.e. any claim set/validity window), all while still exposing
+//!    the real issuer's `(qx, qy)` as the public key a verifier checks
+//!    against a trust anchor. Fixed: `Q`'s `is_infinity` is now
+//!    hardcoded to the constant `0` via `alloc_constant` (an ECDSA
+//!    signer's key is by definition never the point at infinity), the
+//!    same way `G`'s already was.
+//! 2. The `qx`/`qy` this gadget verified against were re-witnessed from
+//!    raw `Scalar` values, entirely separate R1CS variables from
+//!    whatever a caller (e.g. [`crate::mdoc_core::MdocCoreCircuit`])
+//!    separately allocates and exposes as the public `qx`/`qy` — nothing
+//!    forced them equal. A prover could sign with their own key, feed
+//!    that into this gadget, and independently assign the honest
+//!    issuer's coordinates to the public-input variables: same R1CS
+//!    shape, valid witness, full issuer impersonation. Fixed: this
+//!    function now takes `qx`/`qy` as `&AllocatedNum<Scalar>` — the
+//!    caller's own already-allocated (and, in `MdocCoreCircuit`, already
+//!    `inputize`d) wires — and reuses them directly to build `Q`, rather
+//!    than allocating fresh ones.
 
 use crate::gadget_utils::alloc_bignat_constant;
 use crate::nonnative::{bignat::BigNat, util::Num};
@@ -91,10 +124,13 @@ where
   )?;
   z_bn.assert_well_formed(cs.namespace(|| "z well-formed"))?;
 
+  let qx_num = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(w.qx))?;
+  let qy_num = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(w.qy))?;
+
   verify_ecdsa_p256_with_digest(
     cs.namespace(|| "verify"),
-    w.qx,
-    w.qy,
+    &qx_num,
+    &qy_num,
     &w.r,
     &w.s,
     &w.s_inv,
@@ -108,8 +144,8 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn verify_ecdsa_p256_with_digest<Scalar, CS>(
   mut cs: CS,
-  qx: Scalar,
-  qy: Scalar,
+  qx: &AllocatedNum<Scalar>,
+  qy: &AllocatedNum<Scalar>,
   r: &BigInt,
   s: &BigInt,
   s_inv: &BigInt,
@@ -168,10 +204,23 @@ where
   let g_is_infinity = crate::gadget_utils::alloc_constant(cs.namespace(|| "G is_infinity"), &Scalar::ZERO)?;
   let g = AllocatedPoint::alloc_constant(cs.namespace(|| "G"), (gx, gy), g_is_infinity)?;
 
-  // Q, the signer's public key, as a circuit witness — checked on-curve
-  // rather than trusted, regardless of whether a caller treats it as
-  // public or private (see module doc).
-  let q = AllocatedPoint::alloc(cs.namespace(|| "Q"), Some((qx, qy, false)))?;
+  // Q, the signer's public key, reusing the exact caller-supplied
+  // `qx`/`qy` wires (not re-witnessed from raw values) so that whatever
+  // the caller exposes as a public input for Q is provably the same Q
+  // this gadget verifies against — see module doc's security-review
+  // notes on why a fresh `AllocatedPoint::alloc` here would be
+  // under-constrained. `is_infinity` is hardcoded to the constant 0 via
+  // `alloc_constant` (not a prover-supplied witness bit): an ECDSA
+  // signer's public key is by definition never the point at infinity, so
+  // there is no honest case for this to be anything but 0, and leaving it
+  // as a free witness bit would let a prover vacuously satisfy
+  // `check_on_curve`/`scalar_mul` for ANY (qx, qy) — see module doc.
+  let q_is_infinity = crate::gadget_utils::alloc_constant(cs.namespace(|| "Q is_infinity"), &Scalar::ZERO)?;
+  let q = AllocatedPoint {
+    x: qx.clone(),
+    y: qy.clone(),
+    is_infinity: q_is_infinity,
+  };
   q.check_on_curve(cs.namespace(|| "Q on curve"))?;
 
   let u1_g = g.scalar_mul(cs.namespace(|| "u1 * G"), &u1_bits)?;

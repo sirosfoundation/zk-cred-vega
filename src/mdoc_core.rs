@@ -287,8 +287,8 @@ where
 
     verify_ecdsa_p256_with_digest(
       cs.namespace(|| "ecdsa"),
-      self.qx,
-      self.qy,
+      &qx_num,
+      &qy_num,
       &self.r,
       &self.s,
       &self.s_inv,

@@ -500,12 +500,22 @@ pub fn verify_and_check_binding(
   let valid_from_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
   let valid_until_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
 
-  let claim_digests: Vec<[u8; 32]> = step_public_values
-    .iter()
-    .map(|v| bits_to_bytes(v).try_into().unwrap())
-    .collect();
-  if claim_digests.len() != MAX_CLAIMS_V1 {
+  if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+  }
+  let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(step_public_values.len());
+  for v in step_public_values {
+    if v.len() != 256 {
+      // A malformed/attacker-controlled proof could carry a step public
+      // value vector of the wrong length — reject it instead of letting
+      // the try_into below panic (a process abort across the UniFFI
+      // boundary, not a rejected proof).
+      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+    }
+    let digest: [u8; 32] = bits_to_bytes(v)
+      .try_into()
+      .map_err(|_| VegaMdocError::Circuit(SynthesisError::Unsatisfiable))?;
+    claim_digests.push(digest);
   }
 
   let mso_body = mso::MsoBodyWitness {
