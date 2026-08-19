@@ -24,7 +24,6 @@ use crate::{
   self as vega_mdoc, nonnative::util::{f_to_nat, nat_to_f}, ClaimWitness, Engine_, MdocEcdsaWitness,
   VegaMdocPrepState,
 };
-use ff::Field;
 use num_bigint::{BigInt, Sign};
 use std::fmt::{self, Debug, Display};
 use vega_prover::{
@@ -137,31 +136,46 @@ pub struct FfiProveResult {
   pub next_state: Vec<u8>,
 }
 
+/// One claim slot's verified disclosure outcome — see
+/// [`crate::DisclosedClaim`]. `plaintext` is the padded `IssuerSignedItem`
+/// bytes when `disclosed`, all-zero otherwise (never meaningful in that
+/// case).
+#[derive(uniffi::Record)]
+pub struct FfiDisclosedClaim {
+  pub disclosed: bool,
+  pub digest: Vec<u8>,
+  pub plaintext: Vec<u8>,
+}
+
+impl From<crate::DisclosedClaim> for FfiDisclosedClaim {
+  fn from(c: crate::DisclosedClaim) -> Self {
+    FfiDisclosedClaim {
+      disclosed: c.disclosed,
+      digest: c.digest.to_vec(),
+      plaintext: c.plaintext,
+    }
+  }
+}
+
 /// The verified, bound public output of a presentation: the issuer's
-/// public key (for trust-anchor checking) and each requested claim's
-/// digest, in the same order the corresponding step circuits were given —
-/// see this module's doc for why the step↔core binding check already ran
-/// by the time this is returned.
+/// public key (for trust-anchor checking), each claim's disclosure
+/// outcome (in the same order the corresponding step circuits were
+/// given), and the MSO-body fields the circuit already proved consistent
+/// with the signature — a relying party needs these to check credential
+/// validity (`valid_from_ts`/`valid_until_ts`) and device binding
+/// (`device_x`/`device_y`), which the circuit proves but can't itself
+/// evaluate. See this module's doc for why the step↔core binding check
+/// already ran by the time this is returned.
 #[derive(uniffi::Record)]
 pub struct FfiVerifyResult {
   pub qx: Vec<u8>,
   pub qy: Vec<u8>,
-  pub step_digests: Vec<Vec<u8>>,
-}
-
-fn bits_to_bytes(bits: &[Scalar]) -> Vec<u8> {
-  bits
-    .chunks(8)
-    .map(|byte_bits| {
-      byte_bits.iter().enumerate().fold(0u8, |byte, (i, bit)| {
-        if *bit == Scalar::ONE {
-          byte | (1 << (7 - i))
-        } else {
-          byte
-        }
-      })
-    })
-    .collect()
+  pub claims: Vec<FfiDisclosedClaim>,
+  pub device_x: Vec<u8>,
+  pub device_y: Vec<u8>,
+  pub signed_ts: Vec<u8>,
+  pub valid_from_ts: Vec<u8>,
+  pub valid_until_ts: Vec<u8>,
 }
 
 #[derive(uniffi::Object)]
@@ -247,13 +261,18 @@ pub fn verify(vk: &VegaVerifierKey, proof_bytes: Vec<u8>) -> Result<FfiVerifyRes
   let (step_public_values, core_public_values) =
     vega_mdoc::verify(&proof, &vk.0).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
-  let (qx, qy) = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values)
+  let verified = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   Ok(FfiVerifyResult {
-    qx: scalar_to_bytes(qx),
-    qy: scalar_to_bytes(qy),
-    step_digests: step_public_values.iter().map(|bits| bits_to_bytes(bits)).collect(),
+    qx: scalar_to_bytes(verified.qx),
+    qy: scalar_to_bytes(verified.qy),
+    claims: verified.claims.into_iter().map(Into::into).collect(),
+    device_x: verified.device_x.to_vec(),
+    device_y: verified.device_y.to_vec(),
+    signed_ts: verified.signed_ts.to_vec(),
+    valid_from_ts: verified.valid_from_ts.to_vec(),
+    valid_until_ts: verified.valid_until_ts.to_vec(),
   })
 }
 
@@ -308,7 +327,7 @@ mod tests {
       },
       FfiClaim {
         issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
-        disclose: true,
+        disclose: false,
       },
     ];
     let claim_witnesses: Vec<ClaimWitness> =
@@ -372,7 +391,13 @@ mod tests {
     let verified1 = verify(&vk, result1.proof_bytes).expect("verify 1");
     assert_eq!(verified1.qx, ecdsa_witness.qx);
     assert_eq!(verified1.qy, ecdsa_witness.qy);
-    assert_eq!(verified1.step_digests.len(), crate::MAX_CLAIMS_V1);
+    assert_eq!(verified1.claims.len(), crate::MAX_CLAIMS_V1);
+    assert!(verified1.claims[0].disclosed);
+    assert_eq!(verified1.claims[0].plaintext, b"family_name:Doe".to_vec().into_iter().chain(std::iter::repeat(0u8)).take(crate::MAX_CLAIM_BYTES_V1).collect::<Vec<u8>>());
+    assert!(!verified1.claims[1].disclosed, "second claim wasn't disclosed");
+    assert_eq!(verified1.claims[1].plaintext, vec![0u8; crate::MAX_CLAIM_BYTES_V1], "an undisclosed claim's plaintext must be masked to all-zero over the FFI boundary too");
+    assert_eq!(verified1.device_x, mso_body_native.device_x.to_vec());
+    assert_eq!(verified1.valid_until_ts, mso_body_native.valid_until_ts.to_vec());
 
     // Second presentation reusing next_state (the fold-and-reuse path).
     let result2 = prove(

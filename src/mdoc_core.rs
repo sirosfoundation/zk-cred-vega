@@ -196,7 +196,7 @@ fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(
 /// build `public_values()`'s expected output for a byte span, matching
 /// the same MSB-first-per-byte convention `alloc_sig_structure_bits`
 /// (and `bellpepper`'s `sha256` gadget) use.
-fn native_bytes_to_bits<S: ff::PrimeField>(bytes: &[u8]) -> Vec<S> {
+pub(crate) fn native_bytes_to_bits<S: ff::PrimeField>(bytes: &[u8]) -> Vec<S> {
   bytes
     .iter()
     .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
@@ -209,7 +209,7 @@ fn native_bytes_to_bits<S: ff::PrimeField>(bytes: &[u8]) -> Vec<S> {
 /// `Boolean`) — the same per-bit pattern used repeatedly by this circuit's
 /// public outputs, factored out since it's now needed for `z` and five
 /// MSO-body fields.
-fn inputize_bits<S: ff::PrimeField, CS: ConstraintSystem<S>>(
+pub(crate) fn inputize_bits<S: ff::PrimeField, CS: ConstraintSystem<S>>(
   cs: &mut CS,
   bits: &[Boolean],
   label: &str,

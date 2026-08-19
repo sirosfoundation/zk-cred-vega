@@ -5,12 +5,15 @@
 //! over R1CS, no trusted setup) but has zero credential-specific code. This
 //! crate supplies the mdoc-shaped circuit and the mobile-facing API on top
 //! of it: one `VegaCircuit` "step" per disclosed/checked mdoc element
-//! (`ClaimDigestStepCircuit`, this file), verifying its SHA-256 digest, and
-//! one "core" circuit (`mdoc_core::MdocCoreCircuit`) proving a real
-//! ECDSA-P256 signature over those digests, folded together via
+//! (`ClaimDigestStepCircuit`, this file), verifying its SHA-256 digest and
+//! — only when `ClaimWitness::disclose` is set — also exposing the
+//! claim's plaintext bytes (masked to all-zero otherwise, see that type's
+//! doc), and one "core" circuit (`mdoc_core::MdocCoreCircuit`) proving a
+//! real ECDSA-P256 signature over those digests, folded together via
 //! `vega_mc_zkp`. See `HANDOFF.md` for full status against the tracked
-//! plan (real MSO byte framing and a security review are still open) and
-//! `ffi_api` for the UniFFI-exported surface consumed by the native SDKs.
+//! plan (a further security-review pass and iOS packaging are still
+//! open) and `ffi_api` for the UniFFI-exported surface consumed by the
+//! native SDKs.
 
 pub mod ecdsa;
 #[cfg(feature = "uniffi")]
@@ -92,13 +95,21 @@ pub struct ClaimWitness {
   pub disclose: bool,
 }
 
-/// Step circuit: computes SHA-256 over one `IssuerSignedItem`'s bytes and
-/// exposes the digest as a public value. The corresponding
-/// `valueDigests[namespace][digestID]` comparison against this exposed
-/// digest, and the decision of whether to also expose the plaintext value,
-/// is the core circuit's job (`MdocCoreCircuit`) — this keeps the
-/// expensive per-claim SHA-256 work foldable across steps rather than
-/// repeated in the core circuit.
+/// Step circuit: computes SHA-256 over one `IssuerSignedItem`'s bytes,
+/// always exposing the digest as a public value, and — only when
+/// `disclose` is true — also exposing the plaintext bytes themselves
+/// (masked to all-zero otherwise, so an undisclosed claim's value never
+/// leaks). The corresponding `valueDigests[namespace][digestID]`
+/// comparison against the exposed digest is the core circuit's job
+/// (`MdocCoreCircuit`) — this keeps the expensive per-claim SHA-256 work
+/// foldable across steps rather than repeated in the core circuit.
+///
+/// The `disclosed` flag and masked plaintext are exposed *every* step
+/// (never a variable-length/variable-count output) because NeutronNova
+/// folds instances of identical R1CS shape — a step's public-value count
+/// can't depend on its own witness. Masking (`plaintext_bit = claim_bit
+/// AND disclosed`) rather than conditionally omitting bits is what keeps
+/// that shape fixed while still not leaking undisclosed values.
 ///
 /// Modeled directly on `vega-prover`'s own `benches/sha256_vega_mc_zkp.rs`
 /// `Sha256StepCircuit`, using the full-message `sha256` gadget (handles
@@ -107,13 +118,15 @@ pub struct ClaimWitness {
 #[derive(Clone, Debug)]
 pub struct ClaimDigestStepCircuit<Eng: Engine> {
   bytes: Vec<u8>,
+  disclose: bool,
   _p: PhantomData<Eng>,
 }
 
 impl<Eng: Engine> ClaimDigestStepCircuit<Eng> {
-  pub fn new(bytes: Vec<u8>) -> Self {
+  pub fn new(bytes: Vec<u8>, disclose: bool) -> Self {
     Self {
       bytes,
+      disclose,
       _p: PhantomData,
     }
   }
@@ -134,13 +147,19 @@ where
   Eng::Scalar: PrimeFieldBits,
 {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
-    Ok(
-      self
-        .digest_bits()
-        .into_iter()
-        .map(|b| if b { Eng::Scalar::ONE } else { Eng::Scalar::ZERO })
-        .collect(),
-    )
+    let mut values: Vec<Eng::Scalar> = self
+      .digest_bits()
+      .into_iter()
+      .map(|b| if b { Eng::Scalar::ONE } else { Eng::Scalar::ZERO })
+      .collect();
+    values.push(if self.disclose { Eng::Scalar::ONE } else { Eng::Scalar::ZERO });
+    let disclosed_bytes: Vec<u8> = if self.disclose {
+      self.bytes.clone()
+    } else {
+      vec![0u8; self.bytes.len()]
+    };
+    values.extend(mdoc_core::native_bytes_to_bits::<Eng::Scalar>(&disclosed_bytes));
+    Ok(values)
   }
 
   fn shared<CS: ConstraintSystem<Eng::Scalar>>(
@@ -166,26 +185,24 @@ where
       .collect::<Result<Vec<_>, _>>()?;
 
     let digest_bits = sha256(cs.namespace(|| "sha256(issuer_signed_item)"), &input_bits)?;
+    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &digest_bits, "digest")?;
 
-    for (i, bit) in digest_bits.iter().enumerate() {
-      let value = bit.get_value().map(|b| {
-        if b {
-          Eng::Scalar::ONE
-        } else {
-          Eng::Scalar::ZERO
-        }
-      });
-      let num = AllocatedNum::alloc(cs.namespace(|| format!("digest bit {i} as num")), || {
-        value.ok_or(SynthesisError::AssignmentMissing)
-      })?;
-      cs.enforce(
-        || format!("digest bit {i} matches boolean"),
-        |lc| lc + &bit.lc(CS::one(), Eng::Scalar::ONE),
-        |lc| lc + CS::one(),
-        |lc| lc + num.get_variable(),
-      );
-      num.inputize(cs.namespace(|| format!("inputize digest bit {i}")))?;
-    }
+    let disclose_bit = Boolean::from(AllocatedBit::alloc(
+      cs.namespace(|| "disclose"),
+      Some(self.disclose),
+    )?);
+    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, std::slice::from_ref(&disclose_bit), "disclose")?;
+
+    // Expose the claim's plaintext bits only when disclosed, all-zero
+    // otherwise. `b AND disclose` is exactly "b if disclosed else 0"
+    // since both operands are already boolean-constrained — this is the
+    // masking scheme the type doc above describes.
+    let masked_bits: Vec<Boolean> = input_bits
+      .iter()
+      .enumerate()
+      .map(|(i, b)| Boolean::and(cs.namespace(|| format!("mask claim bit {i}")), b, &disclose_bit))
+      .collect::<Result<Vec<_>, _>>()?;
+    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &masked_bits, "claim_plaintext")?;
 
     Ok(vec![])
   }
@@ -278,7 +295,7 @@ pub struct VegaMdocKeys {
 
 /// Runs `VegaMcZkSNARK::setup` for the fixed claim-count circuit shape.
 pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
-  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1]);
+  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1], false);
   let w = setup_prototype_ecdsa_witness();
   let core_proto = MdocCoreCircuit::<Engine_>::new(
     w.qx,
@@ -390,7 +407,7 @@ pub fn prep_prove(
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
+    .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone(), c.disclose))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -417,7 +434,7 @@ pub fn prove(
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
+    .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone(), c.disclose))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -462,6 +479,34 @@ fn bits_to_bytes(bits: &[<Engine_ as Engine>::Scalar]) -> Vec<u8> {
     .collect()
 }
 
+/// One claim slot's verified disclosure outcome: whether it was disclosed,
+/// its digest (always meaningful — this is what's checked against
+/// `valueDigests`), and its plaintext `IssuerSignedItem` bytes (padded to
+/// `MAX_CLAIM_BYTES_V1`, all-zero when `disclosed` is false — never
+/// meaningful in that case, see `ClaimDigestStepCircuit`'s doc for why
+/// it's masked rather than simply absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisclosedClaim {
+  pub disclosed: bool,
+  pub digest: [u8; 32],
+  pub plaintext: Vec<u8>,
+}
+
+/// The fully verified, bound public output of a presentation — everything
+/// [`verify_and_check_binding`] extracted from `verify`'s two return
+/// values after confirming they're genuinely bound together.
+#[derive(Debug, Clone)]
+pub struct VerifiedPresentation {
+  pub qx: <Engine_ as Engine>::Scalar,
+  pub qy: <Engine_ as Engine>::Scalar,
+  pub claims: Vec<DisclosedClaim>,
+  pub device_x: [u8; 32],
+  pub device_y: [u8; 32],
+  pub signed_ts: [u8; mso::TIMESTAMP_LEN],
+  pub valid_from_ts: [u8; mso::TIMESTAMP_LEN],
+  pub valid_until_ts: [u8; mso::TIMESTAMP_LEN],
+}
+
 /// The step<->core binding check `mdoc_core`'s module doc describes: given
 /// `verify`'s two outputs, independently reconstructs the real MSO
 /// `Sig_structure` (`crate::mso`) from *only* public data — the step
@@ -471,13 +516,14 @@ fn bits_to_bytes(bits: &[<Engine_ as Engine>::Scalar]) -> Vec<u8> {
 /// that gives "the ECDSA signature core proved is valid" and "these are
 /// the digests step proved" any actual connection to each other — without
 /// it, a prover could mix a valid core proof for one claim set with valid
-/// step proofs for a *different* one. Returns the parsed `(qx, qy)`
-/// public key on success, since a caller will need it (e.g. to check `Q`
-/// against a trust anchor — see `mdoc_core`'s module doc).
+/// step proofs for a *different* one. Returns everything a caller needs on
+/// success: `Q` (for trust-anchor checking), each claim's disclosed
+/// plaintext (or just its digest, if undisclosed), and the MSO-body fields
+/// (for expiry/device-binding checks) — see `VerifiedPresentation`.
 pub fn verify_and_check_binding(
   step_public_values: &[Vec<<Engine_ as Engine>::Scalar>],
   core_public_values: &[<Engine_ as Engine>::Scalar],
-) -> Result<(<Engine_ as Engine>::Scalar, <Engine_ as Engine>::Scalar), VegaMdocError> {
+) -> Result<VerifiedPresentation, VegaMdocError> {
   // qx, qy, z(256), device_x(256), device_y(256), signed_ts(160),
   // valid_from_ts(160), valid_until_ts(160) — must match
   // MdocCoreCircuit::public_values's exact order.
@@ -503,19 +549,45 @@ pub fn verify_and_check_binding(
   if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
+  // digest(256) + disclosed flag(1) + masked plaintext(MAX_CLAIM_BYTES_V1*8)
+  // per step — must match ClaimDigestStepCircuit::public_values's exact
+  // order.
+  const STEP_LEN: usize = 256 + 1 + MAX_CLAIM_BYTES_V1 * 8;
   let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(step_public_values.len());
+  let mut claims: Vec<DisclosedClaim> = Vec::with_capacity(step_public_values.len());
   for v in step_public_values {
-    if v.len() != 256 {
+    if v.len() != STEP_LEN {
       // A malformed/attacker-controlled proof could carry a step public
       // value vector of the wrong length — reject it instead of letting
       // the try_into below panic (a process abort across the UniFFI
       // boundary, not a rejected proof).
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
-    let digest: [u8; 32] = bits_to_bytes(v)
+    let digest_bits = &v[0..256];
+    let disclosed_scalar = v[256];
+    let plaintext_bits = &v[257..STEP_LEN];
+
+    let digest: [u8; 32] = bits_to_bytes(digest_bits)
       .try_into()
       .map_err(|_| VegaMdocError::Circuit(SynthesisError::Unsatisfiable))?;
+    let disclosed = if disclosed_scalar == <Engine_ as Engine>::Scalar::ONE {
+      true
+    } else if disclosed_scalar == <Engine_ as Engine>::Scalar::ZERO {
+      false
+    } else {
+      // Can't happen for a genuinely-satisfied proof (precommitted() only
+      // ever inputizes a {0,1}-constrained value here) — but don't
+      // silently treat "neither" as "not disclosed".
+      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+    };
+    let plaintext = bits_to_bytes(plaintext_bits);
+
     claim_digests.push(digest);
+    claims.push(DisclosedClaim {
+      disclosed,
+      digest,
+      plaintext,
+    });
   }
 
   let mso_body = mso::MsoBodyWitness {
@@ -533,7 +605,16 @@ pub fn verify_and_check_binding(
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
 
-  Ok((qx, qy))
+  Ok(VerifiedPresentation {
+    qx,
+    qy,
+    claims,
+    device_x,
+    device_y,
+    signed_ts,
+    valid_from_ts,
+    valid_until_ts,
+  })
 }
 
 fn native_bytes_to_bits_pub(bytes: &[u8]) -> Vec<<Engine_ as Engine>::Scalar> {
@@ -593,15 +674,24 @@ mod tests {
     }
   }
 
-  fn expected_step_digest_bits(bytes: &[u8]) -> Vec<<Engine_ as Engine>::Scalar> {
+  /// Independently computes the exact public-value vector
+  /// `ClaimDigestStepCircuit::public_values` should produce for `bytes`/
+  /// `disclose` — digest bits, then the disclosed flag, then the masked
+  /// plaintext bits — without calling the circuit's own code, so a real
+  /// implementation bug in any of the three parts shows up as a mismatch.
+  fn expected_step_public_values(bytes: &[u8], disclose: bool) -> Vec<<Engine_ as Engine>::Scalar> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher
+    let mut values: Vec<<Engine_ as Engine>::Scalar> = hasher
       .finalize()
       .iter()
       .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
       .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
-      .collect()
+      .collect();
+    values.push(if disclose { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO });
+    let disclosed_bytes: Vec<u8> = if disclose { bytes.to_vec() } else { vec![0u8; bytes.len()] };
+    values.extend(mdoc_core::native_bytes_to_bits::<<Engine_ as Engine>::Scalar>(&disclosed_bytes));
+    values
   }
 
   /// Note important for anyone signing the ECDSA verification path itself
@@ -631,17 +721,17 @@ mod tests {
     let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
     let (step_public_values, _core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
-    // Confirm the circuit is actually constraining the real digest, not
+    // Confirm the circuit is actually constraining the real values, not
     // vacuously satisfiable: the padded claim set is [Doe, Jane, pad, pad]
-    // (see `pad_claims`), so check the exposed public values for the two
-    // real claims equal an independently-computed SHA-256 over their
-    // (zero-padded-to-MAX_CLAIM_BYTES_V1) bytes.
+    // (see `pad_claims`), so check the exposed public values (digest +
+    // disclosed flag + masked plaintext) for all four slots equal an
+    // independently-computed expectation.
     let padded = pad_claims(&claims).expect("pad_claims");
     for (step_values, claim) in step_public_values.iter().zip(padded.iter()) {
       assert_eq!(
         step_values,
-        &expected_step_digest_bits(&claim.issuer_signed_item_bytes),
-        "step circuit's exposed public digest must equal the real SHA-256 of its claim bytes"
+        &expected_step_public_values(&claim.issuer_signed_item_bytes, claim.disclose),
+        "step circuit's exposed public values must match digest + disclosed flag + masked plaintext"
       );
     }
   }
@@ -664,9 +754,13 @@ mod tests {
         issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
         disclose: true,
       },
+      // Deliberately NOT disclosed — proves the claim exists and is
+      // digest-committed, but its value stays private. Exercises the
+      // masking path (`full_presentation_verifies_and_binds` previously
+      // only ever exercised all-disclosed claims).
       ClaimWitness {
         issuer_signed_item_bytes: b"age_over_18:true".to_vec(),
-        disclose: true,
+        disclose: false,
       },
     ];
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
@@ -676,10 +770,29 @@ mod tests {
     let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
     let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
-    let (qx, qy) = verify_and_check_binding(&step_public_values, &core_public_values)
+    let verified = verify_and_check_binding(&step_public_values, &core_public_values)
       .expect("binding check must pass for a genuinely-matching signature+digests");
-    assert_eq!(qx, ecdsa_witness.qx);
-    assert_eq!(qy, ecdsa_witness.qy);
+    assert_eq!(verified.qx, ecdsa_witness.qx);
+    assert_eq!(verified.qy, ecdsa_witness.qy);
+
+    let padded = pad_claims(&claims).expect("pad_claims");
+    assert_eq!(verified.claims.len(), padded.len());
+    for (verified_claim, expected) in verified.claims.iter().zip(padded.iter()) {
+      assert_eq!(verified_claim.disclosed, expected.disclose);
+      assert_eq!(verified_claim.digest, claim_digest_bytes(&expected.issuer_signed_item_bytes));
+      if expected.disclose {
+        assert_eq!(
+          verified_claim.plaintext, expected.issuer_signed_item_bytes,
+          "a disclosed claim's plaintext must round-trip through the proof"
+        );
+      } else {
+        assert_eq!(
+          verified_claim.plaintext,
+          vec![0u8; MAX_CLAIM_BYTES_V1],
+          "an undisclosed claim's plaintext must be masked to all-zero"
+        );
+      }
+    }
 
     // The fold-and-reuse prep state must also work for a second
     // presentation of the same credential (a different verifier, say) —
@@ -720,7 +833,7 @@ mod tests {
     let padded = pad_claims(&real_claims).expect("pad_claims");
     let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
       .iter()
-      .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
+      .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone(), c.disclose))
       .collect();
 
     let mismatched_digests = core_claim_digests(&other_claims).expect("core_claim_digests");
