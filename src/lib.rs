@@ -18,6 +18,11 @@
 //! digests came from a validly-signed MSO. Do not treat it as a credential
 //! presentation proof until Phase 2 is done.
 
+pub mod ecdsa;
+pub mod gadget_utils;
+pub mod nonnative;
+pub mod p256_ecc;
+
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
