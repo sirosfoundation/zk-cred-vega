@@ -20,6 +20,7 @@
 
 pub mod ecdsa;
 pub mod gadget_utils;
+pub mod mdoc_core;
 pub mod nonnative;
 pub mod p256_ecc;
 
@@ -30,6 +31,8 @@ use bellpepper_core::{
   num::AllocatedNum,
 };
 use ff::{Field, PrimeFieldBits};
+use mdoc_core::MdocCoreCircuit;
+use num_bigint::BigInt;
 use sha2::{Digest, Sha256};
 use std::marker::PhantomData;
 use vega_prover::{
@@ -93,9 +96,9 @@ pub struct ClaimWitness {
 /// exposes the digest as a public value. The corresponding
 /// `valueDigests[namespace][digestID]` comparison against this exposed
 /// digest, and the decision of whether to also expose the plaintext value,
-/// is the core circuit's job (today: a Phase 1 stub; Phase 2: real MSO
-/// binding) — this keeps the expensive per-claim SHA-256 work foldable
-/// across steps rather than repeated in the core circuit.
+/// is the core circuit's job (`MdocCoreCircuit`) — this keeps the
+/// expensive per-claim SHA-256 work foldable across steps rather than
+/// repeated in the core circuit.
 ///
 /// Modeled directly on `vega-prover`'s own `benches/sha256_vega_mc_zkp.rs`
 /// `Sha256StepCircuit`, using the full-message `sha256` gadget (handles
@@ -202,62 +205,54 @@ where
   }
 }
 
-/// Phase 1 stub core circuit. Real job (Phase 2): parse `issuerAuth`,
-/// verify its ECDSA-P256 COSE_Sign1 signature over the MSO, and check each
-/// step circuit's exposed digest against the matching `valueDigests` entry.
-/// For now it exposes a single constant public value, matching
-/// `vega-prover`'s own trivial `CoreCircuit` bench shape, purely to keep
-/// the "N steps + 1 core" structure `vega_mc_zkp` requires while the real
-/// binding logic is built.
+/// The ECDSA-P256 signature + issuer-key half of a presentation's witness
+/// (see `mdoc_core::MdocCoreCircuit`) — everything the core circuit needs
+/// beyond the per-claim digests already carried by `ClaimWitness`.
 #[derive(Clone, Debug)]
-pub struct StubCoreCircuit<Eng: Engine>(PhantomData<Eng>);
-
-impl<Eng: Engine> StubCoreCircuit<Eng> {
-  pub fn new() -> Self {
-    Self(PhantomData)
-  }
+pub struct MdocEcdsaWitness {
+  pub qx: <Engine_ as Engine>::Scalar,
+  pub qy: <Engine_ as Engine>::Scalar,
+  pub r: BigInt,
+  pub s: BigInt,
+  pub s_inv: BigInt,
 }
 
-impl<Eng: Engine> Default for StubCoreCircuit<Eng> {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-impl<Eng: Engine> VegaCircuit<Eng> for StubCoreCircuit<Eng> {
-  fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
-    Ok(vec![Eng::Scalar::ZERO])
-  }
-
-  fn shared<CS: ConstraintSystem<Eng::Scalar>>(
-    &self,
-    _cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
-    Ok(vec![])
-  }
-
-  fn precommitted<CS: ConstraintSystem<Eng::Scalar>>(
-    &self,
-    cs: &mut CS,
-    _shared: &[AllocatedNum<Eng::Scalar>],
-  ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
-    let x = AllocatedNum::alloc(cs.namespace(|| "core stub x"), || Ok(Eng::Scalar::ZERO))?;
-    x.inputize(cs.namespace(|| "inputize core stub x"))?;
-    Ok(vec![])
-  }
-
-  fn num_challenges(&self) -> usize {
-    0
-  }
-
-  fn synthesize<CS: ConstraintSystem<Eng::Scalar>>(
-    &self,
-    _cs: &mut CS,
-    _shared: &[AllocatedNum<Eng::Scalar>],
-    _precommitted: &[AllocatedNum<Eng::Scalar>],
-    _challenges: Option<&[Eng::Scalar]>,
-  ) -> Result<(), SynthesisError> {
-    Ok(())
+/// A real, valid P-256 ECDSA signature over
+/// `SHA-256([0u8; 32] repeated MAX_CLAIMS_V1 times)` — i.e. genuinely
+/// satisfying the ECDSA relation for exactly the `z` that
+/// `MdocCoreCircuit::native_z_bytes` computes for setup's own all-zero
+/// `claim_digests` prototype below — generated once via RustCrypto's
+/// `p256` crate and frozen here as constants. Used only as [`setup`]'s
+/// prototype circuit witness.
+///
+/// Genuinely satisfying the relation (not just "non-degenerate") matters:
+/// an internally-inconsistent prototype (valid-looking scalars that don't
+/// actually satisfy the signed relation) was tried first and produced a
+/// setup whose real proofs failed PCS verification (`InvalidPCS: Inner
+/// product argument verify: First equation failed`) despite the same
+/// proofs' own R1CS constraints being individually satisfied — i.e. an
+/// unsatisfiable *prototype* witness can still poison the derived prover
+/// key in a way that doesn't surface until a real `verify()` call, not at
+/// `setup()` itself. Don't assume "any non-degenerate values work here"
+/// without a real round-trip test backing it, per this crate's own
+/// `full_presentation_verifies_and_binds` test.
+fn setup_prototype_ecdsa_witness() -> MdocEcdsaWitness {
+  use crate::nonnative::util::nat_to_f;
+  let parse = |s: &str| s.parse::<BigInt>().expect("valid decimal constant");
+  MdocEcdsaWitness {
+    qx: nat_to_f(&parse(
+      "51206722373641483558790322998827362250192835690568432297698399643535245670501",
+    ))
+    .unwrap(),
+    qy: nat_to_f(&parse(
+      "107332639522564059748513735225121084070027309383763098932131650999881938986788",
+    ))
+    .unwrap(),
+    r: parse("34158886365188924995576805369414955546695446637758572275049680737384481638550"),
+    s: parse("50742202422105296391539965653035028790698587237099104849136725216325886541360"),
+    s_inv: parse(
+      "96193774504579357202359351098485493149433497819343073080230082391271389319288",
+    ),
   }
 }
 
@@ -271,9 +266,27 @@ pub struct VegaMdocKeys {
 /// Runs `VegaMcZkSNARK::setup` for the fixed claim-count circuit shape.
 pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
   let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1]);
-  let core_proto = StubCoreCircuit::<Engine_>::new();
+  let w = setup_prototype_ecdsa_witness();
+  let core_proto = MdocCoreCircuit::<Engine_>::new(
+    w.qx,
+    w.qy,
+    w.r,
+    w.s,
+    w.s_inv,
+    vec![[0u8; 32]; MAX_CLAIMS_V1],
+  );
   let (pk, vk) = VegaMcZkSNARK::<Engine_>::setup(&step_proto, &core_proto, MAX_CLAIMS_V1)?;
   Ok(VegaMdocKeys { pk, vk })
+}
+
+/// SHA-256 of `bytes`, as a `[u8; 32]` — the same digest a
+/// [`ClaimDigestStepCircuit`] over the same bytes exposes (bit-for-bit,
+/// modulo the bits-vs-bytes representation), used to build the core
+/// circuit's `claim_digests` witness so the two actually agree.
+fn claim_digest_bytes(bytes: &[u8]) -> [u8; 32] {
+  let mut hasher = Sha256::new();
+  hasher.update(bytes);
+  hasher.finalize().into()
 }
 
 /// Pads `bytes` to exactly `MAX_CLAIM_BYTES_V1` bytes (fixed circuit width
@@ -322,18 +335,41 @@ fn pad_claims(claims: &[ClaimWitness]) -> Result<Vec<ClaimWitness>, VegaMdocErro
 /// next call for the same credential, and `prep_prove` is skipped.
 pub struct VegaMdocPrepState(vega_prover::vega_mc_zkp::VegaMcPrepZkSNARK<Engine_>);
 
-/// Runs `prep_prove` once for a given credential's claim set.
+/// Builds the core circuit's `claim_digests` witness from a (pre-padding)
+/// claim set, in the same padded order `prep_prove`/`prove` use for the
+/// step circuits — the two must agree for `verify_and_check_binding` to
+/// pass.
+fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]>, VegaMdocError> {
+  let padded = pad_claims(claims)?;
+  Ok(
+    padded
+      .iter()
+      .map(|c| claim_digest_bytes(&c.issuer_signed_item_bytes))
+      .collect(),
+  )
+}
+
+/// Runs `prep_prove` once for a given credential's claim set and ECDSA
+/// witness.
 pub fn prep_prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
+  ecdsa_witness: &MdocEcdsaWitness,
 ) -> Result<VegaMdocPrepState, VegaMdocError> {
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
     .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
     .collect();
-  let core_circuit = StubCoreCircuit::<Engine_>::new();
-  let prep = VegaMcZkSNARK::<Engine_>::prep_prove(pk, &step_circuits, &core_circuit, true)?;
+  let core_circuit = MdocCoreCircuit::<Engine_>::new(
+    ecdsa_witness.qx,
+    ecdsa_witness.qy,
+    ecdsa_witness.r.clone(),
+    ecdsa_witness.s.clone(),
+    ecdsa_witness.s_inv.clone(),
+    core_claim_digests(claims)?,
+  );
+  let prep = VegaMcZkSNARK::<Engine_>::prep_prove(pk, &step_circuits, &core_circuit, false)?;
   Ok(VegaMdocPrepState(prep))
 }
 
@@ -342,6 +378,7 @@ pub fn prep_prove(
 pub fn prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
+  ecdsa_witness: &MdocEcdsaWitness,
   prep: VegaMdocPrepState,
 ) -> Result<(VegaMcZkSNARK<Engine_>, VegaMdocPrepState), VegaMdocError> {
   let padded = pad_claims(claims)?;
@@ -349,9 +386,16 @@ pub fn prove(
     .iter()
     .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
     .collect();
-  let core_circuit = StubCoreCircuit::<Engine_>::new();
+  let core_circuit = MdocCoreCircuit::<Engine_>::new(
+    ecdsa_witness.qx,
+    ecdsa_witness.qy,
+    ecdsa_witness.r.clone(),
+    ecdsa_witness.s.clone(),
+    ecdsa_witness.s_inv.clone(),
+    core_claim_digests(claims)?,
+  );
   let (proof, next_prep) =
-    VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, true)?;
+    VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, false)?;
   Ok((proof, VegaMdocPrepState(next_prep)))
 }
 
@@ -366,13 +410,111 @@ pub fn verify(
   Ok(proof.verify(vk, MAX_CLAIMS_V1)?)
 }
 
+/// The step<->core binding check `mdoc_core`'s module doc describes: given
+/// `verify`'s two outputs, confirms the core circuit's exposed ECDSA
+/// message digest `z` actually equals `SHA-256` of the step circuits'
+/// exposed digests concatenated in order. This is the check that gives
+/// "the ECDSA signature core proved is valid" and "these are the digests
+/// step proved" any actual connection to each other — without it, a
+/// prover could mix a valid core proof for one claim set with valid step
+/// proofs for a *different* one. Returns the parsed `(qx, qy)` public key
+/// on success, since a caller will need it (e.g. to check `Q` against a
+/// trust anchor) once framing is real (see `mdoc_core`'s module doc).
+pub fn verify_and_check_binding(
+  step_public_values: &[Vec<<Engine_ as Engine>::Scalar>],
+  core_public_values: &[<Engine_ as Engine>::Scalar],
+) -> Result<(<Engine_ as Engine>::Scalar, <Engine_ as Engine>::Scalar), VegaMdocError> {
+  if core_public_values.len() != 2 + 256 {
+    return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+  }
+  let qx = core_public_values[0];
+  let qy = core_public_values[1];
+  let core_z_bits = &core_public_values[2..2 + 256];
+
+  let mut hasher = Sha256::new();
+  for step_values in step_public_values {
+    for byte_bits in step_values.chunks(8) {
+      let mut byte = 0u8;
+      for (i, bit) in byte_bits.iter().enumerate() {
+        if *bit == <Engine_ as Engine>::Scalar::ONE {
+          byte |= 1 << (7 - i);
+        }
+      }
+      hasher.update([byte]);
+    }
+  }
+  let expected_z_bytes: [u8; 32] = hasher.finalize().into();
+  let expected_z_bits: Vec<<Engine_ as Engine>::Scalar> = expected_z_bytes
+    .iter()
+    .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+    .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
+    .collect();
+
+  if core_z_bits != expected_z_bits.as_slice() {
+    return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+  }
+
+  Ok((qx, qy))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::nonnative::util::nat_to_f;
+  use crate::p256_ecc::p256_order;
+  use num_bigint::Sign;
+  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
 
-  /// Phase 1 goal: the digest-matching circuit plumbing round-trips for
-  /// real through setup/prep_prove/prove/verify, independent of the (not
-  /// yet built) ECDSA-P256 core binding.
+  /// Signs `SHA-256(claim_digests concatenated)` — matching
+  /// `MdocCoreCircuit`'s own `native_z_bytes` exactly — with a fresh real
+  /// P-256 key, and returns the resulting `MdocEcdsaWitness`.
+  fn real_ecdsa_witness_over(claim_digests: &[[u8; 32]]) -> MdocEcdsaWitness {
+    let signing_key = SigningKey::from_bytes(&[42u8; 32].into()).expect("valid scalar");
+    let verifying_key = VerifyingKey::from(&signing_key);
+
+    let mut hasher = Sha256::new();
+    for d in claim_digests {
+      hasher.update(d);
+    }
+    let z_bytes: [u8; 32] = hasher.finalize().into();
+
+    let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
+    let r = BigInt::from_bytes_be(Sign::Plus, &signature.r().to_bytes());
+    let s = BigInt::from_bytes_be(Sign::Plus, &signature.s().to_bytes());
+
+    let n = p256_order();
+    let s_inv = s.modpow(&(n.clone() - BigInt::from(2)), &n);
+
+    let encoded = verifying_key.to_encoded_point(false);
+    let qx = BigInt::from_bytes_be(Sign::Plus, encoded.x().expect("uncompressed x"));
+    let qy = BigInt::from_bytes_be(Sign::Plus, encoded.y().expect("uncompressed y"));
+
+    MdocEcdsaWitness {
+      qx: nat_to_f(&qx).unwrap(),
+      qy: nat_to_f(&qy).unwrap(),
+      r,
+      s,
+      s_inv,
+    }
+  }
+
+  fn expected_step_digest_bits(bytes: &[u8]) -> Vec<<Engine_ as Engine>::Scalar> {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+      .finalize()
+      .iter()
+      .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+      .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
+      .collect()
+  }
+
+  /// Note important for anyone signing the ECDSA verification path itself
+  /// (independent of the mdoc-specific tests below): the P256 ECDSA
+  /// gadget's own correctness is exercised directly in `ecdsa::tests`
+  /// against RustCrypto vectors — these tests instead exercise the
+  /// *composition*: real digests really flowing from the step circuits
+  /// into the core circuit's signed message.
   #[test]
   fn round_trip_digest_only_proof() {
     let keys = setup().expect("setup");
@@ -387,9 +529,11 @@ mod tests {
         disclose: true,
       },
     ];
+    let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
+    let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
 
-    let prep = prep_prove(&keys.pk, &claims).expect("prep_prove");
-    let (proof, _next_prep) = prove(&keys.pk, &claims, prep).expect("prove");
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness).expect("prep_prove");
+    let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, prep).expect("prove");
     let (step_public_values, _core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     // Confirm the circuit is actually constraining the real digest, not
@@ -399,18 +543,113 @@ mod tests {
     // (zero-padded-to-MAX_CLAIM_BYTES_V1) bytes.
     let padded = pad_claims(&claims).expect("pad_claims");
     for (step_values, claim) in step_public_values.iter().zip(padded.iter()) {
-      let mut hasher = Sha256::new();
-      hasher.update(&claim.issuer_signed_item_bytes);
-      let expected_bits: Vec<<Engine_ as Engine>::Scalar> = hasher
-        .finalize()
-        .iter()
-        .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
-        .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
-        .collect();
       assert_eq!(
-        step_values, &expected_bits,
+        step_values,
+        &expected_step_digest_bits(&claim.issuer_signed_item_bytes),
         "step circuit's exposed public digest must equal the real SHA-256 of its claim bytes"
       );
     }
+  }
+
+  /// Phase 3 goal: a full presentation — real per-claim digests (step
+  /// circuits) *and* a real ECDSA-P256 signature genuinely computed over
+  /// those exact digests (core circuit) — round-trips through
+  /// setup/prep_prove/prove/verify, AND the verifier-side binding check
+  /// (`verify_and_check_binding`) confirms the two halves actually agree.
+  #[test]
+  fn full_presentation_verifies_and_binds() {
+    let keys = setup().expect("setup");
+
+    let claims = vec![
+      ClaimWitness {
+        issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+        disclose: true,
+      },
+      ClaimWitness {
+        issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
+        disclose: true,
+      },
+      ClaimWitness {
+        issuer_signed_item_bytes: b"age_over_18:true".to_vec(),
+        disclose: true,
+      },
+    ];
+    let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
+    let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
+
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness).expect("prep_prove");
+    let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, prep).expect("prove");
+    let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
+
+    let (qx, qy) = verify_and_check_binding(&step_public_values, &core_public_values)
+      .expect("binding check must pass for a genuinely-matching signature+digests");
+    assert_eq!(qx, ecdsa_witness.qx);
+    assert_eq!(qy, ecdsa_witness.qy);
+
+    // The fold-and-reuse prep state must also work for a second
+    // presentation of the same credential (a different verifier, say) —
+    // exercising `nextState`'s round-trip, not just a single `prove` call.
+    let (proof2, _next_prep2) =
+      prove(&keys.pk, &claims, &ecdsa_witness, next_prep).expect("second prove reusing prep state");
+    let (step_public_values2, core_public_values2) = verify(&proof2, &keys.vk).expect("verify 2");
+    verify_and_check_binding(&step_public_values2, &core_public_values2)
+      .expect("binding check must also pass for the reused-prep-state proof");
+  }
+
+  /// The negative case `mdoc_core`'s module doc calls out explicitly:
+  /// a core proof that's individually valid (real signature over *some*
+  /// digests) must NOT bind against a step proof over *different* claims.
+  ///
+  /// This can't be expressed through `prep_prove`/`prove` (this crate's
+  /// own wrapper functions always build the core circuit's digests from
+  /// the same `claims` used for the step circuits — see
+  /// `core_claim_digests`), so it drives `VegaMcZkSNARK` directly: step
+  /// circuits genuinely, self-consistently prove `real_claims`; the core
+  /// circuit genuinely, self-consistently signs `other_claims`' digests.
+  /// Both circuits are individually valid (so `verify()` itself succeeds)
+  /// — only `verify_and_check_binding`'s cross-circuit check should catch
+  /// the mismatch.
+  #[test]
+  fn binding_check_rejects_mismatched_claims() {
+    let keys = setup().expect("setup");
+
+    let real_claims = vec![ClaimWitness {
+      issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+      disclose: true,
+    }];
+    let other_claims = vec![ClaimWitness {
+      issuer_signed_item_bytes: b"family_name:Smith".to_vec(),
+      disclose: true,
+    }];
+
+    let padded = pad_claims(&real_claims).expect("pad_claims");
+    let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
+      .iter()
+      .map(|c| ClaimDigestStepCircuit::new(c.issuer_signed_item_bytes.clone()))
+      .collect();
+
+    let mismatched_digests = core_claim_digests(&other_claims).expect("core_claim_digests");
+    let ecdsa_witness = real_ecdsa_witness_over(&mismatched_digests);
+    let core_circuit = MdocCoreCircuit::<Engine_>::new(
+      ecdsa_witness.qx,
+      ecdsa_witness.qy,
+      ecdsa_witness.r,
+      ecdsa_witness.s,
+      ecdsa_witness.s_inv,
+      mismatched_digests,
+    );
+
+    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
+      .expect("prep_prove");
+    let (proof, _next_prep) =
+      VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false)
+        .expect("prove");
+    let (step_public_values, core_public_values) =
+      proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
+
+    assert!(
+      verify_and_check_binding(&step_public_values, &core_public_values).is_err(),
+      "a proof whose core circuit signs different claims than its step circuits disclose must fail the binding check"
+    );
   }
 }

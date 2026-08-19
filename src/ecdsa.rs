@@ -66,11 +66,54 @@ pub struct EcdsaP256Witness<Scalar: PrimeField> {
 }
 
 /// Constrains `w` to be a valid ECDSA-P256 signature. Adds no public
-/// inputs of its own — callers (the eventual mdoc core circuit, Phase 3)
-/// decide which of `Q`/`r`/`s`/`z` are public vs. kept private.
+/// inputs of its own — callers decide which of `Q`/`r`/`s`/`z` are public
+/// vs. kept private.
+///
+/// This is a thin wrapper around [`verify_ecdsa_p256_with_digest`] for
+/// callers (e.g. Phase 2's own tests) with `z` as an ordinary native
+/// witness value. `crate::mdoc_core::MdocCoreCircuit` (Phase 3) instead
+/// derives `z` from an in-circuit SHA-256 over other witness data and
+/// calls `verify_ecdsa_p256_with_digest` directly with that computed
+/// `BigNat`, so the two share every constraint except how `z` is sourced.
 pub fn verify_ecdsa_p256<Scalar, CS>(
   mut cs: CS,
   w: &EcdsaP256Witness<Scalar>,
+) -> Result<(), SynthesisError>
+where
+  Scalar: PrimeFieldBits,
+  CS: ConstraintSystem<Scalar>,
+{
+  let z_bn = BigNat::alloc_from_nat(
+    cs.namespace(|| "z"),
+    || Ok(w.z.clone()),
+    LIMB_WIDTH,
+    N_LIMBS,
+  )?;
+  z_bn.assert_well_formed(cs.namespace(|| "z well-formed"))?;
+
+  verify_ecdsa_p256_with_digest(
+    cs.namespace(|| "verify"),
+    w.qx,
+    w.qy,
+    &w.r,
+    &w.s,
+    &w.s_inv,
+    &z_bn,
+  )
+}
+
+/// Core of [`verify_ecdsa_p256`], taking the message digest as an
+/// already-allocated, already-well-formed `BigNat` rather than a native
+/// witness value — see that function's doc for why.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_ecdsa_p256_with_digest<Scalar, CS>(
+  mut cs: CS,
+  qx: Scalar,
+  qy: Scalar,
+  r: &BigInt,
+  s: &BigInt,
+  s_inv: &BigInt,
+  z_bn: &BigNat<Scalar>,
 ) -> Result<(), SynthesisError>
 where
   Scalar: PrimeFieldBits,
@@ -83,7 +126,7 @@ where
 
   let r_bn = BigNat::alloc_from_nat(
     cs.namespace(|| "r"),
-    || Ok(w.r.clone()),
+    || Ok(r.clone()),
     LIMB_WIDTH,
     N_LIMBS,
   )?;
@@ -91,23 +134,15 @@ where
 
   let s_bn = BigNat::alloc_from_nat(
     cs.namespace(|| "s"),
-    || Ok(w.s.clone()),
+    || Ok(s.clone()),
     LIMB_WIDTH,
     N_LIMBS,
   )?;
   s_bn.assert_well_formed(cs.namespace(|| "s well-formed"))?;
 
-  let z_bn = BigNat::alloc_from_nat(
-    cs.namespace(|| "z"),
-    || Ok(w.z.clone()),
-    LIMB_WIDTH,
-    N_LIMBS,
-  )?;
-  z_bn.assert_well_formed(cs.namespace(|| "z well-formed"))?;
-
   let s_inv_bn = BigNat::alloc_from_nat(
     cs.namespace(|| "s_inv"),
-    || Ok(w.s_inv.clone()),
+    || Ok(s_inv.clone()),
     LIMB_WIDTH,
     N_LIMBS,
   )?;
@@ -136,7 +171,7 @@ where
   // Q, the signer's public key, as a circuit witness — checked on-curve
   // rather than trusted, regardless of whether a caller treats it as
   // public or private (see module doc).
-  let q = AllocatedPoint::alloc(cs.namespace(|| "Q"), Some((w.qx, w.qy, false)))?;
+  let q = AllocatedPoint::alloc(cs.namespace(|| "Q"), Some((qx, qy, false)))?;
   q.check_on_curve(cs.namespace(|| "Q on curve"))?;
 
   let u1_g = g.scalar_mul(cs.namespace(|| "u1 * G"), &u1_bits)?;
