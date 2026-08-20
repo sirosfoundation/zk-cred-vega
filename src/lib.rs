@@ -24,6 +24,7 @@ pub mod gadget_utils;
 pub mod mdoc_core;
 pub mod mso;
 pub mod nonnative;
+pub mod onehot_cursor;
 pub mod p256_ecc;
 pub mod sha256_var;
 
