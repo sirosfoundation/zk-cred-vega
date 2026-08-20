@@ -23,6 +23,7 @@ pub mod mdoc_core;
 pub mod mso;
 pub mod nonnative;
 pub mod p256_ecc;
+pub mod sha256_var;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

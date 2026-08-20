@@ -13,7 +13,7 @@ vega-prover = { git = "https://github.com/microsoft/vega-prover.git", rev = "c0e
 bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }
-sha2 = "0.10.9"
+sha2 = { version = "0.10.9", features = ["compress"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 uniffi = { version = "0.32.0", optional = true, features = ["cli"] }
