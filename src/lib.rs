@@ -15,6 +15,8 @@
 //! open) and `ffi_api` for the UniFFI-exported surface consumed by the
 //! native SDKs.
 
+pub mod cbor_uint;
+pub mod digest_id_extract;
 pub mod ecdsa;
 #[cfg(feature = "uniffi")]
 pub mod ffi_api;
