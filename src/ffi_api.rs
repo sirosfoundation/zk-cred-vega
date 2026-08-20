@@ -329,6 +329,18 @@ mod tests {
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
   use sha2::{Digest, Sha256};
 
+  /// Builds claim bytes with `digest_id` genuinely CBOR-encoded at
+  /// `digest_id_extract::DIGEST_ID_OFFSET_BYTES` -- required now that
+  /// `ClaimDigestStepCircuit::precommitted` constrains exactly that
+  /// window (see `crate::ClaimWitness`'s doc); a bare string like
+  /// `b"family_name:Doe"` doesn't embed any digestID at all.
+  fn claim_bytes_with_digest_id(digest_id: u32, marker: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0xAAu8; crate::digest_id_extract::DIGEST_ID_OFFSET_BYTES];
+    bytes.extend(crate::cbor_uint::encode_cbor_uint(digest_id));
+    bytes.extend_from_slice(marker);
+    bytes
+  }
+
   /// A coordinate with a leading zero byte must still round-trip to a
   /// fixed 32-byte encoding — regression test for the truncation bug an
   /// independent review found (`BigInt::to_bytes_be` drops leading
@@ -364,12 +376,12 @@ mod tests {
 
     let claims = vec![
       FfiClaim {
-        issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(26, b"family_name:Doe"),
         disclose: true,
         digest_id: 26,
       },
       FfiClaim {
-        issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(300, b"given_name:Jane"),
         disclose: false,
         digest_id: 300,
       },
@@ -437,17 +449,21 @@ mod tests {
     let verified1 = verify(&vk, result1.proof_bytes).expect("verify 1");
     assert_eq!(verified1.qx, ecdsa_witness.qx);
     assert_eq!(verified1.qy, ecdsa_witness.qy);
+    let expected_claim0_bytes = claim_bytes_with_digest_id(26, b"family_name:Doe");
+    let expected_claim1_bytes = claim_bytes_with_digest_id(300, b"given_name:Jane");
     assert_eq!(verified1.claims.len(), crate::MAX_CLAIMS_V1);
     assert!(verified1.claims[0].disclosed);
-    assert_eq!(verified1.claims[0].real_len, b"family_name:Doe".len() as u32);
-    assert_eq!(verified1.claims[0].plaintext, b"family_name:Doe".to_vec());
+    assert_eq!(verified1.claims[0].real_len, expected_claim0_bytes.len() as u32);
+    assert_eq!(verified1.claims[0].plaintext, expected_claim0_bytes);
+    assert_eq!(verified1.claims[0].digest_id, 26);
     assert!(!verified1.claims[1].disclosed, "second claim wasn't disclosed");
-    assert_eq!(verified1.claims[1].real_len, b"given_name:Jane".len() as u32);
+    assert_eq!(verified1.claims[1].real_len, expected_claim1_bytes.len() as u32);
     assert_eq!(
       verified1.claims[1].plaintext,
-      vec![0u8; b"given_name:Jane".len()],
+      vec![0u8; expected_claim1_bytes.len()],
       "an undisclosed claim's plaintext must be masked to all-zero over the FFI boundary too"
     );
+    assert_eq!(verified1.claims[1].digest_id, 300);
     assert_eq!(verified1.device_x, mso_body_native.device_x.to_vec());
     assert_eq!(verified1.valid_until_ts, mso_body_native.valid_until_ts.to_vec());
 

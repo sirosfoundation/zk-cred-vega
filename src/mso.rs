@@ -55,15 +55,16 @@
 //! digestIDs/digest values, the device key, and the three validity
 //! timestamps vary per credential and cross as witness bytes.
 //!
-//! **This module's digestID binding is not yet enforced end to end**: the
-//! `digest_ids` witnessed here are caller-supplied native values, not yet
-//! cross-checked against what [`crate::digest_id_extract`] independently
-//! extracts from each claim's own bytes (see that module's doc for why
-//! that check matters, and `HANDOFF.md` for this gap's tracked status).
-//! What *is* now genuinely fixed: this module reconstructs a real
-//! issuer's exact `Sig_structure` bytes for *any* spec-legal digestID
-//! combination, not just the narrow `0..MAX_CLAIMS_V1` range this crate
-//! minted itself.
+//! This module reconstructs a real issuer's exact `Sig_structure` bytes
+//! for *any* spec-legal digestID combination, not just the narrow
+//! `0..MAX_CLAIMS_V1` range this crate used to mint itself. The
+//! `digest_ids` witnessed here are still caller-supplied native values —
+//! this module has no way to check them itself — but they're no longer
+//! trusted blindly end to end: [`crate::ClaimDigestStepCircuit`]
+//! independently extracts each claim's real, embedded digestID via
+//! [`crate::digest_id_extract`] and exposes it as a public value, and
+//! [`crate::verify_and_check_binding`] cross-checks it against the
+//! corresponding entry here, rejecting any proof where they disagree.
 
 use crate::mso_splice::{self, DigestIdEntry, ENTRY_TAIL_LEN};
 use bellpepper_core::{

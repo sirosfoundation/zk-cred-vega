@@ -106,9 +106,13 @@ pub struct ClaimWitness {
   pub issuer_signed_item_bytes: Vec<u8>,
   pub disclose: bool,
   /// This claim's real, spec-legal (`< 2^31`) `digestID` — see
-  /// `cbor_uint`'s module doc. **Not yet cross-checked against
-  /// `issuer_signed_item_bytes`' own embedded `digestID`** — see
-  /// `mdoc_core::MdocCoreCircuit`'s doc for this gap's tracked status.
+  /// `cbor_uint`'s module doc. Must genuinely be the `digestID` CBOR-
+  /// encoded inside `issuer_signed_item_bytes` at the offset
+  /// `digest_id_extract::DIGEST_ID_OFFSET_BYTES` documents — a mismatch
+  /// leaves `ClaimDigestStepCircuit`'s own constraints unsatisfied (see
+  /// `digest_id_extract`'s doc), and `crate::verify_and_check_binding`
+  /// separately cross-checks this value against what the core circuit
+  /// witnessed for the same claim.
   pub digest_id: u32,
 }
 
@@ -172,6 +176,16 @@ pub struct ClaimDigestStepCircuit<Eng: Engine> {
   bytes: Vec<u8>,
   real_len: usize,
   disclose: bool,
+  /// The claimed `digestID` for this claim — constrained (via
+  /// `digest_id_extract`) to genuinely match the `digestID` field
+  /// embedded inside `bytes` itself, and exposed as a public value so
+  /// `crate::verify_and_check_binding` can cross-check it against the
+  /// core circuit's own `digest_ids` witness. This is the check that
+  /// closes the interop gap `mdoc_core::MdocCoreCircuit`'s doc flags:
+  /// without it, a prover could witness one `digest_id` to the core
+  /// circuit (determining the MSO's byte layout) while a claim's real
+  /// bytes embed a different one.
+  digest_id: u32,
   _p: PhantomData<Eng>,
 }
 
@@ -179,13 +193,14 @@ impl<Eng: Engine> ClaimDigestStepCircuit<Eng> {
   /// `bytes` must be exactly `MAX_CLAIM_BYTES_V1` long; `real_len` (<=
   /// `MAX_CLAIM_BYTES_V1`) marks how many of those bytes are the real
   /// claim content.
-  pub fn new(bytes: Vec<u8>, real_len: usize, disclose: bool) -> Self {
+  pub fn new(bytes: Vec<u8>, real_len: usize, disclose: bool, digest_id: u32) -> Self {
     assert_eq!(bytes.len(), MAX_CLAIM_BYTES_V1, "bytes must be exactly MAX_CLAIM_BYTES_V1 long");
     assert!(real_len <= MAX_CLAIM_BYTES_V1, "real_len exceeds MAX_CLAIM_BYTES_V1");
     Self {
       bytes,
       real_len,
       disclose,
+      digest_id,
       _p: PhantomData,
     }
   }
@@ -226,6 +241,11 @@ where
       vec![0u8; self.bytes.len()]
     };
     values.extend(mdoc_core::native_bytes_to_bits::<Eng::Scalar>(&disclosed_bytes));
+    // digest_id, 32 bits MSB-first -- must match precommitted()'s
+    // digest_id_extract().value_bits exactly (that's the whole point:
+    // the exposed value is provably read out of `bytes` itself, not just
+    // echoed from this field).
+    values.extend(mdoc_core::native_u32_to_bits::<Eng::Scalar>(self.digest_id));
     Ok(values)
   }
 
@@ -299,6 +319,19 @@ where
       }
     }
     mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &masked_bits, "claim_plaintext")?;
+
+    // Extract digest_id directly from the claim's own bytes and expose
+    // it -- see this struct's `digest_id` field doc for why this is the
+    // check that closes the interop gap. `extract_digest_id` constrains
+    // the window at DIGEST_ID_OFFSET_BYTES to genuinely encode
+    // `self.digest_id`; `value_bits` is what gets exposed.
+    let extracted = digest_id_extract::extract_digest_id(
+      cs.namespace(|| "digest_id_extract"),
+      &input_bits,
+      digest_id_extract::DIGEST_ID_OFFSET_BYTES,
+      self.digest_id,
+    )?;
+    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &extracted.value_bits, "digest_id")?;
 
     Ok(vec![])
   }
@@ -391,7 +424,7 @@ pub struct VegaMdocKeys {
 
 /// Runs `VegaMcZkSNARK::setup` for the fixed claim-count circuit shape.
 pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
-  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1], 0, false);
+  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1], 0, false, 0);
   let w = setup_prototype_ecdsa_witness();
   let core_proto = MdocCoreCircuit::<Engine_>::new(
     w.qx,
@@ -531,7 +564,7 @@ pub fn prep_prove(
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose))
+    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -559,7 +592,7 @@ pub fn prove(
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose))
+    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -710,9 +743,9 @@ pub fn verify_and_check_binding(
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
   // digest(256) + disclosed flag(1) + real_len(REAL_LEN_BITS) + masked
-  // plaintext(MAX_CLAIM_BYTES_V1*8) per step — must match
+  // plaintext(MAX_CLAIM_BYTES_V1*8) + digest_id(32) per step — must match
   // ClaimDigestStepCircuit::public_values's exact order.
-  const STEP_LEN: usize = 256 + 1 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8;
+  const STEP_LEN: usize = 256 + 1 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8 + 32;
   let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(step_public_values.len());
   let mut claims: Vec<DisclosedClaim> = Vec::with_capacity(step_public_values.len());
   for v in step_public_values {
@@ -730,7 +763,9 @@ pub fn verify_and_check_binding(
     let digest_bits = &v[0..256];
     let disclosed_scalar = v[256];
     let real_len_bits = &v[257..257 + REAL_LEN_BITS];
-    let plaintext_bits = &v[257 + REAL_LEN_BITS..STEP_LEN];
+    let plaintext_end = 257 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8;
+    let plaintext_bits = &v[257 + REAL_LEN_BITS..plaintext_end];
+    let step_digest_id_bits = &v[plaintext_end..STEP_LEN];
 
     let digest: [u8; 32] = bits_to_bytes(digest_bits)
       .try_into()
@@ -746,6 +781,12 @@ pub fn verify_and_check_binding(
     }
     let plaintext_full = bits_to_bytes(plaintext_bits);
     let plaintext = plaintext_full[..real_len].to_vec();
+    let step_digest_id_bytes = bits_to_bytes(step_digest_id_bits);
+    let step_digest_id = u32::from_be_bytes(
+      step_digest_id_bytes
+        .try_into()
+        .map_err(|_| VegaMdocError::Circuit(SynthesisError::Unsatisfiable))?,
+    );
 
     // Free extra guard (found valuable by an independent review): for a
     // disclosed claim, the revealed plaintext is provably the SHA-256
@@ -759,13 +800,24 @@ pub fn verify_and_check_binding(
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
 
+    // The binding check this whole field exists for: the step circuit's
+    // own digest_id (provably extracted from this claim's real bytes —
+    // see ClaimDigestStepCircuit's doc) must equal what the core circuit
+    // witnessed for the same claim slot (used to build the MSO's
+    // valueDigests map key). Without this, a prover could witness one
+    // digest_id to the core circuit while a claim's real bytes embed a
+    // different one — see mdoc_core::MdocCoreCircuit's doc.
+    if step_digest_id != digest_ids[claims.len()] {
+      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+    }
+
     claim_digests.push(digest);
     claims.push(DisclosedClaim {
       disclosed,
       digest,
       real_len,
       plaintext,
-      digest_id: digest_ids[claims.len()],
+      digest_id: step_digest_id,
     });
   }
 
@@ -822,6 +874,20 @@ mod tests {
     }
   }
 
+  /// Builds claim bytes with `digest_id` genuinely CBOR-encoded at
+  /// `digest_id_extract::DIGEST_ID_OFFSET_BYTES` (arbitrary filler before,
+  /// `marker` after) -- since `ClaimDigestStepCircuit::precommitted` now
+  /// constrains exactly that window (see its doc), any test that calls
+  /// `precommitted`/goes through a real proof needs bytes shaped like
+  /// this, not a bare string. `marker` keeps otherwise-identical claims
+  /// distinguishable (different digests) in tests with multiple claims.
+  fn claim_bytes_with_digest_id(digest_id: u32, marker: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0xAAu8; digest_id_extract::DIGEST_ID_OFFSET_BYTES];
+    bytes.extend(cbor_uint::encode_cbor_uint(digest_id));
+    bytes.extend_from_slice(marker);
+    bytes
+  }
+
   /// Signs the real MSO `Sig_structure` (`crate::mso`) over
   /// `claim_digests` and [`test_mso_body`] — matching
   /// `MdocCoreCircuit`'s own `native_z_bytes` exactly — with a fresh real
@@ -863,14 +929,19 @@ mod tests {
   fn claim_digest_step_circuit_public_values_has_the_expected_shape() {
     let real_bytes = b"family_name:Doe";
     let (bytes, real_len) = fixed_width_claim_bytes(real_bytes).expect("fits");
-    let disclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, true)
+    // This test only calls public_values() (a plain, deterministic
+    // function of `self.digest_id`), never precommitted() -- so this
+    // digest_id doesn't need to genuinely appear in `real_bytes`'s own
+    // CBOR framing (unlike the full-pipeline tests below, which do).
+    let digest_id = 42u32;
+    let disclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, true, digest_id)
       .public_values()
       .expect("public_values");
-    let undisclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, false)
+    let undisclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, false, digest_id)
       .public_values()
       .expect("public_values");
 
-    const STEP_LEN: usize = 256 + 1 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8;
+    const STEP_LEN: usize = 256 + 1 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8 + 32;
     assert_eq!(disclosed.len(), STEP_LEN);
     assert_eq!(undisclosed.len(), STEP_LEN);
 
@@ -896,18 +967,26 @@ mod tests {
     );
     assert_eq!(bits_to_bytes(&undisclosed[257..real_len_end]), vec![real_len as u8]);
 
+    let plaintext_end = STEP_LEN - 32;
     let mut expected_disclosed_plaintext = real_bytes.to_vec();
     expected_disclosed_plaintext.resize(MAX_CLAIM_BYTES_V1, 0u8);
     assert_eq!(
-      bits_to_bytes(&disclosed[real_len_end..STEP_LEN]),
+      bits_to_bytes(&disclosed[real_len_end..plaintext_end]),
       expected_disclosed_plaintext,
       "disclosed plaintext slot must be the real claim bytes, zero-filled beyond real_len"
     );
     assert_eq!(
-      bits_to_bytes(&undisclosed[real_len_end..STEP_LEN]),
+      bits_to_bytes(&undisclosed[real_len_end..plaintext_end]),
       vec![0u8; MAX_CLAIM_BYTES_V1],
       "the plaintext slot must be masked to all-zero when undisclosed"
     );
+
+    assert_eq!(
+      bits_to_bytes(&disclosed[plaintext_end..STEP_LEN]),
+      digest_id.to_be_bytes().to_vec(),
+      "digest_id must be exposed regardless of disclosure"
+    );
+    assert_eq!(bits_to_bytes(&undisclosed[plaintext_end..STEP_LEN]), digest_id.to_be_bytes().to_vec());
   }
 
   /// Independently computes the exact public-value vector
@@ -919,6 +998,7 @@ mod tests {
     padded_bytes: &[u8],
     real_len: usize,
     disclose: bool,
+    digest_id: u32,
   ) -> Vec<<Engine_ as Engine>::Scalar> {
     let mut hasher = Sha256::new();
     hasher.update(&padded_bytes[..real_len]);
@@ -941,6 +1021,7 @@ mod tests {
       vec![0u8; padded_bytes.len()]
     };
     values.extend(mdoc_core::native_bytes_to_bits::<<Engine_ as Engine>::Scalar>(&disclosed_bytes));
+    values.extend(mdoc_core::native_u32_to_bits::<<Engine_ as Engine>::Scalar>(digest_id));
     values
   }
 
@@ -956,12 +1037,12 @@ mod tests {
 
     let claims = vec![
       ClaimWitness {
-        issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(26, b"family_name:Doe"),
         disclose: true,
         digest_id: 26,
       },
       ClaimWitness {
-        issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(300, b"given_name:Jane"),
         disclose: true,
         digest_id: 300,
       },
@@ -977,14 +1058,14 @@ mod tests {
     // Confirm the circuit is actually constraining the real values, not
     // vacuously satisfiable: the padded claim set is [Doe, Jane, pad, pad]
     // (see `pad_claims`), so check the exposed public values (digest +
-    // disclosed flag + masked plaintext) for all four slots equal an
-    // independently-computed expectation.
+    // disclosed flag + masked plaintext + digest_id) for all four slots
+    // equal an independently-computed expectation.
     let padded = pad_claims(&claims).expect("pad_claims");
     for (step_values, claim) in step_public_values.iter().zip(padded.iter()) {
       assert_eq!(
         step_values,
-        &expected_step_public_values(&claim.bytes, claim.real_len, claim.disclose),
-        "step circuit's exposed public values must match digest + disclosed flag + masked plaintext"
+        &expected_step_public_values(&claim.bytes, claim.real_len, claim.disclose, claim.digest_id),
+        "step circuit's exposed public values must match digest + disclosed flag + masked plaintext + digest_id"
       );
     }
   }
@@ -1000,12 +1081,12 @@ mod tests {
 
     let claims = vec![
       ClaimWitness {
-        issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(5, b"family_name:Doe"),
         disclose: true,
         digest_id: 5,
       },
       ClaimWitness {
-        issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(26, b"given_name:Jane"),
         disclose: true,
         digest_id: 26,
       },
@@ -1018,7 +1099,7 @@ mod tests {
       // padded set exercises every width this crate supports in one
       // real round trip.
       ClaimWitness {
-        issuer_signed_item_bytes: b"age_over_18:true".to_vec(),
+        issuer_signed_item_bytes: claim_bytes_with_digest_id(70000, b"age_over_18:true"),
         disclose: false,
         digest_id: 70000,
       },
@@ -1086,12 +1167,12 @@ mod tests {
     let keys = setup().expect("setup");
 
     let real_claims = vec![ClaimWitness {
-      issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
+      issuer_signed_item_bytes: claim_bytes_with_digest_id(5, b"family_name:Doe"),
       disclose: true,
       digest_id: 5,
     }];
     let other_claims = vec![ClaimWitness {
-      issuer_signed_item_bytes: b"family_name:Smith".to_vec(),
+      issuer_signed_item_bytes: claim_bytes_with_digest_id(5, b"family_name:Smith"),
       disclose: true,
       digest_id: 5,
     }];
@@ -1099,7 +1180,7 @@ mod tests {
     let padded = pad_claims(&real_claims).expect("pad_claims");
     let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
       .iter()
-      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose))
+      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
       .collect();
 
     let mismatched_digests = core_claim_digests(&other_claims).expect("core_claim_digests");
@@ -1127,6 +1208,65 @@ mod tests {
     assert!(
       verify_and_check_binding(&step_public_values, &core_public_values).is_err(),
       "a proof whose core circuit signs different claims than its step circuits disclose must fail the binding check"
+    );
+  }
+
+  /// The digest_id-specific analogue of the test above: a core proof
+  /// that's individually valid (a real ECDSA signature over one digestID
+  /// assignment) must NOT bind against a step proof whose own claim
+  /// genuinely embeds a *different* digestID -- isolating the new
+  /// `digest_id_extract`-based cross-check from the pre-existing
+  /// claim-digest cross-check (both halves agree on `claim_digests`/`z`
+  /// here; only the witnessed digestID differs). Without this check, a
+  /// prover could witness one digestID to the core circuit (determining
+  /// the MSO's byte layout) while a claim's real bytes embed another.
+  #[test]
+  fn binding_check_rejects_mismatched_digest_ids() {
+    let keys = setup().expect("setup");
+
+    // The step circuit genuinely, self-consistently proves this claim:
+    // its own bytes really embed digest_id=7, and it witnesses exactly
+    // that (digest_id_extract's own constraint requires this).
+    let claims = vec![ClaimWitness {
+      issuer_signed_item_bytes: claim_bytes_with_digest_id(7, b"family_name:Doe"),
+      disclose: true,
+      digest_id: 7,
+    }];
+    let padded = pad_claims(&claims).expect("pad_claims");
+    let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
+      .iter()
+      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
+      .collect();
+
+    // The core circuit signs the SAME claim_digests (so the pre-existing
+    // digest/z binding alone would pass) but under a DIFFERENT digestID
+    // -- a genuinely valid signature over a differently-keyed MSO.
+    let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
+    let mut wrong_digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
+    wrong_digest_ids[0] = 8; // differs from the step circuit's real digest_id=7
+    let ecdsa_witness = real_ecdsa_witness_over(&wrong_digest_ids, &claim_digests);
+    let core_circuit = MdocCoreCircuit::<Engine_>::new(
+      ecdsa_witness.qx,
+      ecdsa_witness.qy,
+      ecdsa_witness.r,
+      ecdsa_witness.s,
+      ecdsa_witness.s_inv,
+      wrong_digest_ids,
+      claim_digests,
+      test_mso_body(),
+    );
+
+    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
+      .expect("prep_prove");
+    let (proof, _next_prep) =
+      VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false)
+        .expect("prove");
+    let (step_public_values, core_public_values) =
+      proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
+
+    assert!(
+      verify_and_check_binding(&step_public_values, &core_public_values).is_err(),
+      "a proof whose core circuit witnesses a different digestID than what a claim's own step circuit extracts must fail the binding check"
     );
   }
 }

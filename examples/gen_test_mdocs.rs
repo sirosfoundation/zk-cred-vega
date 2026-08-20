@@ -25,14 +25,14 @@
 //! `0..MAX_CLAIMS_V1` range `mso.rs` used to hardcode, to exercise real
 //! spec-legal digestID interop end to end.
 //!
-//! **Still-open gap**: nothing in this crate's circuit yet binds the
-//! digestID used as an MSO map key to the `digestID` field embedded
-//! inside the corresponding `IssuerSignedItem`'s own CBOR bytes (a real
-//! verifier cross-checks exactly that — see `digest_id_extract`'s module
-//! doc). This generator keeps the two consistent by construction (both
-//! come from the same `DIGEST_IDS` entry) so it doesn't hit that gap, but
-//! the underlying circuit doesn't yet enforce it — flagged as follow-up
-//! work, not fixed here.
+//! The digestID used as an MSO map key really is bound to the `digestID`
+//! field embedded inside the corresponding `IssuerSignedItem`'s own CBOR
+//! bytes — `ClaimDigestStepCircuit` extracts it via `digest_id_extract`
+//! and `verify_and_check_binding` cross-checks it against the core
+//! circuit's witness. This generator keeps the two consistent by
+//! construction (both come from the same `DIGEST_IDS` entry) rather than
+//! exercising a deliberate mismatch — see `lib.rs`'s
+//! `binding_check_rejects_mismatched_digest_ids` test for that.
 
 use rand::RngCore;
 use serde::Serialize;

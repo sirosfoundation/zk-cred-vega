@@ -104,10 +104,11 @@ pub struct MdocCoreCircuit<Eng: Engine> {
   pub s: BigInt,
   pub s_inv: BigInt,
   /// Each claim's real, spec-legal (`< 2^31`) `digestID` — see
-  /// `cbor_uint`'s module doc — in the same order as `claim_digests`.
-  /// **Not yet cross-checked against what `digest_id_extract` would
-  /// independently extract from each claim's own bytes** — see
-  /// `crate::mso`'s module doc for this gap's tracked status.
+  /// `cbor_uint`'s module doc — in the same order as `claim_digests`. This
+  /// circuit alone can't check these are genuine (it never sees a
+  /// claim's raw bytes) — that's `crate::ClaimDigestStepCircuit`'s job,
+  /// via `digest_id_extract`; `crate::verify_and_check_binding`
+  /// cross-checks the two match, same pattern as `claim_digests` itself.
   pub digest_ids: [u32; crate::MAX_CLAIMS_V1],
   pub claim_digests: Vec<[u8; 32]>,
   pub mso_body: crate::mso::MsoBodyWitness,
@@ -153,7 +154,7 @@ impl<Eng: Engine> MdocCoreCircuit<Eng> {
 /// Big-endian 32-bit expansion of `value` — the same convention
 /// `digest_id_extract::ExtractedDigestId::value_bits` uses, so a future
 /// binding check between the two has nothing to reconcile.
-fn native_u32_to_bits<S: ff::PrimeField>(value: u32) -> Vec<S> {
+pub(crate) fn native_u32_to_bits<S: ff::PrimeField>(value: u32) -> Vec<S> {
   (0..32).map(|i| if (value >> (31 - i)) & 1 == 1 { S::ONE } else { S::ZERO }).collect()
 }
 
