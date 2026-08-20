@@ -10,8 +10,9 @@ code — no mdoc circuit, no ECDSA verifier, no mobile bindings, no
 distribution mechanism. This crate supplies all of that:
 
 - `ClaimDigestStepCircuit` (`src/lib.rs`) — one folded "step" per
-  disclosed/checked mdoc element, hashing its `IssuerSignedItem` bytes and
-  exposing the digest as a public value.
+  disclosed/checked mdoc element, hashing its real, variable-length
+  `IssuerSignedItem` bytes (`src/sha256_var.rs`) and exposing the digest
+  as a public value.
 - `MdocCoreCircuit` (`src/mdoc_core.rs`) — a real, in-circuit ECDSA-P256
   signature verification (`src/ecdsa.rs`, `src/p256_ecc.rs`,
   `src/nonnative/`), binding those digests to the issuer's signature.
@@ -55,39 +56,48 @@ truncation bug in the FFI layer's `qx`/`qy` encoding. Treat this as two
 real passes, not a clean bill of health for the crate as a whole — see
 below.
 
-**⚠️ The most important caveat, found by the second review: this crate
-cannot yet prove anything about a real, already-issued mdoc.** Every
-test here uses self-fabricated claim bytes the same test also signs.
-Verified directly against a real signed test vector
-(`zk-cred-longfellow/test-vectors/mdoc_zk/v6_v7_1attr_issue_date.json`):
+**The real-interop gap the second review found is now closed.** This
+crate can now prove things about realistic, salted ISO 18013-5 claims —
+not just self-fabricated short strings — verified end-to-end against a
+generated realistic test mdoc (`test-vectors/`, see below):
 
-- Real ISO 18013-5 `IssuerSignedItemBytes` (tag+bstr-wrapped, per spec)
-  for ordinary attributes run **79–95 bytes** — every real attribute
-  tested exceeds `MAX_CLAIM_BYTES_V1 = 64` and gets rejected outright.
-  This isn't a "large fields like portraits excluded" limitation; it's
-  *all* real attributes, because the mandatory ≥16-byte per-element salt
-  plus CBOR overhead alone exceeds 64 bytes.
-- Independent of that limit: this circuit hashes claim bytes *zero-
-  padded* to a fixed width, while a real issuer hashes the *exact,
-  unpadded* bytes for `valueDigests`. Raising the byte limit doesn't fix
-  this — it only changes which items get a silently wrong digest instead
-  of none of them. A real fix needs a variable-length-aware in-circuit
-  SHA-256 (real length as a witness, SHA-256's own padding applied at
-  the right position), not a bigger fixed buffer.
-- `mso.rs` also hardcodes `digestID`s `0..MAX_CLAIMS_V1`; real credentials
-  assign arbitrary issuer-chosen `digestID`s.
-- This also has a confidentiality consequence: an *undisclosed* claim's
-  digest is still exposed (it has to be, for the signature binding).
-  Combined with the size limit above, the only claim shapes that
-  currently fit this circuit are short, unsalted ones — exactly the
-  shapes a digest dictionary-attack works against.
+- A new variable-length SHA-256 gadget (`src/sha256_var.rs`) computes
+  each claim's digest over its *real*, witnessed length, matching a real
+  issuer's `valueDigests` computation, rather than zero-padding to a
+  fixed width first (which could never match, for any claim, at any
+  size — the old bug). `MAX_CLAIM_BYTES_V1` is raised from 64 to 128,
+  comfortably fitting real salted `IssuerSignedItemBytes` (measured
+  79–95 bytes against a real signed test vector).
+- `examples/gen_test_mdocs.rs` mints realistic test credentials (real
+  CBOR framing, real ≥16-byte per-element salts, real ECDSA-P256
+  signature over the real MSO `Sig_structure`) into `test-vectors/`;
+  `tests/real_mdoc_fixtures.rs` drives the full `setup → prep_prove →
+  prove → verify → verify_and_check_binding` pipeline against one and
+  passes — the load-bearing proof this actually works now, not just the
+  math checking out in isolation.
 
-None of this is a soundness bug in the reviewed sense (a forged proof) —
-it's a "this doesn't do the real-world job yet" gap. See `HANDOFF.md`
-(or ask for it) for the full writeup and a recommended fix direction.
+**`sha256_var` is genuinely novel, soundness-critical circuit code and
+has NOT had an independent review yet** — flagged explicitly in its own
+module doc. Treat it with the same caution the ECDSA gadget warranted
+before its review found two critical bugs.
 
 **Other known gaps:**
 
+- **Selective disclosure only withholds plaintext, not the digest** — an
+  undisclosed claim's digest is still exposed (needed for the signature
+  binding). Real ISO 18013-5 salting (which this crate now correctly
+  carries through, since real salted items fit) means this digest can't
+  be trivially dictionary-attacked *if the salt is present* — but this is
+  a separate confidentiality/unlinkability question (stable digests
+  across verifiers/presentations) that the interop fix doesn't address
+  on its own. See `HANDOFF.md`.
+- **`mso.rs` hardcodes `digestID`s `0..MAX_CLAIMS_V1`**, and — a deeper
+  issue than the literal values — nothing in the circuit currently binds
+  the digestID used as an MSO map key to the `digestID` field embedded
+  inside the corresponding `IssuerSignedItem`'s own CBOR bytes, which a
+  real verifier does cross-check. `examples/gen_test_mdocs.rs` keeps the
+  two consistent by construction (both come from the same loop index),
+  but the circuit itself doesn't enforce it yet.
 - **Fixed circuit shape**: exactly 4 claims, one P-256 signer
   (`MAX_CLAIMS_V1`/`MAX_CLAIM_BYTES_V1` in `src/lib.rs`).
 - ECDSA `r`/`s` aren't range-checked to `[1, n-1]`, and the non-native
@@ -112,6 +122,14 @@ cargo test --release
 
 `--release` matters for the tests: this proving system is slow in debug
 builds.
+
+To regenerate the realistic test mdoc fixture and run the full-pipeline
+test against it:
+
+```
+cargo run --release --example gen_test_mdocs   # writes test-vectors/*.json
+cargo test --release --test real_mdoc_fixtures
+```
 
 To build the UniFFI layer and generate Kotlin bindings:
 
