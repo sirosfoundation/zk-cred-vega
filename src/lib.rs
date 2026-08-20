@@ -23,6 +23,7 @@ pub mod ffi_api;
 pub mod gadget_utils;
 pub mod mdoc_core;
 pub mod mso;
+pub mod mso_splice;
 pub mod nonnative;
 pub mod onehot_cursor;
 pub mod p256_ecc;
