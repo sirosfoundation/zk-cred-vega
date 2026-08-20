@@ -98,18 +98,43 @@ pub struct ClaimWitness {
 /// Step circuit: computes SHA-256 over one `IssuerSignedItem`'s bytes,
 /// always exposing the digest as a public value, and — only when
 /// `disclose` is true — also exposing the plaintext bytes themselves
-/// (masked to all-zero otherwise, so an undisclosed claim's value never
-/// leaks). The corresponding `valueDigests[namespace][digestID]`
-/// comparison against the exposed digest is the core circuit's job
-/// (`MdocCoreCircuit`) — this keeps the expensive per-claim SHA-256 work
-/// foldable across steps rather than repeated in the core circuit.
+/// (masked to all-zero otherwise). The corresponding
+/// `valueDigests[namespace][digestID]` comparison against the exposed
+/// digest is the core circuit's job (`MdocCoreCircuit`) — this keeps the
+/// expensive per-claim SHA-256 work foldable across steps rather than
+/// repeated in the core circuit.
 ///
 /// The `disclosed` flag and masked plaintext are exposed *every* step
 /// (never a variable-length/variable-count output) because NeutronNova
 /// folds instances of identical R1CS shape — a step's public-value count
 /// can't depend on its own witness. Masking (`plaintext_bit = claim_bit
 /// AND disclosed`) rather than conditionally omitting bits is what keeps
-/// that shape fixed while still not leaking undisclosed values.
+/// that shape fixed.
+///
+/// **Masking only withholds the plaintext, not the digest** — an
+/// undisclosed claim's `SHA-256(padded IssuerSignedItem)` is *still*
+/// exposed (it must be, to bind against `valueDigests` and to feed the
+/// core circuit's signed `z`). An independent review found this
+/// insufficient on its own: real ISO 18013-5 salts each element with
+/// ≥16 random bytes specifically so its digest can't be dictionary-
+/// attacked, but a salted real element doesn't fit `MAX_CLAIM_BYTES_V1`
+/// today (see `HANDOFF.md`'s "real-interop gap" writeup) — so anything
+/// that currently fits is exactly the low-entropy shape a digest attack
+/// works against, and per-credential digests are also stable across
+/// verifiers, which breaks presentation unlinkability regardless of
+/// salting. Don't treat an undisclosed claim's digest as safe to expose
+/// to a relying party until that gap is closed.
+///
+/// Also note: because [`Self::num_challenges`] is `0` and
+/// [`Self::synthesize`] is a no-op, `vega-prover` takes its
+/// `skip_synthesize` fast path and reads this circuit instance's public
+/// IO **directly from [`Self::public_values`]**, not from constraints
+/// built during synthesis — `public_values()` and `precommitted()` must
+/// therefore agree exactly on count and order by construction, not by
+/// any check either side makes. There's no framework-level guard against
+/// the two drifting apart; a mismatch surfaces only as an opaque
+/// `verify()` failure downstream. See `mdoc_core`'s module doc for the
+/// same class of trap (`is_small`).
 ///
 /// Modeled directly on `vega-prover`'s own `benches/sha256_vega_mc_zkp.rs`
 /// `Sha256StepCircuit`, using the full-message `sha256` gadget (handles
@@ -461,6 +486,17 @@ pub fn verify(
   Ok(proof.verify(vk, MAX_CLAIMS_V1)?)
 }
 
+/// Every public value this circuit ever inputizes is a `{0,1}`-constrained
+/// bit (see `mdoc_core::inputize_bits`) — a genuinely-satisfied proof can
+/// never expose anything else. `bits_to_bytes` below otherwise silently
+/// treats any non-`ONE` value as `0`, so callers should check this first
+/// rather than let a stray field element pass through unnoticed.
+fn all_boolean(values: &[<Engine_ as Engine>::Scalar]) -> bool {
+  values
+    .iter()
+    .all(|&v| v == <Engine_ as Engine>::Scalar::ONE || v == <Engine_ as Engine>::Scalar::ZERO)
+}
+
 /// Packs a public-value bit slice (each entry `Scalar::ONE`/`ZERO`,
 /// big-endian, 8 per byte) back into bytes — the inverse of
 /// `mdoc_core::native_bytes_to_bits`.
@@ -524,11 +560,21 @@ pub fn verify_and_check_binding(
   step_public_values: &[Vec<<Engine_ as Engine>::Scalar>],
   core_public_values: &[<Engine_ as Engine>::Scalar],
 ) -> Result<VerifiedPresentation, VegaMdocError> {
-  // qx, qy, z(256), device_x(256), device_y(256), signed_ts(160),
-  // valid_from_ts(160), valid_until_ts(160) — must match
+  // qx, qy, z(256), device_x(256), device_y(256), signed_ts, valid_from_ts,
+  // valid_until_ts (each mso::TIMESTAMP_LEN*8 bits) — must match
   // MdocCoreCircuit::public_values's exact order.
-  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + 160 + 160 + 160;
+  const TS_BITS: usize = mso::TIMESTAMP_LEN * 8;
+  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS;
   if core_public_values.len() != EXPECTED_LEN {
+    return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+  }
+  // Only core_public_values[2..] are bits (qx/qy at [0]/[1] are the raw
+  // P-256 coordinate field elements, not booleans).
+  if !all_boolean(&core_public_values[2..]) {
+    // Every bit-valued core public value really is a bit (see
+    // mdoc_core's inputize_bits) — a genuinely-satisfied proof can never
+    // produce anything else. Defence in depth: don't let bits_to_bytes
+    // below silently coerce a stray non-{0,1} value to 0.
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
   let qx = core_public_values[0];
@@ -542,9 +588,9 @@ pub fn verify_and_check_binding(
   let core_z_bits = take(256);
   let device_x: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let device_y: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
-  let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
-  let valid_from_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
-  let valid_until_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(160)).try_into().unwrap();
+  let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
+  let valid_from_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
+  let valid_until_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
 
   if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
@@ -563,6 +609,10 @@ pub fn verify_and_check_binding(
       // boundary, not a rejected proof).
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
+    if !all_boolean(v) {
+      // Same defence-in-depth as above, for the digest/plaintext bits.
+      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+    }
     let digest_bits = &v[0..256];
     let disclosed_scalar = v[256];
     let plaintext_bits = &v[257..STEP_LEN];
@@ -570,17 +620,19 @@ pub fn verify_and_check_binding(
     let digest: [u8; 32] = bits_to_bytes(digest_bits)
       .try_into()
       .map_err(|_| VegaMdocError::Circuit(SynthesisError::Unsatisfiable))?;
-    let disclosed = if disclosed_scalar == <Engine_ as Engine>::Scalar::ONE {
-      true
-    } else if disclosed_scalar == <Engine_ as Engine>::Scalar::ZERO {
-      false
-    } else {
-      // Can't happen for a genuinely-satisfied proof (precommitted() only
-      // ever inputizes a {0,1}-constrained value here) — but don't
-      // silently treat "neither" as "not disclosed".
-      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
-    };
+    let disclosed = disclosed_scalar == <Engine_ as Engine>::Scalar::ONE;
     let plaintext = bits_to_bytes(plaintext_bits);
+
+    // Free extra guard (found valuable by an independent review): for a
+    // disclosed claim, the revealed plaintext is provably the SHA-256
+    // preimage of `digest` by construction of the masking circuit
+    // (`ClaimDigestStepCircuit`'s doc) — but re-deriving it here, rather
+    // than trusting that invariant blindly, catches any future bug where
+    // the two public-value groups silently diverge (e.g. a bit-order
+    // mismatch between the two `inputize_bits` calls).
+    if disclosed && claim_digest_bytes(&plaintext) != digest {
+      return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+    }
 
     claim_digests.push(digest);
     claims.push(DisclosedClaim {
@@ -672,6 +724,51 @@ mod tests {
       s,
       s_inv,
     }
+  }
+
+  /// Direct, fast check of `ClaimDigestStepCircuit::public_values`'s
+  /// shape and slice boundaries — independent of any real proof, so it
+  /// catches a regression here without waiting on a full setup/prove/
+  /// verify round trip. This is exactly the invariant the type's own doc
+  /// flags as framework-enforced only by convention (the `skip_synthesize`
+  /// fast path reads public IO straight from this function).
+  #[test]
+  fn claim_digest_step_circuit_public_values_has_the_expected_shape() {
+    let bytes = fixed_width_claim_bytes(b"family_name:Doe").expect("fits");
+    let disclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), true)
+      .public_values()
+      .expect("public_values");
+    let undisclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), false)
+      .public_values()
+      .expect("public_values");
+
+    const STEP_LEN: usize = 256 + 1 + MAX_CLAIM_BYTES_V1 * 8;
+    assert_eq!(disclosed.len(), STEP_LEN);
+    assert_eq!(undisclosed.len(), STEP_LEN);
+
+    let digest = claim_digest_bytes(&bytes);
+    assert_eq!(
+      bits_to_bytes(&disclosed[0..256]),
+      digest,
+      "disclosed[0..256] must be the claim's digest"
+    );
+    assert_eq!(
+      bits_to_bytes(&undisclosed[0..256]),
+      digest,
+      "the digest slot must be exposed regardless of disclosure"
+    );
+    assert_eq!(disclosed[256], <Engine_ as Engine>::Scalar::ONE);
+    assert_eq!(undisclosed[256], <Engine_ as Engine>::Scalar::ZERO);
+    assert_eq!(
+      bits_to_bytes(&disclosed[257..STEP_LEN]),
+      bytes,
+      "disclosed[257..] must be the real (padded) claim bytes"
+    );
+    assert_eq!(
+      bits_to_bytes(&undisclosed[257..STEP_LEN]),
+      vec![0u8; MAX_CLAIM_BYTES_V1],
+      "the plaintext slot must be masked to all-zero when undisclosed"
+    );
   }
 
   /// Independently computes the exact public-value vector

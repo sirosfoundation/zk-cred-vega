@@ -46,8 +46,22 @@ fn bytes_to_scalar(bytes: &[u8]) -> Result<Scalar, VegaFfiError> {
     .ok_or_else(|| VegaFfiError(anyhow::anyhow!("value does not fit in the field")))
 }
 
+/// P-256's coordinate field is ~256 bits — every `qx`/`qy` fits in 32
+/// bytes, but `BigInt::to_bytes_be` returns the *minimal* encoding, which
+/// drops leading zero bytes. A caller comparing this against a fixed
+/// 32-byte coordinate from a certificate's `SubjectPublicKeyInfo` (the
+/// obvious way to do trust-anchor checking) would see an intermittent,
+/// silent mismatch for any key whose coordinate happens to have a leading
+/// zero byte (~1 in 256 real keys, per coordinate) — found by an
+/// independent review. Always left-pad to the fixed width instead.
+const P256_COORDINATE_BYTES: usize = 32;
+
 fn scalar_to_bytes(s: Scalar) -> Vec<u8> {
-  bigint_to_bytes(&f_to_nat(&s))
+  let unpadded = bigint_to_bytes(&f_to_nat(&s));
+  debug_assert!(unpadded.len() <= P256_COORDINATE_BYTES);
+  let mut padded = vec![0u8; P256_COORDINATE_BYTES];
+  padded[P256_COORDINATE_BYTES - unpadded.len()..].copy_from_slice(&unpadded);
+  padded
 }
 
 /// Big-endian-byte-encoded twin of [`crate::ClaimWitness`].
@@ -304,6 +318,24 @@ mod tests {
   use crate::p256_ecc::p256_order;
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
   use sha2::{Digest, Sha256};
+
+  /// A coordinate with a leading zero byte must still round-trip to a
+  /// fixed 32-byte encoding — regression test for the truncation bug an
+  /// independent review found (`BigInt::to_bytes_be` drops leading
+  /// zeros, so the un-padded encoding was intermittently short).
+  #[test]
+  fn scalar_to_bytes_always_returns_32_bytes_even_with_leading_zero() {
+    use crate::nonnative::util::nat_to_f;
+    use num_bigint::BigInt;
+
+    // A value small enough to guarantee a leading zero byte in a 32-byte
+    // big-endian encoding (top byte would be 0x00).
+    let small = nat_to_f::<Scalar>(&BigInt::from(42)).expect("fits in field");
+    let bytes = scalar_to_bytes(small);
+    assert_eq!(bytes.len(), P256_COORDINATE_BYTES);
+    assert_eq!(bytes[P256_COORDINATE_BYTES - 1], 42);
+    assert!(bytes[..P256_COORDINATE_BYTES - 1].iter().all(|&b| b == 0));
+  }
 
   /// Exercises the FFI surface exactly as a Kotlin/Swift caller would:
   /// bytes in, bytes out, no direct access to any native Rust type —
