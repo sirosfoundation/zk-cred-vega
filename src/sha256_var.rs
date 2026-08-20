@@ -448,8 +448,8 @@ mod native_tests {
       let terminal_block = terminal_block_for_len(real_len);
       let len_field_start = terminal_block * 64 - 8;
       let mut len_bytes = [0u8; 8];
-      for i in 0..8 {
-        len_bytes[i] = injected_byte(len_field_start + i, real_len).unwrap();
+      for (i, b) in len_bytes.iter_mut().enumerate() {
+        *b = injected_byte(len_field_start + i, real_len).unwrap();
       }
       assert_eq!(u64::from_be_bytes(len_bytes), (real_len as u64) * 8);
       // Strictly between marker and length field: zero, if any such gap exists.

@@ -1856,6 +1856,7 @@ dependencies = [
  "p256",
  "rand",
  "serde",
+ "serde_json",
  "sha2",
  "signature",
  "thiserror 2.0.20",

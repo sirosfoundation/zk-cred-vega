@@ -29,6 +29,7 @@ rand = "0.8"
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = "0.16"
 signature = "2.2"
+serde_json = "1.0"
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]

@@ -1,0 +1,47 @@
+{
+  "description": "Realistic 4-claim mDL: family_name/given_name disclosed, birth_date/age_over_18 undisclosed. Real ≥16-byte per-element salts, real CBOR IssuerSignedItem framing (79-103 bytes each), real ECDSA-P256 signature over the real MSO Sig_structure.",
+  "claims": [
+    {
+      "element_identifier": "family_name",
+      "digest_id": 0,
+      "disclose": true,
+      "issuer_signed_item_bytes_hex": "d8185852a4686469676573744944006672616e646f6d50aee1847256b3e4ea9b1b7b345a805ce271656c656d656e744964656e7469666965726b66616d696c795f6e616d656c656c656d656e7456616c756563446f65",
+      "issuer_signed_item_bytes_len": 86
+    },
+    {
+      "element_identifier": "given_name",
+      "digest_id": 1,
+      "disclose": true,
+      "issuer_signed_item_bytes_hex": "d8185852a4686469676573744944016672616e646f6d5000e73c4a9bd9c31be2dea47b5dc0465671656c656d656e744964656e7469666965726a676976656e5f6e616d656c656c656d656e7456616c7565644a616e65",
+      "issuer_signed_item_bytes_len": 86
+    },
+    {
+      "element_identifier": "birth_date",
+      "digest_id": 2,
+      "disclose": false,
+      "issuer_signed_item_bytes_hex": "d818585ba4686469676573744944026672616e646f6d501260fda33e910ef07da63236339e736d71656c656d656e744964656e7469666965726a62697274685f646174656c656c656d656e7456616c7565d903ec6a313939302d30352d3135",
+      "issuer_signed_item_bytes_len": 95
+    },
+    {
+      "element_identifier": "age_over_18",
+      "digest_id": 3,
+      "disclose": false,
+      "issuer_signed_item_bytes_hex": "d818584fa4686469676573744944036672616e646f6d50bbc5bf1cee2727c40b41541a9968a86271656c656d656e744964656e7469666965726b6167655f6f7665725f31386c656c656d656e7456616c7565f5",
+      "issuer_signed_item_bytes_len": 83
+    }
+  ],
+  "ecdsa_witness": {
+    "qx_hex": "9170862f03a7cda91dfbcc8bbfe88e892736141047c915df97b41b4ef0f8f28f",
+    "qy_hex": "e8e7496f429ceca5d281bd20aa9cd6926ce4d0106ac9eb73018521a4c6d04f06",
+    "r_hex": "7595f5cde6a3c46b389912a72338fd8830278165f51265b43c3310313fa2c830",
+    "s_hex": "dc561c8845a5ce7ac3e39e5423c03b1f6a7cc9258cfe3516ce57a85f9730e80a",
+    "s_inv_hex": "d2141cf5460de16ed976d54bda640b8695990d99071334555158175827636d4d"
+  },
+  "mso_body": {
+    "device_x_hex": "5abcd89a4dd7148eda70b38ea1aed938cb2892353be4a9485fbe7d07ddf3f7cd",
+    "device_y_hex": "ce25fab4f4269f1ad411798e71bd98b9392b293f44c70ee542fcc748a6e75ef0",
+    "signed_ts": "2026-08-20T00:00:00Z",
+    "valid_from_ts": "2026-08-20T00:00:00Z",
+    "valid_until_ts": "2036-08-20T00:00:00Z"
+  }
+}
