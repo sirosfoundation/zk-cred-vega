@@ -105,6 +105,11 @@ pub enum VegaMdocError {
 pub struct ClaimWitness {
   pub issuer_signed_item_bytes: Vec<u8>,
   pub disclose: bool,
+  /// This claim's real, spec-legal (`< 2^31`) `digestID` — see
+  /// `cbor_uint`'s module doc. **Not yet cross-checked against
+  /// `issuer_signed_item_bytes`' own embedded `digestID`** — see
+  /// `mdoc_core::MdocCoreCircuit`'s doc for this gap's tracked status.
+  pub digest_id: u32,
 }
 
 /// Step circuit: computes SHA-256 over one `IssuerSignedItem`'s bytes,
@@ -394,6 +399,7 @@ pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
     w.r,
     w.s,
     w.s_inv,
+    [0u32; MAX_CLAIMS_V1],
     vec![[0u8; 32]; MAX_CLAIMS_V1],
     setup_prototype_mso_body(),
   );
@@ -420,6 +426,7 @@ struct PaddedClaim {
   bytes: Vec<u8>,
   real_len: usize,
   disclose: bool,
+  digest_id: u32,
 }
 
 /// Widens `bytes` to exactly `MAX_CLAIM_BYTES_V1` bytes (fixed circuit
@@ -453,6 +460,7 @@ fn pad_claims(claims: &[ClaimWitness]) -> Result<Vec<PaddedClaim>, VegaMdocError
         bytes,
         real_len,
         disclose: c.disclose,
+        digest_id: c.digest_id,
       })
     })
     .collect::<Result<Vec<_>, VegaMdocError>>()?;
@@ -461,9 +469,18 @@ fn pad_claims(claims: &[ClaimWitness]) -> Result<Vec<PaddedClaim>, VegaMdocError
       bytes: vec![0u8; MAX_CLAIM_BYTES_V1],
       real_len: 0,
       disclose: false,
+      digest_id: 0,
     });
   }
   Ok(padded)
+}
+
+/// Builds the core circuit's `digest_ids` witness from a (pre-padding)
+/// claim set, in the same padded order [`core_claim_digests`] uses — the
+/// two must agree for [`verify_and_check_binding`] to pass.
+pub(crate) fn core_digest_ids(claims: &[ClaimWitness]) -> Result<[u32; MAX_CLAIMS_V1], VegaMdocError> {
+  let padded = pad_claims(claims)?;
+  Ok(std::array::from_fn(|i| padded[i].digest_id))
 }
 
 /// Opaque prep state — the rerandomizable, per-credential cache that
@@ -522,6 +539,7 @@ pub fn prep_prove(
     ecdsa_witness.r.clone(),
     ecdsa_witness.s.clone(),
     ecdsa_witness.s_inv.clone(),
+    core_digest_ids(claims)?,
     core_claim_digests(claims)?,
     mso_body.clone(),
   );
@@ -549,6 +567,7 @@ pub fn prove(
     ecdsa_witness.r.clone(),
     ecdsa_witness.s.clone(),
     ecdsa_witness.s_inv.clone(),
+    core_digest_ids(claims)?,
     core_claim_digests(claims)?,
     mso_body.clone(),
   );
@@ -612,6 +631,10 @@ pub struct DisclosedClaim {
   pub digest: [u8; 32],
   pub real_len: usize,
   pub plaintext: Vec<u8>,
+  /// This claim's `digestID`, as exposed by the core circuit — see
+  /// `mdoc_core::MdocCoreCircuit`'s doc for what this binding does and
+  /// doesn't yet prove.
+  pub digest_id: u32,
 }
 
 /// The fully verified, bound public output of a presentation — everything
@@ -647,10 +670,11 @@ pub fn verify_and_check_binding(
   core_public_values: &[<Engine_ as Engine>::Scalar],
 ) -> Result<VerifiedPresentation, VegaMdocError> {
   // qx, qy, z(256), device_x(256), device_y(256), signed_ts, valid_from_ts,
-  // valid_until_ts (each mso::TIMESTAMP_LEN*8 bits) — must match
-  // MdocCoreCircuit::public_values's exact order.
+  // valid_until_ts (each mso::TIMESTAMP_LEN*8 bits), then MAX_CLAIMS_V1
+  // digestIDs (32 bits each) — must match MdocCoreCircuit::public_values's
+  // exact order.
   const TS_BITS: usize = mso::TIMESTAMP_LEN * 8;
-  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS;
+  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS + MAX_CLAIMS_V1 * 32;
   if core_public_values.len() != EXPECTED_LEN {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
@@ -677,6 +701,10 @@ pub fn verify_and_check_binding(
   let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
   let valid_from_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
   let valid_until_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
+  let digest_ids: [u32; MAX_CLAIMS_V1] = std::array::from_fn(|_| {
+    let bytes = bits_to_bytes(take(32));
+    u32::from_be_bytes(bytes.try_into().unwrap())
+  });
 
   if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
@@ -737,6 +765,7 @@ pub fn verify_and_check_binding(
       digest,
       real_len,
       plaintext,
+      digest_id: digest_ids[claims.len()],
     });
   }
 
@@ -747,7 +776,7 @@ pub fn verify_and_check_binding(
     valid_from_ts,
     valid_until_ts,
   };
-  let sig_structure = mso::native_sig_structure_bytes(&claim_digests, &mso_body);
+  let sig_structure = mso::native_sig_structure_bytes(&digest_ids, &claim_digests, &mso_body);
   let expected_z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
   let expected_z_bits = native_bytes_to_bits_pub(&expected_z_bytes);
 
@@ -797,11 +826,11 @@ mod tests {
   /// `claim_digests` and [`test_mso_body`] — matching
   /// `MdocCoreCircuit`'s own `native_z_bytes` exactly — with a fresh real
   /// P-256 key, and returns the resulting `MdocEcdsaWitness`.
-  fn real_ecdsa_witness_over(claim_digests: &[[u8; 32]]) -> MdocEcdsaWitness {
+  fn real_ecdsa_witness_over(digest_ids: &[u32; MAX_CLAIMS_V1], claim_digests: &[[u8; 32]]) -> MdocEcdsaWitness {
     let signing_key = SigningKey::from_bytes(&[42u8; 32].into()).expect("valid scalar");
     let verifying_key = VerifyingKey::from(&signing_key);
 
-    let sig_structure = crate::mso::native_sig_structure_bytes(claim_digests, &test_mso_body());
+    let sig_structure = crate::mso::native_sig_structure_bytes(digest_ids, claim_digests, &test_mso_body());
     let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
 
     let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
@@ -929,14 +958,17 @@ mod tests {
       ClaimWitness {
         issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
         disclose: true,
+        digest_id: 26,
       },
       ClaimWitness {
         issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
         disclose: true,
+        digest_id: 300,
       },
     ];
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
-    let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
+    let digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
+    let ecdsa_witness = real_ecdsa_witness_over(&digest_ids, &claim_digests);
 
     let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
     let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
@@ -970,22 +1002,30 @@ mod tests {
       ClaimWitness {
         issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
         disclose: true,
+        digest_id: 5,
       },
       ClaimWitness {
         issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
         disclose: true,
+        digest_id: 26,
       },
       // Deliberately NOT disclosed — proves the claim exists and is
       // digest-committed, but its value stays private. Exercises the
       // masking path (`full_presentation_verifies_and_binds` previously
-      // only ever exercised all-disclosed claims).
+      // only ever exercised all-disclosed claims). digest_id spans a
+      // third CBOR-uint length class (3 bytes), and the 4th (padding)
+      // slot's digest_id defaults to 0 (class 0) -- together the full
+      // padded set exercises every width this crate supports in one
+      // real round trip.
       ClaimWitness {
         issuer_signed_item_bytes: b"age_over_18:true".to_vec(),
         disclose: false,
+        digest_id: 70000,
       },
     ];
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
-    let ecdsa_witness = real_ecdsa_witness_over(&claim_digests);
+    let digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
+    let ecdsa_witness = real_ecdsa_witness_over(&digest_ids, &claim_digests);
 
     let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
     let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
@@ -1001,6 +1041,7 @@ mod tests {
     for (verified_claim, expected) in verified.claims.iter().zip(padded.iter()) {
       assert_eq!(verified_claim.disclosed, expected.disclose);
       assert_eq!(verified_claim.real_len, expected.real_len);
+      assert_eq!(verified_claim.digest_id, expected.digest_id, "digestID must round-trip through the proof, at every CBOR-uint width class");
       assert_eq!(verified_claim.digest, claim_digest_bytes(&expected.bytes[..expected.real_len]));
       if expected.disclose {
         assert_eq!(
@@ -1047,10 +1088,12 @@ mod tests {
     let real_claims = vec![ClaimWitness {
       issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
       disclose: true,
+      digest_id: 5,
     }];
     let other_claims = vec![ClaimWitness {
       issuer_signed_item_bytes: b"family_name:Smith".to_vec(),
       disclose: true,
+      digest_id: 5,
     }];
 
     let padded = pad_claims(&real_claims).expect("pad_claims");
@@ -1060,13 +1103,15 @@ mod tests {
       .collect();
 
     let mismatched_digests = core_claim_digests(&other_claims).expect("core_claim_digests");
-    let ecdsa_witness = real_ecdsa_witness_over(&mismatched_digests);
+    let mismatched_digest_ids = core_digest_ids(&other_claims).expect("core_digest_ids");
+    let ecdsa_witness = real_ecdsa_witness_over(&mismatched_digest_ids, &mismatched_digests);
     let core_circuit = MdocCoreCircuit::<Engine_>::new(
       ecdsa_witness.qx,
       ecdsa_witness.qy,
       ecdsa_witness.r,
       ecdsa_witness.s,
       ecdsa_witness.s_inv,
+      mismatched_digest_ids,
       mismatched_digests,
       test_mso_body(),
     );

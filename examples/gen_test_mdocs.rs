@@ -20,18 +20,19 @@
 //! the exact same conventions `mso.rs`'s own module doc already
 //! confirmed against a real signed test vector.
 //!
-//! **Known scoping limitation, carried over from `mso.rs`**: this
-//! generator assigns digestIDs `0..MAX_CLAIMS_V1` sequentially, matching
-//! `mso.rs`'s current fixed template (which hardcodes those same
-//! digestIDs as the `valueDigests` map keys). Real credentials assign
-//! arbitrary issuer-chosen digestIDs, and — a deeper issue than just the
-//! literal digestID *values* — nothing in this crate's circuit currently
-//! binds the digestID used as an MSO map key to the `digestID` field
-//! embedded inside the corresponding `IssuerSignedItem`'s own CBOR
-//! bytes (a real verifier cross-checks exactly that). This generator
-//! keeps the two consistent by construction (both come from the same
-//! loop index) so it doesn't hit that gap, but the underlying circuit
-//! doesn't yet enforce it — flagged as follow-up work, not fixed here.
+//! digestIDs here deliberately span all four CBOR-uint length classes
+//! (1/2/3/5 bytes — see `cbor_uint`'s module doc), not the narrow
+//! `0..MAX_CLAIMS_V1` range `mso.rs` used to hardcode, to exercise real
+//! spec-legal digestID interop end to end.
+//!
+//! **Still-open gap**: nothing in this crate's circuit yet binds the
+//! digestID used as an MSO map key to the `digestID` field embedded
+//! inside the corresponding `IssuerSignedItem`'s own CBOR bytes (a real
+//! verifier cross-checks exactly that — see `digest_id_extract`'s module
+//! doc). This generator keeps the two consistent by construction (both
+//! come from the same `DIGEST_IDS` entry) so it doesn't hit that gap, but
+//! the underlying circuit doesn't yet enforce it — flagged as follow-up
+//! work, not fixed here.
 
 use rand::RngCore;
 use serde::Serialize;
@@ -63,14 +64,12 @@ fn cbor_bstr(bytes: &[u8]) -> Vec<u8> {
   v
 }
 
+/// Reuses the crate's own real, spec-range CBOR-uint encoder (rather than
+/// a second, hand-rolled copy here) so `digestID` values spanning all
+/// four length classes (up to 70000+ below) encode correctly — the old
+/// minimal `<256`-only encoder this file used couldn't represent them.
 fn cbor_uint(n: u64) -> Vec<u8> {
-  if n < 24 {
-    vec![n as u8]
-  } else if n < 256 {
-    vec![0x18, n as u8]
-  } else {
-    panic!("uint {n} too large for this minimal encoder");
-  }
+  zk_cred_vega::cbor_uint::encode_cbor_uint(u32::try_from(n).expect("test digestIDs fit in a u32"))
 }
 
 fn cbor_bool(b: bool) -> Vec<u8> {
@@ -148,6 +147,13 @@ fn gen_one(description: &str, out_path: &std::path::Path) {
 
   let mut rng = rand::thread_rng();
 
+  // digestIDs deliberately span all four CBOR-uint length classes (see
+  // cbor_uint's module doc: 1/2/3/5 bytes), not the narrow 0..3 range a
+  // real issuer would never actually assign (ISO 18013-5 §9.1.2.4 warns
+  // against small/correlated values) -- proving genuine spec-range
+  // interop in this end-to-end fixture, not just the crate's own unit
+  // tests.
+  const DIGEST_IDS: [u64; 4] = [5, 26, 300, 70000];
   let claim_specs: Vec<(&str, Vec<u8>, bool)> = vec![
     ("family_name", cbor_tstr("Doe"), true),
     ("given_name", cbor_tstr("Jane"), true),
@@ -157,10 +163,11 @@ fn gen_one(description: &str, out_path: &std::path::Path) {
 
   let mut claims = Vec::with_capacity(claim_specs.len());
   let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(claim_specs.len());
-  for (digest_id, (identifier, value_cbor, disclose)) in claim_specs.into_iter().enumerate() {
+  let mut digest_ids: Vec<u32> = Vec::with_capacity(claim_specs.len());
+  for (digest_id, (identifier, value_cbor, disclose)) in DIGEST_IDS.into_iter().zip(claim_specs) {
     let mut random = [0u8; 16];
     rng.fill_bytes(&mut random);
-    let item_bytes = build_issuer_signed_item(digest_id as u64, &random, identifier, &value_cbor);
+    let item_bytes = build_issuer_signed_item(digest_id, &random, identifier, &value_cbor);
     assert!(
       item_bytes.len() <= zk_cred_vega::MAX_CLAIM_BYTES_V1,
       "{identifier} item is {} bytes, exceeds MAX_CLAIM_BYTES_V1 ({})",
@@ -169,14 +176,16 @@ fn gen_one(description: &str, out_path: &std::path::Path) {
     );
     let digest: [u8; 32] = Sha256::digest(&item_bytes).into();
     claim_digests.push(digest);
+    digest_ids.push(u32::try_from(digest_id).unwrap());
     claims.push(TestClaim {
       element_identifier: identifier.to_string(),
-      digest_id: digest_id as u64,
+      digest_id,
       disclose,
       issuer_signed_item_bytes_len: item_bytes.len(),
       issuer_signed_item_bytes_hex: hex::encode(&item_bytes),
     });
   }
+  let digest_ids: [u32; 4] = digest_ids.try_into().unwrap();
 
   let mut device_x = [0u8; 32];
   let mut device_y = [0u8; 32];
@@ -190,7 +199,7 @@ fn gen_one(description: &str, out_path: &std::path::Path) {
     valid_until_ts: *b"2036-08-20T00:00:00Z",
   };
 
-  let sig_structure = zk_cred_vega::mso::native_sig_structure_bytes(&claim_digests, &mso_body);
+  let sig_structure = zk_cred_vega::mso::native_sig_structure_bytes(&digest_ids, &claim_digests, &mso_body);
   let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
 
   let mut key_bytes = [0u8; 32];

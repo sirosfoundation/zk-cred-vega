@@ -69,6 +69,10 @@ fn scalar_to_bytes(s: Scalar) -> Vec<u8> {
 pub struct FfiClaim {
   pub issuer_signed_item_bytes: Vec<u8>,
   pub disclose: bool,
+  /// This claim's real, spec-legal (`< 2^31`) `digestID` — see
+  /// `crate::ClaimWitness`'s doc for what this binding does and doesn't
+  /// yet prove.
+  pub digest_id: u32,
 }
 
 impl From<FfiClaim> for ClaimWitness {
@@ -76,6 +80,7 @@ impl From<FfiClaim> for ClaimWitness {
     ClaimWitness {
       issuer_signed_item_bytes: c.issuer_signed_item_bytes,
       disclose: c.disclose,
+      digest_id: c.digest_id,
     }
   }
 }
@@ -161,6 +166,7 @@ pub struct FfiDisclosedClaim {
   pub digest: Vec<u8>,
   pub real_len: u32,
   pub plaintext: Vec<u8>,
+  pub digest_id: u32,
 }
 
 impl From<crate::DisclosedClaim> for FfiDisclosedClaim {
@@ -170,6 +176,7 @@ impl From<crate::DisclosedClaim> for FfiDisclosedClaim {
       digest: c.digest.to_vec(),
       real_len: c.real_len as u32,
       plaintext: c.plaintext,
+      digest_id: c.digest_id,
     }
   }
 }
@@ -359,19 +366,23 @@ mod tests {
       FfiClaim {
         issuer_signed_item_bytes: b"family_name:Doe".to_vec(),
         disclose: true,
+        digest_id: 26,
       },
       FfiClaim {
         issuer_signed_item_bytes: b"given_name:Jane".to_vec(),
         disclose: false,
+        digest_id: 300,
       },
     ];
     let claim_witnesses: Vec<ClaimWitness> =
       claims.iter().map(|c| ClaimWitness {
         issuer_signed_item_bytes: c.issuer_signed_item_bytes.clone(),
         disclose: c.disclose,
+        digest_id: c.digest_id,
       }).collect();
     let claim_digests =
       vega_mdoc::core_claim_digests(&claim_witnesses).expect("core_claim_digests");
+    let digest_ids = vega_mdoc::core_digest_ids(&claim_witnesses).expect("core_digest_ids");
 
     let mso_body_native = crate::mso::MsoBodyWitness {
       device_x: [0x11u8; 32],
@@ -390,7 +401,7 @@ mod tests {
 
     let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).expect("valid scalar");
     let verifying_key = VerifyingKey::from(&signing_key);
-    let sig_structure = crate::mso::native_sig_structure_bytes(&claim_digests, &mso_body_native);
+    let sig_structure = crate::mso::native_sig_structure_bytes(&digest_ids, &claim_digests, &mso_body_native);
     let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
     let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
     let n = p256_order();

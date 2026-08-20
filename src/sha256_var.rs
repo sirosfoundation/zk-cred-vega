@@ -94,7 +94,7 @@ pub const BUFFER_BYTES: usize = NUM_BLOCKS * 64;
 /// fewer blocks), so the maximum over `0..=MAX_VAR_MESSAGE_BYTES` is
 /// `terminal_block_for_len(MAX_VAR_MESSAGE_BYTES)`, which is what
 /// [`NUM_BLOCKS`] must be at least.
-pub fn terminal_block_for_len(n: usize) -> usize {
+pub const fn terminal_block_for_len(n: usize) -> usize {
   let total_bits = n * 8 + 1 + 64;
   total_bits.div_ceil(512)
 }

@@ -25,52 +25,74 @@
 //! reaches the verifier only via `x5chain`, checked independently of this
 //! circuit (see `MdocCoreCircuit`'s module doc).
 //!
+//! ## `digestID`s are real, variable-width CBOR uints — not fixed 0..3
+//!
+//! ISO 18013-5 §9.1.2.4 bounds `digestID` at `< 2^31` and explicitly warns
+//! issuers against small/correlated values (see `cbor_uint`'s module
+//! doc) — a real MSO's `valueDigests` keys are 1, 2, 3, or 5 CBOR bytes
+//! each, not always the single byte `0..3` this module originally
+//! hardcoded. [`crate::mso_splice`] assembles that variable-width section
+//! (and the fixed prefix/suffix around it) into one flat, fixed-size
+//! buffer for [`crate::sha256_var::sha256_var_sized`] to hash — see that
+//! module's doc for the one-hot-cursor technique this requires to keep
+//! the circuit's shape fixed regardless of which widths are chosen.
+//!
 //! ## v1 scope: one docType, one namespace, a fixed claim count
 //!
 //! This module bakes in `docType = "org.iso.18013.5.1.mDL"`, a single
 //! namespace `"org.iso.18013.5.1"`, `digestAlgorithm = "SHA-256"`, and
-//! exactly [`crate::MAX_CLAIMS_V1`] digestIDs (fixed as `0..MAX_CLAIMS_V1`)
-//! — the same fixed-shape convention `MAX_CLAIMS_V1`/`MAX_CLAIM_BYTES_V1`
-//! already establish elsewhere in this crate. A real MSO's map key order
-//! follows the CDDL declaration order (`version`, `digestAlgorithm`,
-//! `docType`, `valueDigests`, `deviceKeyInfo`, `validityInfo`) — confirmed
-//! from the same real test vector, **not** canonical/sorted CBOR map
-//! ordering, which real implementations evidently don't follow here.
+//! exactly [`crate::MAX_CLAIMS_V1`] digestIDs (each now independently
+//! witnessed, any spec-legal value) — the same fixed-shape convention
+//! `MAX_CLAIM_BYTES_V1` already establishes elsewhere in this crate. A
+//! real MSO's map key order follows the CDDL declaration order
+//! (`version`, `digestAlgorithm`, `docType`, `valueDigests`,
+//! `deviceKeyInfo`, `validityInfo`) — confirmed from the same real test
+//! vector, **not** canonical/sorted CBOR map ordering, which real
+//! implementations evidently don't follow here.
 //!
 //! Every "FIXED" segment below is therefore a compile-time constant byte
 //! string, identical for every credential of this exact shape; only the
-//! digest values, the device key, and the three validity timestamps vary
-//! per credential and cross as witness bytes.
+//! digestIDs/digest values, the device key, and the three validity
+//! timestamps vary per credential and cross as witness bytes.
+//!
+//! **This module's digestID binding is not yet enforced end to end**: the
+//! `digest_ids` witnessed here are caller-supplied native values, not yet
+//! cross-checked against what [`crate::digest_id_extract`] independently
+//! extracts from each claim's own bytes (see that module's doc for why
+//! that check matters, and `HANDOFF.md` for this gap's tracked status).
+//! What *is* now genuinely fixed: this module reconstructs a real
+//! issuer's exact `Sig_structure` bytes for *any* spec-legal digestID
+//! combination, not just the narrow `0..MAX_CLAIMS_V1` range this crate
+//! minted itself.
 
-use bellpepper_core::{boolean::{AllocatedBit, Boolean}, ConstraintSystem, SynthesisError};
+use crate::mso_splice::{self, DigestIdEntry, ENTRY_TAIL_LEN};
+use bellpepper_core::{
+  boolean::{AllocatedBit, Boolean},
+  ConstraintSystem, SynthesisError,
+};
 
 /// One fixed-length ASCII timestamp, e.g. `"2026-08-20T00:00:00Z"` (the
 /// `tdate` text form CBOR tag 0 wraps — always exactly this length for a
 /// UTC, whole-second, `Z`-suffixed RFC 3339 timestamp).
 pub const TIMESTAMP_LEN: usize = 20;
 
-/// Segment 0: everything up to and including the first digest's `bstr`
-/// header — `{"version":"1.0","digestAlgorithm":"SHA-256","docType":
-/// "org.iso.18013.5.1.mDL","valueDigests":{"org.iso.18013.5.1":{0: <bstr
-/// header>`.
-const SEG_PREFIX: &[u8] = &[
+/// Everything up to (not including) the first digestID's own bytes —
+/// `{"version":"1.0","digestAlgorithm":"SHA-256","docType":
+/// "org.iso.18013.5.1.mDL","valueDigests":{"org.iso.18013.5.1":{` — a
+/// fixed 4-entry map header (`0xa4`) since [`crate::MAX_CLAIMS_V1`] is a
+/// compile-time constant; only the *keys* inside vary in encoded width.
+const SEG_PREFIX_BASE: &[u8] = &[
   0xa6, 0x67, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x63, 0x31, 0x2e, 0x30, 0x6f, 0x64, 0x69,
   0x67, 0x65, 0x73, 0x74, 0x41, 0x6c, 0x67, 0x6f, 0x72, 0x69, 0x74, 0x68, 0x6d, 0x67, 0x53, 0x48,
   0x41, 0x2d, 0x32, 0x35, 0x36, 0x67, 0x64, 0x6f, 0x63, 0x54, 0x79, 0x70, 0x65, 0x75, 0x6f, 0x72,
   0x67, 0x2e, 0x69, 0x73, 0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e, 0x35, 0x2e, 0x31, 0x2e,
   0x6d, 0x44, 0x4c, 0x6c, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x44, 0x69, 0x67, 0x65, 0x73, 0x74, 0x73,
   0xa1, 0x71, 0x6f, 0x72, 0x67, 0x2e, 0x69, 0x73, 0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e,
-  0x35, 0x2e, 0x31, 0xa4, 0x00, 0x58, 0x20,
+  0x35, 0x2e, 0x31, 0xa4,
 ];
-/// Between digest 0 and digest 1: `, 1: <bstr header>`.
-const SEG_MID_01: &[u8] = &[0x01, 0x58, 0x20];
-/// Between digest 1 and digest 2.
-const SEG_MID_12: &[u8] = &[0x02, 0x58, 0x20];
-/// Between digest 2 and digest 3.
-const SEG_MID_23: &[u8] = &[0x03, 0x58, 0x20];
-/// After digest 3, through `deviceKeyInfo.deviceKey`'s `x` coordinate's
-/// `bstr` header — `},"deviceKeyInfo":{"deviceKey":{1:2,-1:1,-2:<bstr
-/// header>`.
+/// After the last digest, through `deviceKeyInfo.deviceKey`'s `x`
+/// coordinate's `bstr` header — `},"deviceKeyInfo":{"deviceKey":{1:2,-1:1,
+/// -2:<bstr header>`.
 const SEG_AFTER_DIGESTS: &[u8] = &[
   0x6d, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0x49, 0x6e, 0x66, 0x6f, 0xa1, 0x69,
   0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0xa4, 0x01, 0x02, 0x20, 0x01, 0x21, 0x58,
@@ -93,21 +115,62 @@ const SEG_BETWEEN_VALIDFROM_VALIDUNTIL: &[u8] = &[
   0x6a, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x55, 0x6e, 0x74, 0x69, 0x6c, 0xc0, 0x74,
 ];
 
-/// `#6.24(bstr <448-byte MSO>)` header — fixed because the MSO body's
-/// total length is fixed by this module's v1 shape.
-const PAYLOAD_HEADER: &[u8] = &[0xd8, 0x18, 0x59, 0x01, 0xc0];
+/// `#6.24(bstr <MSO>)` header, minus its 2-byte length value (which is now
+/// witnessed, since the MSO body's length varies with the chosen
+/// digestIDs' widths) — `0xd8, 0x18` (tag 24) + `0x59` (bstr, 2-byte
+/// length form; always this form since real totals stay well under
+/// 65536).
+const PAYLOAD_HEADER_NO_LEN: &[u8] = &[0xd8, 0x18, 0x59];
 /// COSE_Sign1 protected header, `{1: -7}` (alg ES256/ECDSA-P256-SHA256).
 pub const PROTECTED_HEADER: &[u8] = &[0xa1, 0x01, 0x26];
-/// `["Signature1", <protected bstr>, h'', <payload bstr header>` — fixed
-/// up to (not including) the payload bytes themselves.
-const SIG_STRUCTURE_PREFIX: &[u8] = &[
+/// `["Signature1", <protected bstr>, h'', <payload bstr length marker>` —
+/// minus its own 2-byte length value (witnessed, same reason as
+/// [`PAYLOAD_HEADER_NO_LEN`]).
+const SIG_STRUCTURE_PREFIX_NO_LEN: &[u8] = &[
   0x84, 0x6a, 0x53, 0x69, 0x67, 0x6e, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31, 0x43, 0xa1, 0x01, 0x26,
-  0x40, 0x59, 0x01, 0xc5,
+  0x40, 0x59,
 ];
 
+/// Fixed byte length of everything after the digestID section (device
+/// key `x`/`y` + three timestamps + the constant text around them) —
+/// computed once from the segment constants above rather than hand-
+/// counted, so it can never silently drift from them.
+fn suffix_fixed_len() -> usize {
+  SEG_AFTER_DIGESTS.len() + 32 + SEG_BETWEEN_XY.len() + 32 + SEG_AFTER_DEVICE_KEY.len() + TIMESTAMP_LEN + SEG_BETWEEN_SIGNED_VALIDFROM.len() + TIMESTAMP_LEN + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len() + TIMESTAMP_LEN
+}
+
+/// `mso_body_len` (the MSO CBOR body's own byte length, i.e. what
+/// [`PAYLOAD_HEADER_NO_LEN`]'s witnessed length field must carry) and
+/// `payload_len` (`len(PAYLOAD_HEADER_NO_LEN) + 2 + mso_body_len`, what
+/// [`SIG_STRUCTURE_PREFIX_NO_LEN`]'s witnessed length field must carry),
+/// given the digestID section's real (already digestID-width-dependent)
+/// byte length. Both values fit comfortably in a `u16` for any real
+/// credential this crate supports (well under 65536), matching the
+/// `0x59 XXXX` 2-byte-length CBOR form both headers use unconditionally.
+fn compute_lengths(real_digest_section_len: usize) -> (u16, u16) {
+  let mso_body_len = SEG_PREFIX_BASE.len() + real_digest_section_len + suffix_fixed_len();
+  let payload_len = PAYLOAD_HEADER_NO_LEN.len() + 2 + mso_body_len;
+  (
+    u16::try_from(mso_body_len).expect("mso_body_len fits in a u16 for any real credential this crate supports"),
+    u16::try_from(payload_len).expect("payload_len fits in a u16 for any real credential this crate supports"),
+  )
+}
+
+/// Upper bound on the whole `Sig_structure`'s byte length: every
+/// digestID at its widest, everything else at its (fixed) real length.
+pub const MAX_SIG_STRUCTURE_BYTES: usize =
+  SIG_STRUCTURE_PREFIX_NO_LEN.len() + 2 + PAYLOAD_HEADER_NO_LEN.len() + 2 + SEG_PREFIX_BASE.len() + mso_splice::MAX_DIGEST_SECTION_BYTES + SEG_AFTER_DIGESTS.len() + 32 + SEG_BETWEEN_XY.len() + 32 + SEG_AFTER_DEVICE_KEY.len() + TIMESTAMP_LEN + SEG_BETWEEN_SIGNED_VALIDFROM.len() + TIMESTAMP_LEN + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len() + TIMESTAMP_LEN;
+
+/// Number of 512-bit SHA-256 blocks [`MAX_SIG_STRUCTURE_BYTES`] can occupy
+/// at most — what [`crate::sha256_var::sha256_var_sized`] must be called
+/// with for this module's buffer.
+pub const SIG_STRUCTURE_NUM_BLOCKS: usize = crate::sha256_var::terminal_block_for_len(MAX_SIG_STRUCTURE_BYTES);
+
 /// The per-credential witness data this module's MSO template splices in.
-/// Everything else (`docType`, the namespace, `digestAlgorithm`, the
-/// digestID numbering) is a fixed constant for this circuit version.
+/// Everything else (`docType`, the namespace, `digestAlgorithm`) is a
+/// fixed constant for this circuit version; the digestIDs themselves are
+/// carried alongside the claim digests by the caller (see
+/// [`native_sig_structure_bytes`]/[`alloc_sig_structure_bits`]).
 #[derive(Clone, Debug)]
 pub struct MsoBodyWitness {
   /// The device's public key coordinates (`deviceKeyInfo.deviceKey`, a
@@ -124,90 +187,53 @@ pub struct MsoBodyWitness {
   pub valid_until_ts: [u8; TIMESTAMP_LEN],
 }
 
-/// Which named witness field a [`Segment::Witness`] span is — lets
-/// [`alloc_sig_structure_bits`] also hand back the MSO-body fields
-/// (everything except the claim digests, which the step circuits already
-/// expose) as their own named bit groups, so `MdocCoreCircuit` can expose
-/// them as additional public outputs. Without that, the verifier couldn't
-/// reconstruct `z` from public data alone once `z` depends on more than
-/// just the per-claim digests — see `mdoc_core`'s module doc.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum WitnessField {
-  ClaimDigest,
-  DeviceX,
-  DeviceY,
-  SignedTs,
-  ValidFromTs,
-  ValidUntilTs,
-}
-
-/// One piece of the byte sequence being assembled: either a fixed,
-/// compile-time-constant span (identical for every credential of this
-/// shape), or a witness span (varies per credential, per-bit allocated in
-/// the circuit).
-enum Segment<'a> {
-  Fixed(&'a [u8]),
-  Witness(WitnessField, &'a [u8]),
-}
-
-/// The full ordered segment sequence for one MSO instance, given its
-/// per-claim digests (already fixed at exactly `MAX_CLAIMS_V1` by the
-/// caller — see `mdoc_core`) and body witness.
-fn segments<'a>(claim_digests: &'a [[u8; 32]], body: &'a MsoBodyWitness) -> Vec<Segment<'a>> {
-  assert_eq!(
-    claim_digests.len(),
-    4,
-    "this module's fixed byte template is for exactly 4 digestIDs (MAX_CLAIMS_V1)"
-  );
-  vec![
-    Segment::Fixed(SEG_PREFIX),
-    Segment::Witness(WitnessField::ClaimDigest, &claim_digests[0]),
-    Segment::Fixed(SEG_MID_01),
-    Segment::Witness(WitnessField::ClaimDigest, &claim_digests[1]),
-    Segment::Fixed(SEG_MID_12),
-    Segment::Witness(WitnessField::ClaimDigest, &claim_digests[2]),
-    Segment::Fixed(SEG_MID_23),
-    Segment::Witness(WitnessField::ClaimDigest, &claim_digests[3]),
-    Segment::Fixed(SEG_AFTER_DIGESTS),
-    Segment::Witness(WitnessField::DeviceX, &body.device_x),
-    Segment::Fixed(SEG_BETWEEN_XY),
-    Segment::Witness(WitnessField::DeviceY, &body.device_y),
-    Segment::Fixed(SEG_AFTER_DEVICE_KEY),
-    Segment::Witness(WitnessField::SignedTs, &body.signed_ts),
-    Segment::Fixed(SEG_BETWEEN_SIGNED_VALIDFROM),
-    Segment::Witness(WitnessField::ValidFromTs, &body.valid_from_ts),
-    Segment::Fixed(SEG_BETWEEN_VALIDFROM_VALIDUNTIL),
-    Segment::Witness(WitnessField::ValidUntilTs, &body.valid_until_ts),
-  ]
-}
-
-/// Native (non-circuit) construction of the exact bytes ECDSA/ES256 signs
-/// — used to build real test signatures and to compute `z` natively for
-/// `MdocCoreCircuit::public_values`. Concatenates: the fixed
-/// `Sig_structure` prefix, the fixed payload header, this module's MSO
-/// segments (fixed + witness spliced per `segments`), matching
-/// `SIG_STRUCTURE_PREFIX || PAYLOAD_HEADER || mso_bytes` exactly.
-pub fn native_sig_structure_bytes(claim_digests: &[[u8; 32]], body: &MsoBodyWitness) -> Vec<u8> {
-  let mut out = Vec::with_capacity(SIG_STRUCTURE_PREFIX.len() + PAYLOAD_HEADER.len() + 448);
-  out.extend_from_slice(SIG_STRUCTURE_PREFIX);
-  out.extend_from_slice(PAYLOAD_HEADER);
-  for seg in segments(claim_digests, body) {
-    match seg {
-      Segment::Fixed(b) | Segment::Witness(_, b) => out.extend_from_slice(b),
-    }
-  }
-  out
-}
-
 fn byte_to_bits_be(byte: u8) -> impl Iterator<Item = bool> {
   (0..8).rev().map(move |i| (byte >> i) & 1 == 1)
 }
 
-/// The MSO-body witness fields' allocated bits, grouped by name (each
-/// `Boolean` here is the *same* allocation pushed into
-/// [`alloc_sig_structure_bits`]'s returned flat vector — not a re-alloc —
-/// so a caller can `inputize` these specific bits directly). Claim digests
-/// aren't included: the step circuits already expose those.
+fn make_tail(digest: &[u8; 32]) -> [u8; ENTRY_TAIL_LEN] {
+  let mut t = [0u8; ENTRY_TAIL_LEN];
+  t[0] = 0x58;
+  t[1] = 0x20;
+  t[2..].copy_from_slice(digest);
+  t
+}
+
+/// Native (non-circuit) construction of the exact bytes ECDSA/ES256 signs
+/// — used to build real test signatures and to compute `z` natively for
+/// `MdocCoreCircuit::public_values`. `digest_ids[i]` is the real,
+/// spec-legal (`< 2^31`) digestID for `claim_digests[i]` — see
+/// `cbor_uint`'s module doc.
+pub fn native_sig_structure_bytes(digest_ids: &[u32; mso_splice::NUM_ENTRIES], claim_digests: &[[u8; 32]], body: &MsoBodyWitness) -> Vec<u8> {
+  assert_eq!(claim_digests.len(), mso_splice::NUM_ENTRIES, "this module's fixed byte template is for exactly MAX_CLAIMS_V1 digestIDs");
+  let tails: [[u8; ENTRY_TAIL_LEN]; mso_splice::NUM_ENTRIES] = std::array::from_fn(|i| make_tail(&claim_digests[i]));
+  let real_digest_section_len = digest_ids.iter().map(|&id| crate::cbor_uint::encode_cbor_uint(id).len()).sum::<usize>() + mso_splice::NUM_ENTRIES * ENTRY_TAIL_LEN;
+  let (mso_body_len, payload_len) = compute_lengths(real_digest_section_len);
+
+  let mut prefix = Vec::new();
+  prefix.extend_from_slice(SIG_STRUCTURE_PREFIX_NO_LEN);
+  prefix.extend_from_slice(&payload_len.to_be_bytes());
+  prefix.extend_from_slice(PAYLOAD_HEADER_NO_LEN);
+  prefix.extend_from_slice(&mso_body_len.to_be_bytes());
+  prefix.extend_from_slice(SEG_PREFIX_BASE);
+
+  let mut suffix = Vec::new();
+  suffix.extend_from_slice(SEG_AFTER_DIGESTS);
+  suffix.extend_from_slice(&body.device_x);
+  suffix.extend_from_slice(SEG_BETWEEN_XY);
+  suffix.extend_from_slice(&body.device_y);
+  suffix.extend_from_slice(SEG_AFTER_DEVICE_KEY);
+  suffix.extend_from_slice(&body.signed_ts);
+  suffix.extend_from_slice(SEG_BETWEEN_SIGNED_VALIDFROM);
+  suffix.extend_from_slice(&body.valid_from_ts);
+  suffix.extend_from_slice(SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
+  suffix.extend_from_slice(&body.valid_until_ts);
+
+  mso_splice::native_mso_sig_structure_bytes(&prefix, digest_ids, &tails, &suffix)
+}
+
+/// The MSO-body witness fields' allocated bits, grouped by name — used so
+/// a caller can `inputize` these specific bits directly.
 pub struct AllocatedMsoBodyBits {
   pub device_x: Vec<Boolean>,
   pub device_y: Vec<Boolean>,
@@ -216,66 +242,103 @@ pub struct AllocatedMsoBodyBits {
   pub valid_until_ts: Vec<Boolean>,
 }
 
+fn push_fixed(bits: &mut Vec<Boolean>, bytes: &[u8]) {
+  for &byte in bytes {
+    for b in byte_to_bits_be(byte) {
+      bits.push(Boolean::constant(b));
+    }
+  }
+}
+
+fn alloc_witness_bytes<F: ff::PrimeField, CS: ConstraintSystem<F>>(cs: &mut CS, bytes: &[u8], label: &str) -> Result<Vec<Boolean>, SynthesisError> {
+  let mut out = Vec::with_capacity(bytes.len() * 8);
+  for (byte_idx, &byte) in bytes.iter().enumerate() {
+    for (bit_idx, b) in byte_to_bits_be(byte).enumerate() {
+      let bit = AllocatedBit::alloc(cs.namespace(|| format!("{label} byte {byte_idx} bit {bit_idx}")), Some(b))?;
+      out.push(Boolean::from(bit));
+    }
+  }
+  Ok(out)
+}
+
+fn alloc_witness_u16<F: ff::PrimeField, CS: ConstraintSystem<F>>(cs: &mut CS, value: u16, label: &str) -> Result<Vec<Boolean>, SynthesisError> {
+  alloc_witness_bytes(cs, &value.to_be_bytes(), label)
+}
+
 /// In-circuit construction of the same bytes as
-/// [`native_sig_structure_bytes`], as a flat `Boolean` bit sequence
-/// (big-endian, ready for `bellpepper::gadgets::sha256::sha256`), plus the
-/// MSO-body witness bits grouped by name (see [`AllocatedMsoBodyBits`]).
-/// Fixed segments become `Boolean::constant` (no witness allocation — the
-/// verifier already knows these bytes, they're part of this circuit
-/// version's definition); witness segments become real allocated bits.
+/// [`native_sig_structure_bytes`], as a fixed-size
+/// (`MAX_SIG_STRUCTURE_BYTES*8`-bit) `Boolean` buffer plus the native real
+/// (non-don't-care) length in bytes — ready for
+/// [`crate::sha256_var::sha256_var_sized`] — and the MSO-body witness bits
+/// grouped by name (see [`AllocatedMsoBodyBits`]). Fixed segments become
+/// `Boolean::constant` (no witness allocation — the verifier already
+/// knows these bytes, they're part of this circuit version's definition);
+/// witness segments (digestIDs, digests, device key, timestamps, and the
+/// two length fields) become real allocated bits.
 pub fn alloc_sig_structure_bits<CS: ConstraintSystem<F>, F: ff::PrimeField>(
   cs: &mut CS,
+  digest_ids: &[u32; mso_splice::NUM_ENTRIES],
   claim_digests: &[[u8; 32]],
   body: &MsoBodyWitness,
-) -> Result<(Vec<Boolean>, AllocatedMsoBodyBits), SynthesisError> {
-  fn push_fixed(bits: &mut Vec<Boolean>, bytes: &[u8]) {
-    for &byte in bytes {
-      for b in byte_to_bits_be(byte) {
-        bits.push(Boolean::constant(b));
-      }
+) -> Result<(Vec<Boolean>, usize, AllocatedMsoBodyBits), SynthesisError> {
+  assert_eq!(claim_digests.len(), mso_splice::NUM_ENTRIES, "this module's fixed byte template is for exactly MAX_CLAIMS_V1 digestIDs");
+
+  let real_digest_section_len =
+    digest_ids.iter().map(|&id| crate::cbor_uint::encode_cbor_uint(id).len()).sum::<usize>() + mso_splice::NUM_ENTRIES * ENTRY_TAIL_LEN;
+  let (mso_body_len, payload_len) = compute_lengths(real_digest_section_len);
+
+  let mut prefix_bits = Vec::new();
+  push_fixed(&mut prefix_bits, SIG_STRUCTURE_PREFIX_NO_LEN);
+  prefix_bits.extend(alloc_witness_u16(cs, payload_len, "payload_len")?);
+  push_fixed(&mut prefix_bits, PAYLOAD_HEADER_NO_LEN);
+  prefix_bits.extend(alloc_witness_u16(cs, mso_body_len, "mso_body_len")?);
+  push_fixed(&mut prefix_bits, SEG_PREFIX_BASE);
+
+  let device_x_bits = alloc_witness_bytes(cs, &body.device_x, "device_x")?;
+  let device_y_bits = alloc_witness_bytes(cs, &body.device_y, "device_y")?;
+  let signed_ts_bits = alloc_witness_bytes(cs, &body.signed_ts, "signed_ts")?;
+  let valid_from_ts_bits = alloc_witness_bytes(cs, &body.valid_from_ts, "valid_from_ts")?;
+  let valid_until_ts_bits = alloc_witness_bytes(cs, &body.valid_until_ts, "valid_until_ts")?;
+
+  let mut suffix_bits = Vec::new();
+  push_fixed(&mut suffix_bits, SEG_AFTER_DIGESTS);
+  suffix_bits.extend(device_x_bits.iter().cloned());
+  push_fixed(&mut suffix_bits, SEG_BETWEEN_XY);
+  suffix_bits.extend(device_y_bits.iter().cloned());
+  push_fixed(&mut suffix_bits, SEG_AFTER_DEVICE_KEY);
+  suffix_bits.extend(signed_ts_bits.iter().cloned());
+  push_fixed(&mut suffix_bits, SEG_BETWEEN_SIGNED_VALIDFROM);
+  suffix_bits.extend(valid_from_ts_bits.iter().cloned());
+  push_fixed(&mut suffix_bits, SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
+  suffix_bits.extend(valid_until_ts_bits.iter().cloned());
+
+  let entries: [DigestIdEntry; mso_splice::NUM_ENTRIES] = {
+    let mut built: Vec<DigestIdEntry> = Vec::with_capacity(mso_splice::NUM_ENTRIES);
+    for i in 0..mso_splice::NUM_ENTRIES {
+      let tail_bytes = make_tail(&claim_digests[i]);
+      let tail_bits = alloc_witness_bytes(cs, &tail_bytes, &format!("entry {i} tail"))?;
+      built.push(DigestIdEntry {
+        digest_id: digest_ids[i],
+        tail_bits,
+      });
     }
-  }
-
-  let mut bits = Vec::new();
-  push_fixed(&mut bits, SIG_STRUCTURE_PREFIX);
-  push_fixed(&mut bits, PAYLOAD_HEADER);
-
-  let mut body_bits = AllocatedMsoBodyBits {
-    device_x: Vec::new(),
-    device_y: Vec::new(),
-    signed_ts: Vec::new(),
-    valid_from_ts: Vec::new(),
-    valid_until_ts: Vec::new(),
+    built.try_into().unwrap_or_else(|_| unreachable!())
   };
 
-  let mut idx = 0usize;
-  for seg in segments(claim_digests, body) {
-    match seg {
-      Segment::Fixed(bytes) => push_fixed(&mut bits, bytes),
-      Segment::Witness(field, bytes) => {
-        for &byte in bytes {
-          for (i, b) in byte_to_bits_be(byte).enumerate() {
-            let bit = AllocatedBit::alloc(
-              cs.namespace(|| format!("mso witness bit {idx} (byte bit {i})")),
-              Some(b),
-            )?;
-            let boolean = Boolean::from(bit);
-            bits.push(boolean.clone());
-            match field {
-              WitnessField::ClaimDigest => {}
-              WitnessField::DeviceX => body_bits.device_x.push(boolean),
-              WitnessField::DeviceY => body_bits.device_y.push(boolean),
-              WitnessField::SignedTs => body_bits.signed_ts.push(boolean),
-              WitnessField::ValidFromTs => body_bits.valid_from_ts.push(boolean),
-              WitnessField::ValidUntilTs => body_bits.valid_until_ts.push(boolean),
-            }
-            idx += 1;
-          }
-        }
-      }
-    }
-  }
-  Ok((bits, body_bits))
+  let (assembled, real_len) = mso_splice::assemble_mso_sig_structure::<F, _>(cs.namespace(|| "mso sig_structure"), &prefix_bits, &entries, &suffix_bits)?;
+  assert_eq!(assembled.len(), MAX_SIG_STRUCTURE_BYTES * 8);
+
+  Ok((
+    assembled,
+    real_len,
+    AllocatedMsoBodyBits {
+      device_x: device_x_bits,
+      device_y: device_y_bits,
+      signed_ts: signed_ts_bits,
+      valid_from_ts: valid_from_ts_bits,
+      valid_until_ts: valid_until_ts_bits,
+    },
+  ))
 }
 
 #[cfg(test)]
@@ -292,19 +355,39 @@ mod tests {
     }
   }
 
-  /// Confirms the hand-derived fixed segments reassemble into exactly the
-  /// bytes `cbor2`/`cryptography` (Python) independently verified as a
-  /// real, ECDSA-signable `Sig_structure` — see this module's doc for how
-  /// that ground truth was established. Regenerate this expected value
-  /// the same way (see the module doc) if the template ever changes.
+  /// Regression check against the pre-refactor fixed-digestID (0,1,2,3)
+  /// template's own hand-verified expectations (see this module's
+  /// history): digest_ids 0-3 are all class-0 (1-byte) encodings, so this
+  /// reproduces byte-for-byte what the old hardcoded `SEG_MID_xx`
+  /// segments produced.
   #[test]
-  fn native_sig_structure_bytes_has_the_expected_length_and_structure() {
+  fn native_sig_structure_bytes_matches_the_old_fixed_template_for_narrow_digest_ids() {
+    let digest_ids = [0u32, 1, 2, 3];
     let digests = [[0xE0u8; 32], [0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]];
-    let bytes = native_sig_structure_bytes(&digests, &test_body());
+    let bytes = native_sig_structure_bytes(&digest_ids, &digests, &test_body());
     assert_eq!(bytes.len(), 473, "Sig_structure length must match the real reference (20 + 5 + 448)");
     assert_eq!(&bytes[..4], &[0x84, 0x6a, 0x53, 0x69], "must start with array(4), tstr(10) 'Si...'");
-    // The payload header + MSO map header must appear right where expected.
-    assert_eq!(&bytes[20..25], PAYLOAD_HEADER);
+    assert_eq!(&bytes[20..25], &[0xd8, 0x18, 0x59, 0x01, 0xc0], "payload header + MSO body length");
     assert_eq!(bytes[25], 0xa6, "MSO body must start with map(6)");
+  }
+
+  /// The real point of this module's rewrite: a genuinely different
+  /// digestID combination (spanning all four CBOR-uint length classes)
+  /// produces a *longer* buffer, with lengths that self-consistently
+  /// describe the new total — not a fixed 473-byte result regardless of
+  /// input.
+  #[test]
+  fn native_sig_structure_bytes_grows_with_wider_digest_ids() {
+    let narrow = native_sig_structure_bytes(&[0, 1, 2, 3], &[[0xE0u8; 32], [0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]], &test_body());
+    let wide = native_sig_structure_bytes(&[5, 26, 300, 70000], &[[0xE0u8; 32], [0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]], &test_body());
+    // widths 1,2,3,5 = 11 bytes of digestIDs vs narrow's 4*1 = 4 bytes.
+    assert_eq!(wide.len(), narrow.len() + 7);
+    // The witnessed length fields must reflect the new total, not the old
+    // one. payload_len is len(payload_bytes) = the whole Sig_structure
+    // minus SIG_STRUCTURE_PREFIX_NO_LEN(18) + its own 2-byte length field.
+    let payload_len = u16::from_be_bytes([wide[18], wide[19]]);
+    assert_eq!(payload_len as usize, wide.len() - 20);
+    let mso_body_len = u16::from_be_bytes([wide[23], wide[24]]);
+    assert_eq!(mso_body_len as usize, wide.len() - 25);
   }
 }

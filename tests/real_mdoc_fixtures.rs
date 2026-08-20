@@ -25,7 +25,6 @@ use zk_cred_vega::{ClaimWitness, MdocEcdsaWitness};
 struct FixtureClaim {
   #[allow(dead_code)]
   element_identifier: String,
-  #[allow(dead_code)]
   digest_id: u64,
   disclose: bool,
   issuer_signed_item_bytes_hex: String,
@@ -96,6 +95,7 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
       ClaimWitness {
         issuer_signed_item_bytes: bytes,
         disclose: c.disclose,
+        digest_id: u32::try_from(c.digest_id).expect("fixture digestID fits in a u32 (spec bounds it at < 2^31)"),
       }
     })
     .collect();
@@ -137,6 +137,11 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
   for (verified_claim, expected) in verified.claims.iter().zip(fixture.claims.iter()) {
     assert_eq!(verified_claim.disclosed, expected.disclose);
     assert_eq!(verified_claim.real_len, expected.issuer_signed_item_bytes_len);
+    assert_eq!(
+      verified_claim.digest_id as u64, expected.digest_id,
+      "{}: the real reference vector's own digestID must round-trip through the proof",
+      expected.element_identifier
+    );
     if expected.disclose {
       assert_eq!(
         verified_claim.plaintext,

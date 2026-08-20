@@ -74,9 +74,8 @@
 
 use crate::ecdsa::verify_ecdsa_p256_with_digest;
 use crate::nonnative::bignat::{limbs_to_nat, BigNat, BigNatParams};
-use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
-  boolean::Boolean,
+  boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
   ConstraintSystem, LinearCombination, SynthesisError,
 };
@@ -104,18 +103,26 @@ pub struct MdocCoreCircuit<Eng: Engine> {
   pub r: BigInt,
   pub s: BigInt,
   pub s_inv: BigInt,
+  /// Each claim's real, spec-legal (`< 2^31`) `digestID` — see
+  /// `cbor_uint`'s module doc — in the same order as `claim_digests`.
+  /// **Not yet cross-checked against what `digest_id_extract` would
+  /// independently extract from each claim's own bytes** — see
+  /// `crate::mso`'s module doc for this gap's tracked status.
+  pub digest_ids: [u32; crate::MAX_CLAIMS_V1],
   pub claim_digests: Vec<[u8; 32]>,
   pub mso_body: crate::mso::MsoBodyWitness,
   _p: PhantomData<Eng>,
 }
 
 impl<Eng: Engine> MdocCoreCircuit<Eng> {
+  #[allow(clippy::too_many_arguments)] // one witness field per signature/MSO component -- a builder would only obscure the 1:1 mapping
   pub fn new(
     qx: Eng::Scalar,
     qy: Eng::Scalar,
     r: BigInt,
     s: BigInt,
     s_inv: BigInt,
+    digest_ids: [u32; crate::MAX_CLAIMS_V1],
     claim_digests: Vec<[u8; 32]>,
     mso_body: crate::mso::MsoBodyWitness,
   ) -> Self {
@@ -125,6 +132,7 @@ impl<Eng: Engine> MdocCoreCircuit<Eng> {
       r,
       s,
       s_inv,
+      digest_ids,
       claim_digests,
       mso_body,
       _p: PhantomData,
@@ -135,11 +143,18 @@ impl<Eng: Engine> MdocCoreCircuit<Eng> {
   /// `crate::mso`'s module doc for exactly what those bytes are and how
   /// they were verified against a real signed mdoc.
   fn native_z_bytes(&self) -> [u8; 32] {
-    let sig_structure = crate::mso::native_sig_structure_bytes(&self.claim_digests, &self.mso_body);
+    let sig_structure = crate::mso::native_sig_structure_bytes(&self.digest_ids, &self.claim_digests, &self.mso_body);
     let mut hasher = Sha256::new();
     hasher.update(&sig_structure);
     hasher.finalize().into()
   }
+}
+
+/// Big-endian 32-bit expansion of `value` — the same convention
+/// `digest_id_extract::ExtractedDigestId::value_bits` uses, so a future
+/// binding check between the two has nothing to reconcile.
+fn native_u32_to_bits<S: ff::PrimeField>(value: u32) -> Vec<S> {
+  (0..32).map(|i| if (value >> (31 - i)) & 1 == 1 { S::ONE } else { S::ZERO }).collect()
 }
 
 /// Packs 256 big-endian bits (bit 0 = MSB of the overall value — the
@@ -246,6 +261,14 @@ where
     values.extend(native_bytes_to_bits::<Eng::Scalar>(&self.mso_body.signed_ts));
     values.extend(native_bytes_to_bits::<Eng::Scalar>(&self.mso_body.valid_from_ts));
     values.extend(native_bytes_to_bits::<Eng::Scalar>(&self.mso_body.valid_until_ts));
+    // Must match precommitted()'s inputize order exactly: each digestID,
+    // 32 bits MSB-first — exposed so the verifier can reconstruct the
+    // exact (now variable-width) valueDigests section from public data
+    // alone. See this struct's own doc for what this binding does and
+    // doesn't yet prove.
+    for &digest_id in &self.digest_ids {
+      values.extend(native_u32_to_bits::<Eng::Scalar>(digest_id));
+    }
     Ok(values)
   }
 
@@ -268,10 +291,18 @@ where
     qy_num.inputize(cs.namespace(|| "inputize qy"))?;
 
     // Assemble the real MSO Sig_structure bytes (fixed template segments +
-    // witness splices — see crate::mso's module doc) as a flat bit vector.
-    let (mso_bits, body_bits) =
-      crate::mso::alloc_sig_structure_bits(cs, &self.claim_digests, &self.mso_body)?;
-    let z_bits = sha256(cs.namespace(|| "z = sha256(Sig_structure)"), &mso_bits)?;
+    // witness splices, now including each variable-width digestID — see
+    // crate::mso's module doc) as a flat, fixed-size bit vector, plus the
+    // real (non-don't-care) length for sha256_var_sized below.
+    let (mso_bits, real_len, body_bits) =
+      crate::mso::alloc_sig_structure_bits(cs, &self.digest_ids, &self.claim_digests, &self.mso_body)?;
+    let (z_bits, _msg_active) = crate::sha256_var::sha256_var_sized(
+      cs.namespace(|| "z = sha256_var(Sig_structure)"),
+      &mso_bits,
+      real_len,
+      crate::mso::MAX_SIG_STRUCTURE_BYTES,
+      crate::mso::SIG_STRUCTURE_NUM_BLOCKS,
+    )?;
     inputize_bits::<Eng::Scalar, CS>(cs, &z_bits, "z")?;
 
     // Expose the MSO-body fields too (same allocated bits already folded
@@ -282,6 +313,21 @@ where
     inputize_bits::<Eng::Scalar, CS>(cs, &body_bits.signed_ts, "signed_ts")?;
     inputize_bits::<Eng::Scalar, CS>(cs, &body_bits.valid_from_ts, "valid_from_ts")?;
     inputize_bits::<Eng::Scalar, CS>(cs, &body_bits.valid_until_ts, "valid_until_ts")?;
+
+    // Expose each digestID (32 bits MSB-first, deterministically witnessed
+    // from self.digest_ids — see native_z_bytes' use of the same field;
+    // there's only one source of truth, so no separate consistency check
+    // is needed here, same reasoning as ClaimDigestStepCircuit's real_len
+    // exposure).
+    for (i, &digest_id) in self.digest_ids.iter().enumerate() {
+      let bits: Vec<Boolean> = (0..32)
+        .map(|j| {
+          let bit_val = (digest_id >> (31 - j)) & 1 == 1;
+          AllocatedBit::alloc(cs.namespace(|| format!("digest_id {i} bit {j}")), Some(bit_val)).map(Boolean::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+      inputize_bits::<Eng::Scalar, CS>(cs, &bits, &format!("digest_id_{i}"))?;
+    }
 
     let z_bn = bits_be_to_bignat::<Eng::Scalar, CS>(&z_bits)?;
 
@@ -319,7 +365,8 @@ mod tests {
   use crate::nonnative::util::nat_to_f;
   use crate::p256_ecc::p256_order;
   use crate::Engine_;
-  use bellpepper_core::{boolean::AllocatedBit, test_cs::TestConstraintSystem};
+  use bellpepper::gadgets::sha256::sha256;
+  use bellpepper_core::test_cs::TestConstraintSystem;
   use num_bigint::Sign;
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
 
@@ -360,6 +407,10 @@ mod tests {
   /// fast to isolate from a bug in the fold-and-reuse plumbing above it.
   #[test]
   fn core_circuit_constraints_are_satisfied_standalone() {
+    // Spans all four CBOR-uint length classes (1/2/3/5 bytes) -- exercises
+    // the variable-width digestID splice, not just the old narrow 0..3
+    // range, directly in this fast standalone diagnostic.
+    let digest_ids = [5u32, 26, 300, 70000];
     let claim_digests = vec![[0xABu8; 32], [0xCDu8; 32], [0xEFu8; 32], [0x12u8; 32]];
     let mso_body = crate::mso::MsoBodyWitness {
       device_x: [0x34u8; 32],
@@ -372,7 +423,7 @@ mod tests {
     let signing_key = SigningKey::from_bytes(&[42u8; 32].into()).expect("valid scalar");
     let verifying_key = VerifyingKey::from(&signing_key);
 
-    let sig_structure = crate::mso::native_sig_structure_bytes(&claim_digests, &mso_body);
+    let sig_structure = crate::mso::native_sig_structure_bytes(&digest_ids, &claim_digests, &mso_body);
     let z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
 
     let signature: Signature = signing_key.sign_prehash(&z_bytes).expect("sign_prehash");
@@ -392,6 +443,7 @@ mod tests {
       r,
       s,
       s_inv,
+      digest_ids,
       claim_digests,
       mso_body,
     );
