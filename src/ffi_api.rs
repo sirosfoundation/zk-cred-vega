@@ -151,13 +151,15 @@ pub struct FfiProveResult {
 }
 
 /// One claim slot's verified disclosure outcome — see
-/// [`crate::DisclosedClaim`]. `plaintext` is the padded `IssuerSignedItem`
-/// bytes when `disclosed`, all-zero otherwise (never meaningful in that
-/// case).
+/// [`crate::DisclosedClaim`]. `real_len` is always meaningful (the
+/// claim's real, unpadded byte length); `plaintext` is exactly `real_len`
+/// bytes of real `IssuerSignedItem` content when `disclosed`, all-zero
+/// otherwise (never meaningful in that case).
 #[derive(uniffi::Record)]
 pub struct FfiDisclosedClaim {
   pub disclosed: bool,
   pub digest: Vec<u8>,
+  pub real_len: u32,
   pub plaintext: Vec<u8>,
 }
 
@@ -166,6 +168,7 @@ impl From<crate::DisclosedClaim> for FfiDisclosedClaim {
     FfiDisclosedClaim {
       disclosed: c.disclosed,
       digest: c.digest.to_vec(),
+      real_len: c.real_len as u32,
       plaintext: c.plaintext,
     }
   }
@@ -425,9 +428,15 @@ mod tests {
     assert_eq!(verified1.qy, ecdsa_witness.qy);
     assert_eq!(verified1.claims.len(), crate::MAX_CLAIMS_V1);
     assert!(verified1.claims[0].disclosed);
-    assert_eq!(verified1.claims[0].plaintext, b"family_name:Doe".to_vec().into_iter().chain(std::iter::repeat(0u8)).take(crate::MAX_CLAIM_BYTES_V1).collect::<Vec<u8>>());
+    assert_eq!(verified1.claims[0].real_len, b"family_name:Doe".len() as u32);
+    assert_eq!(verified1.claims[0].plaintext, b"family_name:Doe".to_vec());
     assert!(!verified1.claims[1].disclosed, "second claim wasn't disclosed");
-    assert_eq!(verified1.claims[1].plaintext, vec![0u8; crate::MAX_CLAIM_BYTES_V1], "an undisclosed claim's plaintext must be masked to all-zero over the FFI boundary too");
+    assert_eq!(verified1.claims[1].real_len, b"given_name:Jane".len() as u32);
+    assert_eq!(
+      verified1.claims[1].plaintext,
+      vec![0u8; b"given_name:Jane".len()],
+      "an undisclosed claim's plaintext must be masked to all-zero over the FFI boundary too"
+    );
     assert_eq!(verified1.device_x, mso_body_native.device_x.to_vec());
     assert_eq!(verified1.valid_until_ts, mso_body_native.valid_until_ts.to_vec());
 

@@ -158,12 +158,20 @@ pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTE
 /// module's doc for the technique. `raw_bits` must be exactly
 /// `MAX_VAR_MESSAGE_BYTES * 8` long; bits at or beyond `real_len*8` are
 /// never read (don't-care in the caller's witness).
+///
+/// Returns `(digest_bits, msg_active_bits)`: the 256-bit digest, and —
+/// for callers that need to know which byte positions were real message
+/// content (e.g. to mask a plaintext-disclosure output the same way) —
+/// one `Boolean` per byte in `0..MAX_VAR_MESSAGE_BYTES`, `true` iff that
+/// byte was part of the real (`real_len`-byte) message. Reuse these
+/// rather than recomputing "is this byte real" a second, independent
+/// way — see this function's own internal comment on why.
 #[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
 pub fn sha256_var<Scalar, CS>(
   mut cs: CS,
   raw_bits: &[Boolean],
   real_len: usize,
-) -> Result<Vec<Boolean>, SynthesisError>
+) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -190,8 +198,15 @@ where
     );
   }
 
-  // 2. Build the BUFFER_BYTES*8 padded buffer bits.
+  // 2. Build the BUFFER_BYTES*8 padded buffer bits, and along the way
+  // collect `msg_active[byte_idx]` for byte_idx in 0..MAX_VAR_MESSAGE_BYTES
+  // — "is this byte position real message content" — for the caller to
+  // reuse (e.g. for plaintext-disclosure masking) rather than
+  // recomputing the same fact a second, independent way. Recomputing it
+  // separately would risk exactly the "two things that should agree
+  // silently drift apart" bug class an earlier review flagged.
   let mut buffer_bits: Vec<Boolean> = Vec::with_capacity(BUFFER_BYTES * 8);
+  let mut msg_active_bits: Vec<Boolean> = Vec::with_capacity(MAX_VAR_MESSAGE_BYTES);
   for byte_idx in 0..BUFFER_BYTES {
     // msg_active(byte_idx) = "is this byte position still real message
     // content for the witnessed real_len" = sum over n > byte_idx of
@@ -211,7 +226,9 @@ where
         |lc| lc + CS::one(),
         |lc| lc + bit.get_variable(),
       );
-      Some(Boolean::from(bit))
+      let b = Boolean::from(bit);
+      msg_active_bits.push(b.clone());
+      Some(b)
     } else {
       None
     };
@@ -324,7 +341,7 @@ where
     digest_bits.push(acc.expect("NUM_BLOCKS >= 1"));
   }
 
-  Ok(digest_bits)
+  Ok((digest_bits, msg_active_bits))
 }
 
 /// Native (non-circuit) reference implementation: the real SHA-256 digest
@@ -500,7 +517,7 @@ mod circuit_tests {
     for real_len in lengths {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let raw_bits = alloc_raw_bits(&mut cs, &message);
-      let digest_bits = sha256_var(cs.namespace(|| format!("sha256_var real_len={real_len}")), &raw_bits, real_len)
+      let (digest_bits, _msg_active) = sha256_var(cs.namespace(|| format!("sha256_var real_len={real_len}")), &raw_bits, real_len)
         .expect("sha256_var synthesis");
 
       if let Some(reason) = cs.which_is_unsatisfied() {
@@ -531,12 +548,12 @@ mod circuit_tests {
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let raw_bits = alloc_raw_bits(&mut cs, &base);
-    let digest_base = sha256_var(cs.namespace(|| "base"), &raw_bits, real_len).expect("synthesis");
+    let (digest_base, _) = sha256_var(cs.namespace(|| "base"), &raw_bits, real_len).expect("synthesis");
     assert!(cs.is_satisfied());
 
     let mut cs2 = TestConstraintSystem::<Scalar>::new();
     let raw_bits2 = alloc_raw_bits(&mut cs2, &tampered);
-    let digest_tampered = sha256_var(cs2.namespace(|| "tampered"), &raw_bits2, real_len).expect("synthesis");
+    let (digest_tampered, _) = sha256_var(cs2.namespace(|| "tampered"), &raw_bits2, real_len).expect("synthesis");
     assert!(cs2.is_satisfied());
 
     assert_ne!(
@@ -560,16 +577,39 @@ mod circuit_tests {
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let raw_bits = alloc_raw_bits(&mut cs, &base);
-    let digest_base = sha256_var(cs.namespace(|| "base"), &raw_bits, real_len).expect("synthesis");
+    let (digest_base, _) = sha256_var(cs.namespace(|| "base"), &raw_bits, real_len).expect("synthesis");
 
     let mut cs2 = TestConstraintSystem::<Scalar>::new();
     let raw_bits2 = alloc_raw_bits(&mut cs2, &changed_tail);
-    let digest_changed = sha256_var(cs2.namespace(|| "changed"), &raw_bits2, real_len).expect("synthesis");
+    let (digest_changed, _) = sha256_var(cs2.namespace(|| "changed"), &raw_bits2, real_len).expect("synthesis");
 
     assert_eq!(
       bits_to_bytes(&digest_base),
       bits_to_bytes(&digest_changed),
       "bytes beyond real_len must never affect the digest"
     );
+  }
+
+  /// `msg_active_bits` is a public output callers (e.g.
+  /// `ClaimDigestStepCircuit`'s plaintext-disclosure masking) will rely
+  /// on directly — confirm it's exactly `[true; real_len] ++
+  /// [false; MAX_VAR_MESSAGE_BYTES - real_len]` for a spread of lengths.
+  #[test]
+  fn msg_active_bits_matches_real_len_exactly() {
+    let message: Vec<u8> = vec![0xAB; MAX_VAR_MESSAGE_BYTES];
+    for real_len in [0, 1, 56, 90, 127, MAX_VAR_MESSAGE_BYTES] {
+      let mut cs = TestConstraintSystem::<Scalar>::new();
+      let raw_bits = alloc_raw_bits(&mut cs, &message);
+      let (_, msg_active) = sha256_var(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len)
+        .expect("synthesis");
+      assert_eq!(msg_active.len(), MAX_VAR_MESSAGE_BYTES);
+      for (byte_idx, active) in msg_active.iter().enumerate() {
+        assert_eq!(
+          active.get_value().expect("has a value"),
+          byte_idx < real_len,
+          "real_len={real_len} byte_idx={byte_idx}"
+        );
+      }
+    }
   }
 }
