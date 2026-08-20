@@ -137,51 +137,75 @@ pub fn injected_byte(byte_idx: usize, real_len: usize) -> Option<u8> {
   Some(0x00)
 }
 
-/// Builds the full, correctly-padded `BUFFER_BYTES`-byte buffer for a
-/// real message, natively (for witness generation) — the same value the
-/// in-circuit construction is constrained to equal.
+/// Builds the full, correctly-padded buffer for a real message, natively
+/// (for witness generation) — the same value the in-circuit construction
+/// is constrained to equal. `max_message_bytes`/`num_blocks` size the
+/// buffer the same way [`sha256_var_sized`]'s do — see that function.
 #[allow(clippy::needless_range_loop)] // `byte_idx` is the value being reasoned about, not just an index
-pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTES] {
+pub fn native_padded_buffer_sized(message: &[u8], real_len: usize, max_message_bytes: usize, num_blocks: usize) -> Vec<u8> {
   assert!(real_len <= message.len(), "real_len exceeds supplied message length");
-  assert!(real_len <= MAX_VAR_MESSAGE_BYTES, "real_len exceeds MAX_VAR_MESSAGE_BYTES");
-  let mut buf = [0u8; BUFFER_BYTES];
+  assert!(real_len <= max_message_bytes, "real_len exceeds max_message_bytes");
+  let buffer_bytes = num_blocks * 64;
+  let mut buf = vec![0u8; buffer_bytes];
   buf[..real_len].copy_from_slice(&message[..real_len]);
-  for byte_idx in real_len..BUFFER_BYTES {
+  for byte_idx in real_len..buffer_bytes {
     buf[byte_idx] = injected_byte(byte_idx, real_len).expect("byte_idx >= real_len by loop range");
   }
   buf
 }
 
-/// The in-circuit gadget: constrains `digest` to be the real SHA-256 of
-/// `raw_bits[0..real_len*8]` (MSB-first per byte), where `real_len` is a
-/// witnessed length rather than a compile-time constant — see this
-/// module's doc for the technique. `raw_bits` must be exactly
-/// `MAX_VAR_MESSAGE_BYTES * 8` long; bits at or beyond `real_len*8` are
-/// never read (don't-care in the caller's witness).
+/// [`native_padded_buffer_sized`] fixed to this module's claim-sized
+/// constants ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]).
+pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTES] {
+  native_padded_buffer_sized(message, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)
+    .try_into()
+    .expect("native_padded_buffer_sized returns num_blocks*64 bytes")
+}
+
+/// The in-circuit gadget, generalized over the maximum message size —
+/// [`sha256_var`] is this fixed to the claim-sized constants
+/// ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]); the MSO's own
+/// (differently, larger-sized) variable-length hash reuses this same
+/// function with its own constants rather than duplicating the
+/// technique — see this module's doc for why duplicating it would be
+/// risky (two independent copies of the same intricate logic that could
+/// silently drift apart).
+///
+/// Constrains `digest` to be the real SHA-256 of `raw_bits[0..real_len*8]`
+/// (MSB-first per byte), where `real_len` is a witnessed length rather
+/// than a compile-time constant — see this module's doc for the
+/// technique. `raw_bits` must be exactly `max_message_bytes * 8` long;
+/// bits at or beyond `real_len*8` are never read (don't-care in the
+/// caller's witness). `num_blocks` must be `>= terminal_block_for_len(
+/// max_message_bytes)` (the caller's responsibility — see
+/// [`terminal_block_for_len`]'s doc).
 ///
 /// Returns `(digest_bits, msg_active_bits)`: the 256-bit digest, and —
 /// for callers that need to know which byte positions were real message
 /// content (e.g. to mask a plaintext-disclosure output the same way) —
-/// one `Boolean` per byte in `0..MAX_VAR_MESSAGE_BYTES`, `true` iff that
+/// one `Boolean` per byte in `0..max_message_bytes`, `true` iff that
 /// byte was part of the real (`real_len`-byte) message. Reuse these
 /// rather than recomputing "is this byte real" a second, independent
 /// way — see this function's own internal comment on why.
 #[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
-pub fn sha256_var<Scalar, CS>(
+pub fn sha256_var_sized<Scalar, CS>(
   mut cs: CS,
   raw_bits: &[Boolean],
   real_len: usize,
+  max_message_bytes: usize,
+  num_blocks: usize,
 ) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  assert_eq!(raw_bits.len(), MAX_VAR_MESSAGE_BYTES * 8, "raw_bits must be MAX_VAR_MESSAGE_BYTES*8 long");
-  assert!(real_len <= MAX_VAR_MESSAGE_BYTES, "real_len exceeds MAX_VAR_MESSAGE_BYTES");
+  assert_eq!(raw_bits.len(), max_message_bytes * 8, "raw_bits must be max_message_bytes*8 long");
+  assert!(real_len <= max_message_bytes, "real_len exceeds max_message_bytes");
+  let buffer_bytes = num_blocks * 64;
 
   // 1. One-hot `len_selector[n] == 1` iff `real_len == n`.
-  let mut len_selector: Vec<AllocatedBit> = Vec::with_capacity(MAX_VAR_MESSAGE_BYTES + 1);
-  for n in 0..=MAX_VAR_MESSAGE_BYTES {
+  let mut len_selector: Vec<AllocatedBit> = Vec::with_capacity(max_message_bytes + 1);
+  for n in 0..=max_message_bytes {
     let bit = AllocatedBit::alloc(cs.namespace(|| format!("len_selector {n}")), Some(n == real_len))?;
     len_selector.push(bit);
   }
@@ -198,24 +222,24 @@ where
     );
   }
 
-  // 2. Build the BUFFER_BYTES*8 padded buffer bits, and along the way
-  // collect `msg_active[byte_idx]` for byte_idx in 0..MAX_VAR_MESSAGE_BYTES
-  // — "is this byte position real message content" — for the caller to
-  // reuse (e.g. for plaintext-disclosure masking) rather than
-  // recomputing the same fact a second, independent way. Recomputing it
-  // separately would risk exactly the "two things that should agree
-  // silently drift apart" bug class an earlier review flagged.
-  let mut buffer_bits: Vec<Boolean> = Vec::with_capacity(BUFFER_BYTES * 8);
-  let mut msg_active_bits: Vec<Boolean> = Vec::with_capacity(MAX_VAR_MESSAGE_BYTES);
-  for byte_idx in 0..BUFFER_BYTES {
+  // 2. Build the padded buffer bits, and along the way collect
+  // `msg_active[byte_idx]` for byte_idx in 0..max_message_bytes — "is
+  // this byte position real message content" — for the caller to reuse
+  // (e.g. for plaintext-disclosure masking) rather than recomputing the
+  // same fact a second, independent way. Recomputing it separately
+  // would risk exactly the "two things that should agree silently
+  // drift apart" bug class an earlier review flagged.
+  let mut buffer_bits: Vec<Boolean> = Vec::with_capacity(buffer_bytes * 8);
+  let mut msg_active_bits: Vec<Boolean> = Vec::with_capacity(max_message_bytes);
+  for byte_idx in 0..buffer_bytes {
     // msg_active(byte_idx) = "is this byte position still real message
     // content for the witnessed real_len" = sum over n > byte_idx of
     // len_selector[n] (a pure linear combination — see module doc).
-    // Only possible at all when byte_idx < MAX_VAR_MESSAGE_BYTES (no
+    // Only possible at all when byte_idx < max_message_bytes (no
     // raw_bits exist beyond that, and real_len can never exceed it).
-    let msg_active: Option<Boolean> = if byte_idx < MAX_VAR_MESSAGE_BYTES {
+    let msg_active: Option<Boolean> = if byte_idx < max_message_bytes {
       let mut lc = LinearCombination::<Scalar>::zero();
-      for n in (byte_idx + 1)..=MAX_VAR_MESSAGE_BYTES {
+      for n in (byte_idx + 1)..=max_message_bytes {
         lc = lc + len_selector[n].get_variable();
       }
       let value = byte_idx < real_len;
@@ -240,7 +264,7 @@ where
       // coefficients (0 or 1), since `injected_byte` only depends on
       // `byte_idx`/`n`, both known when building the circuit.
       let mut injected_lc = LinearCombination::<Scalar>::zero();
-      for n in 0..=byte_idx.min(MAX_VAR_MESSAGE_BYTES) {
+      for n in 0..=byte_idx.min(max_message_bytes) {
         if let Some(v) = injected_byte(byte_idx, n)
           && (v >> (7 - bit_idx)) & 1 == 1
         {
@@ -265,7 +289,7 @@ where
         }
         None => {
           let expected =
-            Some(injected_byte(byte_idx, real_len).expect("byte_idx >= real_len for byte_idx >= MAX") >> (7 - bit_idx) & 1 == 1);
+            Some(injected_byte(byte_idx, real_len).expect("byte_idx >= real_len for byte_idx >= max") >> (7 - bit_idx) & 1 == 1);
           (injected_lc, expected)
         }
       };
@@ -284,11 +308,11 @@ where
     }
   }
 
-  // 3. Run the fixed NUM_BLOCKS compression rounds unconditionally,
+  // 3. Run the fixed num_blocks compression rounds unconditionally,
   // recording the state after each block.
   let mut state: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
-  let mut block_states: Vec<Vec<UInt32>> = Vec::with_capacity(NUM_BLOCKS);
-  for i in 0..NUM_BLOCKS {
+  let mut block_states: Vec<Vec<UInt32>> = Vec::with_capacity(num_blocks);
+  for i in 0..num_blocks {
     let block = &buffer_bits[i * 512..(i + 1) * 512];
     state = sha256_compression_function(cs.namespace(|| format!("compress block {i}")), block, &state)?;
     block_states.push(state.clone());
@@ -296,13 +320,13 @@ where
 
   // 4. Select the state after the *real* terminal block, again via a
   // one-hot-derived linear combination (`in_block[k]`), then an
-  // OR-of-ANDs per output bit across the (small, NUM_BLOCKS-sized) set of
+  // OR-of-ANDs per output bit across the (small, num_blocks-sized) set of
   // candidate states — mutually exclusive by construction, so exactly one
   // AND term is ever nonzero.
-  let mut in_block: Vec<Boolean> = Vec::with_capacity(NUM_BLOCKS);
-  for k in 1..=NUM_BLOCKS {
+  let mut in_block: Vec<Boolean> = Vec::with_capacity(num_blocks);
+  for k in 1..=num_blocks {
     let mut lc = LinearCombination::<Scalar>::zero();
-    for n in 0..=MAX_VAR_MESSAGE_BYTES {
+    for n in 0..=max_message_bytes {
       if terminal_block_for_len(n) == k {
         lc = lc + len_selector[n].get_variable();
       }
@@ -323,7 +347,7 @@ where
   let mut digest_bits: Vec<Boolean> = Vec::with_capacity(256);
   for bit_idx in 0..256 {
     let mut acc: Option<Boolean> = None;
-    for k in 0..NUM_BLOCKS {
+    for k in 0..num_blocks {
       let term = Boolean::and(
         cs.namespace(|| format!("select digest bit {bit_idx} block {k}")),
         &in_block[k],
@@ -338,10 +362,25 @@ where
         )?,
       });
     }
-    digest_bits.push(acc.expect("NUM_BLOCKS >= 1"));
+    digest_bits.push(acc.expect("num_blocks >= 1"));
   }
 
   Ok((digest_bits, msg_active_bits))
+}
+
+/// [`sha256_var_sized`] fixed to this module's claim-sized constants
+/// ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]) — what
+/// [`crate::ClaimDigestStepCircuit`] uses.
+pub fn sha256_var<Scalar, CS>(
+  cs: CS,
+  raw_bits: &[Boolean],
+  real_len: usize,
+) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  sha256_var_sized(cs, raw_bits, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)
 }
 
 /// Native (non-circuit) reference implementation: the real SHA-256 digest
@@ -610,6 +649,49 @@ mod circuit_tests {
           "real_len={real_len} byte_idx={byte_idx}"
         );
       }
+    }
+  }
+
+  /// Confirms the generalization behind `sha256_var_sized` (extracted so
+  /// the MSO's own, much larger, variable-length hash can reuse the exact
+  /// same technique instead of a second, independently-written copy) is
+  /// correct at a genuinely different size from the claim use case above
+  /// — not just re-testing the same constants under a new name.
+  #[test]
+  fn sha256_var_sized_matches_real_sha256_at_a_different_scale() {
+    const MAX: usize = 300;
+    const BLOCKS: usize = 5; // terminal_block_for_len(300) == 5
+    assert_eq!(terminal_block_for_len(MAX), BLOCKS);
+
+    let message: Vec<u8> = (0..MAX).map(|i| (i * 11 + 17) as u8).collect();
+    let lengths = [0, 1, 55, 56, 119, 120, 183, 184, 250, MAX];
+
+    for real_len in lengths {
+      let mut cs = TestConstraintSystem::<Scalar>::new();
+      let raw_bits = message
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
+        .enumerate()
+        .map(|(i, b)| {
+          AllocatedBit::alloc(cs.namespace(|| format!("raw bit {i}")), Some(b))
+            .map(Boolean::from)
+            .expect("alloc")
+        })
+        .collect::<Vec<_>>();
+
+      let (digest_bits, msg_active) =
+        sha256_var_sized(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len, MAX, BLOCKS)
+          .expect("synthesis");
+
+      if let Some(reason) = cs.which_is_unsatisfied() {
+        panic!("real_len={real_len}: constraint system unsatisfied at: {reason}");
+      }
+      assert!(cs.is_satisfied());
+      assert_eq!(msg_active.len(), MAX);
+
+      let got = bits_to_bytes(&digest_bits);
+      let expected: [u8; 32] = Sha256::digest(&message[..real_len]).into();
+      assert_eq!(got, expected.to_vec(), "real_len={real_len}");
     }
   }
 }
