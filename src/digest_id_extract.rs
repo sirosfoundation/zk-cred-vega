@@ -231,7 +231,50 @@ where
     }
   }
 
-  // 5. Class-0-specific range check: since class 0 has no marker byte,
+  // 5. Force to zero every `value_bits` byte the selected class's
+  // encoding doesn't actually cover.
+  //
+  // `value_byte_out_pos` is right-aligned, so a narrow class only ever
+  // constrains the LOW bytes of `value_bits` (classes 0 and 1: byte 3
+  // alone; class 2: bytes 2-3; only class 3 covers all four). Without
+  // this step the remaining high bytes are free witness variables, and
+  // step 4 above never touches them — so a prover generating its own
+  // witness could select class 1 to match real window bytes `0x18 0x1A`
+  // (digestID 26) while exposing `value_bits = 0x0ABBCC1A`. Both range
+  // checks below are gated by a *different* class's selector and go
+  // vacuous in that case, and the one-hot constraint is satisfied, so
+  // nothing else catches it. That would defeat this gadget's entire
+  // purpose (the exposed value must provably be the one embedded in the
+  // claim's own bytes), so constrain the uncovered bytes to zero,
+  // per-class, using the same selector-gating pattern as steps 6-7.
+  //
+  // Note this is NOT redundant with the safe Rust API deriving
+  // `real_class` from `digest_id`: an API-level guard binds an honest
+  // caller, not a prover that writes witnesses directly. Soundness has
+  // to live in the constraints.
+  //
+  // The covered set is derived from `value_byte_out_pos` itself rather
+  // than hardcoded, so this can never drift from the mapping it
+  // complements.
+  for c in 0..4 {
+    let covered: Vec<usize> = (0..MAX_CBOR_UINT_BYTES).filter_map(|byte_idx| value_byte_out_pos(c, byte_idx)).collect();
+    for out_pos in 0..4 {
+      if covered.contains(&out_pos) {
+        continue;
+      }
+      for bit_idx in 0..8 {
+        let vbit = &value_bits[out_pos * 8 + bit_idx];
+        cs.enforce(
+          || format!("digest_id class {c} forces value byte {out_pos} bit {bit_idx} to zero"),
+          |_| vbit.lc(CS::one(), Scalar::ONE),
+          |_| class_selector[c].lc(CS::one(), Scalar::ONE),
+          |lc| lc,
+        );
+      }
+    }
+  }
+
+  // 6. Class-0-specific range check: since class 0 has no marker byte,
   // steps above already force window byte 0 == value_be_bytes[3]
   // (digest_id's low byte) when class 0 is selected — but that alone
   // doesn't prevent a class-0 selection for a digest_id >= 24 (the
@@ -253,7 +296,7 @@ where
       |lc| lc,
     );
   }
-  // 6. Class-3 spec bound: value < 2^31 (ISO 18013-5 §9.1.2.4) — the top
+  // 7. Class-3 spec bound: value < 2^31 (ISO 18013-5 §9.1.2.4) — the top
   // bit of the first argument byte (window byte 1) must be 0 whenever
   // class 3 is selected.
   {
@@ -274,6 +317,7 @@ mod tests {
   use super::*;
   use crate::Engine_;
   use bellpepper_core::test_cs::TestConstraintSystem;
+  use ff::Field;
   use vega_prover::traits::Engine;
 
   type Scalar = <Engine_ as Engine>::Scalar;
@@ -409,5 +453,69 @@ mod tests {
     let _ = extract_digest_id::<Scalar, _>(cs.namespace(|| "malformed"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
       .expect("synthesis itself succeeds");
     assert!(!cs.is_satisfied(), "a malformed marker byte must not satisfy the constraints");
+  }
+
+  /// Regression test for a real under-constraint (found 2026-08-21 while
+  /// scoping an independent review, fixed by step 5 in
+  /// [`extract_digest_id`]): because `value_byte_out_pos` is
+  /// right-aligned, a narrow length class only constrains the LOW bytes
+  /// of `value_bits` — so the HIGH bytes were free witness variables for
+  /// classes 0/1/2, and a prover could expose a fabricated large
+  /// `digest_id` while the claim's real bytes encoded a small one.
+  ///
+  /// This has to tamper with the witness *directly* rather than going
+  /// through `extract_digest_id`'s arguments: the safe API derives
+  /// `real_class` from `digest_id`, so it can't express the inconsistent
+  /// (class=1, value=huge) pair at all. That API guard is exactly what
+  /// made this gap invisible to every other test here — and it binds
+  /// only an honest caller, not a prover writing its own witness, which
+  /// is the threat model R1CS soundness has to hold against.
+  #[test]
+  fn rejects_high_value_bits_that_the_selected_class_does_not_encode() {
+    // 26 is class 1 (`0x18 0x1A`), so only value byte 3 is covered by
+    // step 4's window constraints; bytes 0-2 must be forced to zero.
+    let digest_id = 26u32;
+    let item = build_item(digest_id);
+
+    for tampered_byte in 0..3usize {
+      let mut cs = TestConstraintSystem::<Scalar>::new();
+      let item_bits = alloc_item_bits(&mut cs, &item);
+      let extracted =
+        extract_digest_id::<Scalar, _>(cs.namespace(|| "honest"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
+          .expect("synthesis");
+      assert!(cs.is_satisfied(), "the honest witness must satisfy the constraints to begin with");
+      assert_eq!(bits_to_bytes(&extracted.value_bits), digest_id.to_be_bytes().to_vec());
+
+      // Flip the top bit of an uncovered high byte, exactly as a prover
+      // generating its own witness could. `bit 0` is the MSB of value
+      // byte 0, so byte b's MSB is `value bit b*8`.
+      let path = format!("honest/digest_id value bit {}/boolean", tampered_byte * 8);
+      cs.set(&path, Scalar::ONE);
+
+      assert!(
+        !cs.is_satisfied(),
+        "flipping value byte {tampered_byte} (not covered by class 1's 2-byte encoding) must break the constraints, \
+         otherwise the exposed digest_id isn't bound to the claim's real bytes"
+      );
+    }
+  }
+
+  /// The complement of the test above: for class 3 (the only class that
+  /// covers all four value bytes), every byte is already pinned by step
+  /// 4's window constraints — confirm the new step-5 zeroing didn't
+  /// wrongly force any of them to zero (which would reject every legal
+  /// large digestID).
+  #[test]
+  fn class_3_still_accepts_a_full_width_value() {
+    for digest_id in [65536u32, 1_000_000, cbor_uint::MAX_DIGEST_ID] {
+      let item = build_item(digest_id);
+      let mut cs = TestConstraintSystem::<Scalar>::new();
+      let item_bits = alloc_item_bits(&mut cs, &item);
+      let extracted =
+        extract_digest_id::<Scalar, _>(cs.namespace(|| "c3"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
+          .expect("synthesis");
+      assert!(cs.is_satisfied(), "digest_id={digest_id} must remain satisfiable");
+      assert_eq!(bits_to_bytes(&extracted.value_bits), digest_id.to_be_bytes().to_vec());
+    }
   }
 }
