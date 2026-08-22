@@ -5,7 +5,7 @@
 [![CI](https://github.com/sirosfoundation/zk-cred-vega/actions/workflows/ci.yml/badge.svg)](https://github.com/sirosfoundation/zk-cred-vega/actions/workflows/ci.yml)
 [![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=sirosfoundation_zk-cred-vega&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=sirosfoundation_zk-cred-vega)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sirosfoundation/zk-cred-vega/badge)](https://scorecard.dev/viewer/?uri=github.com/sirosfoundation/zk-cred-vega)
-[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg)](LICENSE)
+[![License: BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue.svg)](LICENSE)
 
 </div>
 
@@ -60,4 +60,4 @@ make dump-setup        # writes target/setup-artifacts/
 
 ## License
 
-[MPL-2.0](LICENSE).
+[BSD-2-Clause](LICENSE).
