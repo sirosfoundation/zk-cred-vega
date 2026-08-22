@@ -5,7 +5,7 @@
 //! simple, but `SHA-256(padded bytes)` is a different value from
 //! `SHA-256(real bytes)` for any message that isn't already exactly that
 //! width, which is every real ISO 18013-5 `IssuerSignedItem` (see
-//! `HANDOFF.md`'s "real-interop gap" writeup). This module computes the
+//! the "real-interop gap"). This module computes the
 //! real digest of a real, witnessed-length message instead, while still
 //! keeping the circuit's R1CS shape independent of that length (required
 //! for NeutronNova folding across step instances).
@@ -70,8 +70,8 @@ const SHA256_IV: [u32; 8] = [
 
 /// Maximum real message length this gadget supports. Chosen to
 /// comfortably fit real ISO 18013-5 `IssuerSignedItemBytes` for ordinary
-/// attributes (measured 79-95 bytes against a real signed test vector —
-/// see `HANDOFF.md`), with headroom. Large binary values (portraits,
+/// attributes (measured 79-95 bytes against a real signed test vector),
+/// with headroom. Large binary values (portraits,
 /// `signature_usual_mark`) are out of scope for this claim-byte budget,
 /// same kind of v1/v2 scoping limitation as `MAX_CLAIMS_V1`.
 pub const MAX_VAR_MESSAGE_BYTES: usize = 128;

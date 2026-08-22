@@ -1,6 +1,6 @@
 [package]
 name = "zk-cred-vega"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 license = "MPL-2.0"
 description = "mdoc credential circuits and mobile bindings on top of Microsoft's vega-prover ZK engine"

@@ -10,10 +10,9 @@
 //! claim's plaintext bytes (masked to all-zero otherwise, see that type's
 //! doc), and one "core" circuit (`mdoc_core::MdocCoreCircuit`) proving a
 //! real ECDSA-P256 signature over those digests, folded together via
-//! `vega_mc_zkp`. See `HANDOFF.md` for full status against the tracked
-//! plan (a further security-review pass and iOS packaging are still
-//! open) and `ffi_api` for the UniFFI-exported surface consumed by the
-//! native SDKs.
+//! `vega_mc_zkp`. A further security-review pass and iOS packaging are
+//! still open; see `ffi_api` for the UniFFI-exported surface consumed by
+//! the native SDKs.
 
 pub mod cbor_uint;
 pub mod digest_id_extract;
@@ -69,8 +68,8 @@ pub const MAX_CLAIMS_V1: usize = 4;
 /// [`sha256_var::sha256_var`], not zero-padded before hashing — the
 /// earlier zero-padding scheme silently could never match a real
 /// issuer's `valueDigests` entry for any claim, at any size (see
-/// `HANDOFF.md`'s "real-interop gap" writeup, now closed by this
-/// constant referencing the variable-length gadget). Large binary
+/// the "real-interop gap" this closed, by referencing the
+/// variable-length gadget). Large binary
 /// values (portraits, `signature_usual_mark`) still exceed this budget
 /// — a v1/v2 scoping limitation, not a bug, same as `MAX_CLAIMS_V1`.
 pub const MAX_CLAIM_BYTES_V1: usize = sha256_var::MAX_VAR_MESSAGE_BYTES;
@@ -134,8 +133,7 @@ pub struct ClaimWitness {
 ///
 /// The digest is now computed over the claim's *real* length via
 /// [`sha256_var::sha256_var`] — see that module's doc — rather than
-/// zero-padded to a fixed width, closing the interop gap described in
-/// `HANDOFF.md`. `real_len` is exposed as a public value alongside the
+/// zero-padded to a fixed width, closing a real interop gap. `real_len` is exposed as a public value alongside the
 /// digest for exactly that reason: without it, a verifier can't tell
 /// how many of the (fixed-width) plaintext bytes are real content versus
 /// padding, and [`crate::verify_and_check_binding`] can't re-derive

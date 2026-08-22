@@ -5,7 +5,7 @@
 //!
 //! `VegaProverKey`/`VegaVerifierKey` are loaded from bytes, not generated
 //! on-device — `setup()` runs once, offline, and its output is published
-//! to `go-zk-circuits` (see `HANDOFF.md`); wallets fetch and deserialize
+//! to `go-zk-circuits`; wallets fetch and deserialize
 //! it. The prep-state cache that gives fold-and-reuse its latency win
 //! crosses this boundary as plain bytes too (`prep_prove`'s return /
 //! `prove`'s `prior_state` argument), matching exactly what flows through

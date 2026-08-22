@@ -9,8 +9,7 @@
 //! the MSO's `valueDigests` map keys as `0..MAX_CLAIMS_V1`, with nothing
 //! tying that to what's actually inside the claim bytes being hashed —
 //! self-consistent for credentials this crate mints itself, but not
-//! genuine interop with an arbitrary real credential (see `HANDOFF.md`'s
-//! digestID-binding writeup). This module closes that gap: it extracts
+//! genuine interop with an arbitrary real credential. This module closes that gap: it extracts
 //! the real, witnessed `digestID` value directly from the claim bytes and
 //! produces the exact CBOR bytes to reuse — verbatim — as the MSO's map
 //! key, so the two are provably the same value, not just conventionally

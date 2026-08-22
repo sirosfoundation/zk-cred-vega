@@ -4,7 +4,7 @@
 //! `0x58 0x20` bstr header + the 32-byte digest itself, back to back with
 //! no padding), and a fixed suffix (`deviceKeyInfo`/`validityInfo`) —
 //! matching a real issuer's exact bytes so the whole thing's SHA-256
-//! comes out byte-identical (see `HANDOFF.md`'s digestID-binding
+//! comes out byte-identical (see the digestID-binding
 //! writeup). `mso.rs` builds the actual prefix/entries/suffix content;
 //! this module owns only the variable-width placement math.
 //!
