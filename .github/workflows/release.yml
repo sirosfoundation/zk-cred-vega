@@ -55,7 +55,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: make bindings-kotlin
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: bindings
           path: bindings/
@@ -135,7 +135,7 @@ jobs:
             -DpomFile="$POM" \
             -Dfile="$AAR" \
             -Dpackaging=aar
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: aar
           path: |
