@@ -9,7 +9,14 @@ description = "mdoc credential circuits and mobile bindings on top of Microsoft'
 uniffi = ["dep:uniffi"]
 
 [dependencies]
-vega-prover = { git = "https://github.com/microsoft/vega-prover.git", rev = "c0ee259053cd12eaf43ed71b5cde375452b3ee4d" }
+# Forked from microsoft/vega-prover@c0ee259 (the previously-pinned rev) to
+# add #[serde(skip)] on VegaMcPrepZkSNARK's cached_step_matvec/cached_step_i64
+# fields - deterministic performance caches (prove() already recomputes them
+# when None) that otherwise account for ~70% of a serialized prep-state's
+# size, too large to cross a mobile wallet's FFI boundary into a single JVM
+# byte[] within Android's heap ceiling. Upstream PR planned once verified on
+# real hardware - see this repo's own commit history for the exact diff.
+vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "15fa721" }
 bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }

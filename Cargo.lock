@@ -1683,7 +1683,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vega-prover"
 version = "0.1.0"
-source = "git+https://github.com/microsoft/vega-prover.git?rev=c0ee259053cd12eaf43ed71b5cde375452b3ee4d#c0ee259053cd12eaf43ed71b5cde375452b3ee4d"
+source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=15fa721#15fa72177c1382e766c4c2eff9723134f1bb212a"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
