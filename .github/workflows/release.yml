@@ -166,6 +166,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # Keep the not-for-production warning on every release, not just
+          # the hand-written first one. action-gh-release puts `body` above
+          # the auto-generated notes.
+          body: |
+            > [!WARNING]
+            > **Experimental. Do not use in production.**
+            >
+            > Unaudited research code implementing novel zero-knowledge
+            > circuits. It has not had an independent security review. Do not
+            > rely on it to protect real credentials or real users.
           files: |
             artifacts/zk_cred_vega-*.aar
             artifacts/zk-cred-vega-*.pom
