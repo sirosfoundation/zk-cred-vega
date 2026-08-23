@@ -1,0 +1,158 @@
+# Release — AAR (Android only).
+#
+# Mirrors zk-cred-longfellow's release.yml, minus its XCFramework job:
+# this crate has no iOS target yet (no `make xcframework`), per the
+# "Kotlin first" scope. Add an `ios:` job here when that lands.
+name: Release — AAR
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets the packaging path be exercised without cutting a tag. The
+  # release job below is tag-only, so a manual run builds and uploads
+  # workflow artifacts without touching any GitHub Release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Guard: the tag must match the version in Cargo.toml ────────────
+  # Not in the workflow this mirrors, but cheap, and it catches tagging
+  # vX.Y.Z while Cargo.toml still says something else — which would
+  # otherwise publish a Maven artifact whose version disagrees with the
+  # crate it was built from.
+  version-check:
+    name: Check tag matches Cargo.toml
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+          echo "tag=$TAG_VERSION cargo=$CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+
+  # ── Generate Kotlin bindings on Linux (fast) ───────────────────────
+  bindings:
+    name: Generate bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: make bindings-kotlin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings
+          path: bindings/
+
+  # ── Android / AAR (requires NDK) ──────────────────────────────────
+  android:
+    name: Build AAR
+    runs-on: ubuntu-latest
+    needs: bindings
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+      - uses: android-actions/setup-android@v4
+        with:
+          api-level: 28
+          ndk-version: "27.2.12479018"
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: actions/download-artifact@v8
+        with:
+          name: bindings
+          path: bindings/
+      # On a tag, the tag is authoritative (version-check has already
+      # confirmed it agrees with Cargo.toml). On a manual run there is no
+      # tag, so fall through to the Makefile's own cargo-metadata default.
+      - name: Derive package version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: echo "PKG_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build AAR
+        run: make aar ${PKG_VERSION:+VERSION=$PKG_VERSION}
+      - name: Generate Maven POM
+        run: make pom ${PKG_VERSION:+VERSION=$PKG_VERSION}
+      - name: Publish AAR to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > /tmp/settings.xml <<'EOF'
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+          AAR=$(ls target/zk_cred_vega-*.aar)
+          POM=$(ls target/zk-cred-vega-*.pom)
+          mvn -B deploy:deploy-file \
+            --settings /tmp/settings.xml \
+            -DrepositoryId=github \
+            -Durl="https://maven.pkg.github.com/${GITHUB_REPOSITORY}" \
+            -DpomFile="$POM" \
+            -Dfile="$AAR" \
+            -Dpackaging=aar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aar
+          path: |
+            target/zk_cred_vega-*.aar
+            target/zk-cred-vega-*.pom
+
+  # ── Attach everything to the GitHub Release ────────────────────────
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs: [version-check, android, bindings]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: aar
+          path: artifacts/
+      - uses: actions/download-artifact@v8
+        with:
+          name: bindings
+          path: artifacts/bindings/
+      - name: Package bindings
+        run: cd artifacts && zip -r bindings.zip bindings/
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/zk_cred_vega-*.aar
+            artifacts/zk-cred-vega-*.pom
+            artifacts/bindings.zip
