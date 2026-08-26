@@ -83,7 +83,7 @@ const _: () = assert!(
   "MAX_CLAIMS_V1 changed - the hand-written zk_cred_vega_go.h header's CVerifyResult.claims array length must be updated to match"
 );
 const _: () = assert!(
-  MAX_CLAIM_BYTES_V1 == 128,
+  MAX_CLAIM_BYTES_V1 == 176,
   "MAX_CLAIM_BYTES_V1 changed - the hand-written zk_cred_vega_go.h header's CDisclosedClaim.plaintext array length must be updated to match"
 );
 
@@ -461,15 +461,21 @@ mod tests {
   use num_bigint::BigInt;
   use std::ffi::CStr;
 
-  /// Exercises the full lifecycle through the raw `extern "C"` functions
-  /// exactly as a cgo caller would: deserialize a real published-shaped
-  /// verifier key, verify a real proof (built via the crate's own safe
-  /// API against the checked-in `mdl_4claims_mixed_disclosure.json`-style
-  /// fixture path, mirroring `ffi_api::tests::ffi_round_trip_with_real_signature`),
-  /// then free. Confirms the returned public values match what the safe
-  /// API itself reports for the same proof.
-  #[test]
-  fn c_abi_round_trip_succeeds() {
+  /// Everything a golden C-ABI test needs: a real published-shaped
+  /// verifier key, a real proof over it (built via the crate's own safe
+  /// API, mirroring `ffi_api::tests::ffi_round_trip_with_real_signature`),
+  /// and the expected values a correct verify should report back.
+  struct GoldenFixture {
+    vk_bytes: Vec<u8>,
+    proof_bytes: Vec<u8>,
+    claim0: Vec<u8>,
+    expected_qx: [u8; 32],
+    expected_qy: [u8; 32],
+    device_x: [u8; 32],
+    valid_until_ts: [u8; 20],
+  }
+
+  fn build_golden_fixture() -> GoldenFixture {
     use crate::mso::MsoBodyWitness;
     use crate::{ClaimWitness, MdocEcdsaWitness};
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
@@ -532,36 +538,81 @@ mod tests {
     let (proof, _next_prep) = crate::prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, prep).expect("prove");
     let proof_bytes = bincode::serialize(&proof).expect("serialize proof");
 
+    GoldenFixture {
+      vk_bytes,
+      proof_bytes,
+      claim0,
+      expected_qx: scalar_to_bytes(ecdsa_witness.qx),
+      expected_qy: scalar_to_bytes(ecdsa_witness.qy),
+      device_x: mso_body.device_x,
+      valid_until_ts: mso_body.valid_until_ts,
+    }
+  }
+
+  /// Exercises the full lifecycle through the raw `extern "C"` functions
+  /// exactly as a cgo caller would: deserialize a real published-shaped
+  /// verifier key, verify a real proof, then free. Confirms the returned
+  /// public values match what the safe API itself reports for the same
+  /// proof.
+  #[test]
+  fn c_abi_round_trip_succeeds() {
+    let golden = build_golden_fixture();
+
     // SAFETY: test-only exercise of the raw C ABI with well-formed,
     // valid inputs constructed above; every pointer handed to these
     // functions points at data owned by a local binding that outlives
     // the call.
     unsafe {
       let mut error_out: *mut c_char = std::ptr::null_mut();
-      let vk_handle = zk_cred_vega_deserialize_verifier_key(vk_bytes.as_ptr(), vk_bytes.len(), &mut error_out);
+      let vk_handle = zk_cred_vega_deserialize_verifier_key(golden.vk_bytes.as_ptr(), golden.vk_bytes.len(), &mut error_out);
       assert!(!vk_handle.is_null(), "deserialize_verifier_key failed");
       assert!(error_out.is_null());
 
       let mut result = std::mem::MaybeUninit::<CVerifyResult>::uninit();
       let mut error_out: *mut c_char = std::ptr::null_mut();
-      let status = zk_cred_vega_verify(vk_handle, proof_bytes.as_ptr(), proof_bytes.len(), result.as_mut_ptr(), &mut error_out);
+      let status = zk_cred_vega_verify(
+        vk_handle,
+        golden.proof_bytes.as_ptr(),
+        golden.proof_bytes.len(),
+        result.as_mut_ptr(),
+        &mut error_out,
+      );
       assert_eq!(status, 0, "verify failed");
       assert!(error_out.is_null());
       let result = result.assume_init();
 
-      let expected_qx = scalar_to_bytes(ecdsa_witness.qx);
-      let expected_qy = scalar_to_bytes(ecdsa_witness.qy);
-      assert_eq!(result.qx, expected_qx);
-      assert_eq!(result.qy, expected_qy);
+      assert_eq!(result.qx, golden.expected_qx);
+      assert_eq!(result.qy, golden.expected_qy);
       assert_eq!(result.claims[0].disclosed, 1);
-      assert_eq!(result.claims[0].real_len as usize, claim0.len());
-      assert_eq!(&result.claims[0].plaintext[..claim0.len()], claim0.as_slice());
+      assert_eq!(result.claims[0].real_len as usize, golden.claim0.len());
+      assert_eq!(&result.claims[0].plaintext[..golden.claim0.len()], golden.claim0.as_slice());
       assert_eq!(result.claims[1].disclosed, 0);
-      assert_eq!(result.device_x, mso_body.device_x);
-      assert_eq!(result.valid_until_ts, mso_body.valid_until_ts);
+      assert_eq!(result.device_x, golden.device_x);
+      assert_eq!(result.valid_until_ts, golden.valid_until_ts);
 
       zk_cred_vega_free_verifier_key(vk_handle);
     }
+  }
+
+  /// Not part of the normal test run (`#[ignore]`): dumps the same
+  /// known-good verifier-key + proof used by `c_abi_round_trip_succeeds`
+  /// to `target/go-cabi/testdata/`, so a real Go program linking against
+  /// `target/go-cabi/libzk_cred_vega.so` via cgo can verify it end-to-end
+  /// through the actual C ABI, from actual Go - mirrors
+  /// zk-cred-longfellow's own `dump_golden_fixture_for_go_smoke_test`. Run
+  /// explicitly via:
+  ///
+  ///   cargo test --release go_ffi::tests::dump_golden_fixture_for_go_smoke_test -- --ignored
+  #[test]
+  #[ignore = "run explicitly to regenerate fixtures for the Go cgo smoke test"]
+  fn dump_golden_fixture_for_go_smoke_test() {
+    let golden = build_golden_fixture();
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/go-cabi/testdata");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("verifier_key.bin"), &golden.vk_bytes).unwrap();
+    std::fs::write(out_dir.join("proof.bin"), &golden.proof_bytes).unwrap();
+    std::fs::write(out_dir.join("claim0.bin"), &golden.claim0).unwrap();
+    eprintln!("wrote golden fixture to {}", out_dir.display());
   }
 
   /// A tampered proof must be rejected, and the rejection must come with a

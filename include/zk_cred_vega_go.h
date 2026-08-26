@@ -52,7 +52,7 @@ typedef struct GoVegaVerifierKey GoVegaVerifierKey;
 
 /* Circuit-fixed sizes (see src/go_ffi.rs's compile-time assertions). */
 #define ZK_CRED_VEGA_MAX_CLAIMS      4   /* crate::MAX_CLAIMS_V1 */
-#define ZK_CRED_VEGA_MAX_CLAIM_BYTES 128 /* crate::MAX_CLAIM_BYTES_V1 */
+#define ZK_CRED_VEGA_MAX_CLAIM_BYTES 176 /* crate::MAX_CLAIM_BYTES_V1 */
 #define ZK_CRED_VEGA_TIMESTAMP_LEN   20  /* crate::mso::TIMESTAMP_LEN */
 
 /*
