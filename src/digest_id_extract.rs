@@ -57,6 +57,10 @@ use ff::PrimeField;
 /// + 32 bytes), and 9 bytes for the literal key `"digestID"` (`0x68` + 8
 /// ASCII bytes) — see module doc for why `random` precedes `digestID`
 /// under canonical CBOR ordering.
+// clippy's doc_lazy_continuation false-positives on the "N bytes for ..."
+// clauses above (reads them as an unindented markdown ordered-list
+// continuation) - this is genuine prose, not a list.
+#[allow(clippy::doc_lazy_continuation)]
 pub const DIGEST_ID_OFFSET_BYTES: usize = 2 + 2 + 1 + 7 + 34 + 9;
 
 /// The extracted, validated `digestID`: its decoded numeric value (32
