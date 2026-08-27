@@ -1841,7 +1841,7 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zk-cred-vega"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "bellpepper",
