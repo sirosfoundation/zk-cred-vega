@@ -30,6 +30,17 @@ use sha2::{Digest, Sha256};
 use zk_cred_vega::mso::MsoBodyWitness;
 use zk_cred_vega::{ClaimWitness, MdocEcdsaWitness, MAX_CLAIMS_V1};
 
+/// Disclosed bytes now travel beside the proof (see
+/// `verify_and_check_binding`), so callers hand them over explicitly.
+fn disclosed_for(claims: &[zk_cred_vega::ClaimWitness]) -> Vec<Option<Vec<u8>>> {
+  let mut v: Vec<Option<Vec<u8>>> = claims
+    .iter()
+    .map(|c| if c.disclose { Some(c.issuer_signed_item_bytes.clone()) } else { None })
+    .collect();
+  v.resize(zk_cred_vega::MAX_CLAIMS_V1, None);
+  v
+}
+
 #[derive(Deserialize)]
 struct FixtureClaim {
   #[allow(dead_code)]
@@ -200,7 +211,7 @@ fn forged_ecdsa_signature_binding_is_rejected() {
     let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &forged_witness, &mso_body, &nonce)?;
     let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &forged_witness, &mso_body, prep, &nonce)?;
     let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk)?;
-    let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)?;
+    let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&claims))?;
     Ok(verified)
   })();
 
@@ -251,7 +262,7 @@ fn wrong_digest_id_on_a_real_claim_is_rejected() {
     let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, &nonce)?;
     let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce)?;
     let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk)?;
-    let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)?;
+    let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&claims))?;
     Ok(verified)
   })();
 

@@ -119,7 +119,7 @@ pub struct MdocCoreCircuit<Eng: Engine> {
   /// disclosed-plaintext defense-in-depth check can still work natively;
   /// the step<->core digest cross-check itself doesn't actually need it
   /// public (see that doc for why).
-  pub nonce: [u8; 32],
+  pub nonce: [u8; crate::BLIND_NONCE_BYTES],
   _p: PhantomData<Eng>,
 }
 
@@ -134,7 +134,7 @@ impl<Eng: Engine> MdocCoreCircuit<Eng> {
     digest_ids: [u32; crate::MAX_CLAIMS_V1],
     claim_digests: Vec<[u8; 32]>,
     mso_body: crate::mso::MsoBodyWitness,
-    nonce: [u8; 32],
+    nonce: [u8; crate::BLIND_NONCE_BYTES],
   ) -> Self {
     Self {
       qx,
@@ -522,7 +522,7 @@ mod tests {
       digest_ids,
       claim_digests,
       mso_body,
-      [0x42u8; 32],
+      [0x42u8; crate::BLIND_NONCE_BYTES],
     );
 
     let mut cs = TestConstraintSystem::<Scalar>::new();

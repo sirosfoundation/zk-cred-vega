@@ -66,6 +66,18 @@ fn fixed_bytes<const N: usize>(s: &str) -> [u8; N] {
   hex_bytes(s).try_into().expect("expected length")
 }
 
+
+/// Disclosed bytes now travel beside the proof (see
+/// `verify_and_check_binding`), so tests must hand them over explicitly.
+fn disclosed_for(claims: &[ClaimWitness]) -> Vec<Option<Vec<u8>>> {
+  let mut v: Vec<Option<Vec<u8>>> = claims
+    .iter()
+    .map(|c| if c.disclose { Some(c.issuer_signed_item_bytes.clone()) } else { None })
+    .collect();
+  v.resize(zk_cred_vega::MAX_CLAIMS_V1, None);
+  v
+}
+
 #[test]
 fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
   let raw = std::fs::read_to_string("test-vectors/mdl_4claims_mixed_disclosure.json")
@@ -129,7 +141,7 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
     zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
   let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk).expect("verify");
 
-  let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)
+  let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&claims))
     .expect("binding check must pass for a genuine real-shaped presentation");
 
   assert_eq!(verified.qx, ecdsa_witness.qx);
@@ -138,7 +150,14 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
 
   for (verified_claim, expected) in verified.claims.iter().zip(fixture.claims.iter()) {
     assert_eq!(verified_claim.disclosed, expected.disclose);
-    assert_eq!(verified_claim.real_len, expected.issuer_signed_item_bytes_len);
+    // Undisclosed claims now report length 0: an item's byte length
+    // correlates with its value, so leaking it narrows the hidden content.
+    assert_eq!(
+      verified_claim.real_len,
+      if expected.disclose { expected.issuer_signed_item_bytes_len } else { 0 },
+      "{}: an undisclosed claim's length must not leak",
+      expected.element_identifier
+    );
     assert_eq!(
       verified_claim.digest_id as u64, expected.digest_id,
       "{}: the real reference vector's own digestID must round-trip through the proof",
@@ -152,10 +171,9 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
         expected.element_identifier
       );
     } else {
-      assert_eq!(
-        verified_claim.plaintext,
-        vec![0u8; expected.issuer_signed_item_bytes_len],
-        "{}: undisclosed plaintext must be masked to all-zero",
+      assert!(
+        verified_claim.plaintext.is_empty(),
+        "{}: an undisclosed claim carries no plaintext at all now",
         expected.element_identifier
       );
     }
