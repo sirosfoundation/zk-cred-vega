@@ -25,14 +25,23 @@ lto = "fat"
 codegen-units = 1
 
 [dependencies]
-# Forked from microsoft/vega-prover@c0ee259 (the previously-pinned rev) to
-# add #[serde(skip)] on VegaMcPrepZkSNARK's cached_step_matvec/cached_step_i64
-# fields - deterministic performance caches (prove() already recomputes them
-# when None) that otherwise account for ~70% of a serialized prep-state's
-# size, too large to cross a mobile wallet's FFI boundary into a single JVM
-# byte[] within Android's heap ceiling. Upstream PR planned once verified on
-# real hardware - see this repo's own commit history for the exact diff.
-vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "15fa721" }
+# Forked from microsoft/vega-prover@c0ee259 to add #[serde(skip)] on
+# VegaMcPrepZkSNARK's cached_step_matvec/cached_step_i64 fields -
+# deterministic performance caches (prove() already recomputes them when
+# None) that otherwise account for ~70% of a serialized prep-state's
+# size, too large to cross a mobile wallet's FFI boundary into a single
+# JVM byte[] within Android's heap ceiling. Rev bumped again for a real,
+# measured ~35-40% prove() speedup: bind_and_prepare_poly_ABC_inner (the
+# real hot path - roughly half of prove()'s total wall time) was
+# unconditionally splitting into rayon::current_num_threads() chunks,
+# each allocating+zeroing its own full out_len-sized (~1M elements)
+# buffer before doing any row work - a fixed cost that swamped the
+# actual per-row work at this circuit's scale. See
+# sirosfoundation/vega-prover@2a7dcb3 for the fix and its own real
+# before/after measurement. Upstream PRs (both this and the prep-state
+# fix) planned once verified on real hardware - see this repo's own
+# commit history for the exact diffs.
+vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "2a7dcb3" }
 bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }
