@@ -17,20 +17,27 @@
 //!
 //! ## Byte layout assumption (v1 scope)
 //!
-//! `digestID` is assumed to be the *first* field of the `IssuerSignedItem`
-//! map, in CDDL declaration order (`digestID`, `random`,
-//! `elementIdentifier`, `elementValue`) — confirmed against a real signed
-//! test vector by `mso.rs`'s own module doc, and independently corroborated
-//! by `zk-cred-longfellow`'s real production circuit interface docs,
-//! which document the *same* byte-14 starting offset for a real item
-//! whose CBOR byte-string length uses the 2-byte header form (true for
-//! every realistic item size this crate supports — see
-//! [`DIGEST_ID_OFFSET_BYTES`]'s doc). A real issuer that instead uses
-//! canonical (sorted-key) or another field order for `IssuerSignedItem`
-//! is out of this v1's scope, same kind of limitation as this crate's
-//! fixed claim count and single namespace. `zk-cred-longfellow`'s own
-//! circuit witnesses field order explicitly for exactly this reason (real
-//! issuers vary) — a real generalization path if this ever needs to widen.
+//! `digestID` is assumed to be the *second* field of the `IssuerSignedItem`
+//! map, preceded only by a fixed-width 32-byte `random` salt — the
+//! canonical-CBOR (RFC 7049, shortest-key-first-then-lexicographic) key
+//! order `random`(6), `digestID`(8), `elementValue`(12),
+//! `elementIdentifier`(17) that `vc`'s issuer (`pkg/mdoc.MSOBuilder.Build`,
+//! via `NewCBOREncoder`'s `cbor.EncOptions{Sort: cbor.SortCanonical}`)
+//! actually produces — not CDDL declaration order, which this module
+//! previously assumed (matching the same wrong assumption `mso.rs` used to
+//! make; see that module's doc for the shared root cause: `IssuerSignedItem`,
+//! like the MSO itself, is a plain Go map encoded under canonical sort, so
+//! Go source field-declaration order is irrelevant). Confirmed byte-exact
+//! against a real device presentation's captured claim bytes (digestID's
+//! CBOR-encoded value starts at byte 55 in all 4 real claims, regardless of
+//! `elementValue`'s own length, since `elementValue`/`elementIdentifier`
+//! sort *after* `digestID`) — see [`DIGEST_ID_OFFSET_BYTES`]'s doc for the
+//! byte accounting. A real issuer using a *different* `random` width, or a
+//! non-canonical field order, is out of this v1's scope, same kind of
+//! limitation as this crate's fixed claim count and single namespace.
+//! `zk-cred-longfellow`'s own circuit witnesses field order explicitly for
+//! exactly this reason (real issuers vary) — a real generalization path if
+//! this ever needs to widen.
 
 use crate::cbor_uint::{self, MAX_CBOR_UINT_BYTES};
 use bellpepper_core::{
@@ -44,11 +51,13 @@ use ff::PrimeField;
 /// `#6.24` tag, 2 bytes for the enclosing byte string's 2-byte-length
 /// CBOR header (`0x58 XX` — correct whenever the item's inner map is
 /// 24-255 bytes, true for every claim size this crate supports, real or
-/// padding), 1 byte for the 4-entry map header (`0xa4`), and 9 bytes for
-/// the literal key `"digestID"` (`0x68` + 8 ASCII bytes). Matches
-/// `zk-cred-longfellow`'s own documented offset for the same real-world
-/// byte shape (see module doc).
-pub const DIGEST_ID_OFFSET_BYTES: usize = 2 + 2 + 1 + 9;
+/// padding), 1 byte for the 4-entry map header (`0xa4`), 7 bytes for the
+/// literal key `"random"` (`0x66` + 6 ASCII bytes), 34 bytes for
+/// `random`'s own fixed-width 32-byte salt value (`0x58 0x20` bstr header
+/// + 32 bytes), and 9 bytes for the literal key `"digestID"` (`0x68` + 8
+/// ASCII bytes) — see module doc for why `random` precedes `digestID`
+/// under canonical CBOR ordering.
+pub const DIGEST_ID_OFFSET_BYTES: usize = 2 + 2 + 1 + 7 + 34 + 9;
 
 /// The extracted, validated `digestID`: its decoded numeric value (32
 /// bits, MSB-first) and the exact CBOR bytes that encode it (fixed
@@ -395,6 +404,35 @@ mod tests {
       expected_encoded.resize(MAX_CBOR_UINT_BYTES, 0u8);
       assert_eq!(got_encoded, expected_encoded, "digest_id={digest_id}: encoded bytes mismatch");
     }
+  }
+
+  /// Regression check against a real `vc`-issued claim's actual bytes
+  /// (captured from a live device presentation — see this module's doc):
+  /// `digestID`'s CBOR-encoded value must sit at byte 55, not byte 14,
+  /// confirming `random` (32-byte salt) precedes `digestID` under
+  /// canonical CBOR ordering.
+  #[test]
+  fn extracts_digest_id_from_a_real_vc_issued_claim() {
+    let mut item = hex_decode(
+      "d8185866a46672616e646f6d582050a281e6edc59abac15e7ea7e455fed1045a513d47f091c5932f632fdf6d0b41\
+       686469676573744944006c656c656d656e7456616c7565664d697272656e71656c656d656e744964656e7469666965726b66616d696c795f6e616d65",
+    );
+    assert_eq!(item[DIGEST_ID_OFFSET_BYTES], 0x00, "byte at DIGEST_ID_OFFSET_BYTES must be the real digestID=0 value");
+    // alloc_item_bits requires exactly ITEM_BITS_LEN/8 bytes; the real
+    // item (106 bytes) is longer, but only the DIGEST_ID_OFFSET_BYTES
+    // window matters here, so truncate/pad to the fixed test width.
+    item.resize(ITEM_BITS_LEN / 8, 0xBBu8);
+
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let item_bits = alloc_item_bits(&mut cs, &item);
+    let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "extract"), &item_bits, DIGEST_ID_OFFSET_BYTES, 0)
+      .expect("synthesis");
+    assert!(cs.is_satisfied());
+    assert_eq!(bits_to_bytes(&extracted.value_bits), 0u32.to_be_bytes().to_vec());
+  }
+
+  fn hex_decode(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
   }
 
   #[test]

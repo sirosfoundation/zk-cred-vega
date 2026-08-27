@@ -15,10 +15,17 @@
 //! Each `IssuerSignedItem` is hand-encoded via a small, purpose-built
 //! CBOR builder (not a general parser/encoder — same "just enough for
 //! this one fixed shape" philosophy as `crate::mso`), matching the real
-//! CDDL: `{"digestID": uint, "random": bstr, "elementIdentifier": tstr,
-//! "elementValue": any}`, tag(24)-wrapped, in CDDL declaration order —
-//! the exact same conventions `mso.rs`'s own module doc already
-//! confirmed against a real signed test vector.
+//! CDDL fields (`digestID`, `random`, `elementIdentifier`, `elementValue`),
+//! tag(24)-wrapped, in **canonical CBOR key order**
+//! (`random`(6), `digestID`(8), `elementValue`(12), `elementIdentifier`(17)
+//! — shortest key first, matching `vc`'s real `cbor.SortCanonical`
+//! encoder) with a fixed 32-byte `random` salt — the exact real byte
+//! shape `mso.rs`'s and `digest_id_extract`'s own module docs confirm
+//! against a real signed test vector and a real device presentation,
+//! respectively. (Earlier revisions of this generator used CDDL
+//! declaration order and a 16-byte salt — self-consistent with this
+//! crate's own, then-wrong, offset assumptions, but not what any real
+//! issuer this integration targets actually produces.)
 //!
 //! digestIDs here deliberately span all four CBOR-uint length classes
 //! (1/2/3/5 bytes — see `cbor_uint`'s module doc), not the narrow
@@ -90,20 +97,19 @@ fn cbor_tag24(inner: &[u8]) -> Vec<u8> {
   v
 }
 
-/// Builds one real-shape `IssuerSignedItem`, tag(24)-wrapped, matching
-/// the exact CDDL declaration order confirmed against a real signed
-/// mdoc in `mso.rs`'s own module doc: `digestID`, `random`,
-/// `elementIdentifier`, `elementValue`.
-fn build_issuer_signed_item(digest_id: u64, random: &[u8; 16], element_identifier: &str, element_value_cbor: &[u8]) -> Vec<u8> {
+/// Builds one real-shape `IssuerSignedItem`, tag(24)-wrapped, in
+/// canonical CBOR key order (`random`, `digestID`, `elementValue`,
+/// `elementIdentifier` — see module doc for why).
+fn build_issuer_signed_item(digest_id: u64, random: &[u8; 32], element_identifier: &str, element_value_cbor: &[u8]) -> Vec<u8> {
   let mut item = vec![0xa4]; // map, 4 entries
-  item.extend(cbor_tstr("digestID"));
-  item.extend(cbor_uint(digest_id));
   item.extend(cbor_tstr("random"));
   item.extend(cbor_bstr(random));
-  item.extend(cbor_tstr("elementIdentifier"));
-  item.extend(cbor_tstr(element_identifier));
+  item.extend(cbor_tstr("digestID"));
+  item.extend(cbor_uint(digest_id));
   item.extend(cbor_tstr("elementValue"));
   item.extend_from_slice(element_value_cbor);
+  item.extend(cbor_tstr("elementIdentifier"));
+  item.extend(cbor_tstr(element_identifier));
   cbor_tag24(&item)
 }
 
@@ -165,7 +171,7 @@ fn gen_one(description: &str, out_path: &std::path::Path) {
   let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(claim_specs.len());
   let mut digest_ids: Vec<u32> = Vec::with_capacity(claim_specs.len());
   for (digest_id, (identifier, value_cbor, disclose)) in DIGEST_IDS.into_iter().zip(claim_specs) {
-    let mut random = [0u8; 16];
+    let mut random = [0u8; 32];
     rng.fill_bytes(&mut random);
     let item_bytes = build_issuer_signed_item(digest_id, &random, identifier, &value_cbor);
     assert!(
