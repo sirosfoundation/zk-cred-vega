@@ -10,6 +10,10 @@
 #   make android          — cross-compile for Android (arm64, armv7, x86_64)
 #   make aar               — package Android AAR
 #   make publish-local     — build AAR + POM and install to ~/.m2 (mavenLocal)
+#   make go-cabi            — build the plain C-ABI cdylib/staticlib for Go's
+#                             cgo verifier (default features, NOT
+#                             --features uniffi), staged alongside the
+#                             hand-written C header
 #   make check-bindings    — CI helper: fail if generated bindings are stale
 #   make clean              — remove build artifacts
 
@@ -27,11 +31,12 @@ VERSION    := $(shell cargo metadata --no-deps --format-version 1 | python3 -c "
 BUILD_DIR    := target
 BINDINGS_DIR := bindings
 KOTLIN_DIR   := $(BINDINGS_DIR)/kotlin
+GO_CABI_DIR  := $(BUILD_DIR)/go-cabi
 
 # Android targets (via cargo-ndk)
 ANDROID_TARGETS := aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-.PHONY: all bindings-kotlin android aar pom publish-local clean check-bindings dump-setup
+.PHONY: all bindings-kotlin android aar pom publish-local clean check-bindings dump-setup go-cabi
 
 all: bindings-kotlin
 
@@ -52,6 +57,32 @@ bindings-kotlin: $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT)
 
 $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT):
 	cargo build --release --features uniffi
+
+# ── Go C-ABI (for vc-verifier's cgo wrapper) ────────────────────────
+#
+# Unlike bindings-kotlin (which needs --features uniffi), this builds with
+# the crate's *default* features: go_ffi.rs is always compiled in (see
+# src/lib.rs - no #[cfg(feature = "uniffi")] on that module, unlike
+# ffi_api.rs), and building without uniffi keeps this artifact free of
+# UniFFI's scaffolding and its extra dependency graph, which Go/cgo callers
+# have no use for. Mirrors zk-cred-longfellow's own go-cabi target exactly.
+
+go-cabi: $(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/$(LIB_NAME).a $(GO_CABI_DIR)/zk_cred_vega_go.h
+	@echo "Go C-ABI library + header staged in $(GO_CABI_DIR)"
+
+$(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT): $(GO_CABI_DIR)/zk_cred_vega_go.h
+	cargo build --release
+	@mkdir -p $(GO_CABI_DIR)
+	cp $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/
+
+$(GO_CABI_DIR)/$(LIB_NAME).a: $(GO_CABI_DIR)/zk_cred_vega_go.h
+	cargo build --release
+	@mkdir -p $(GO_CABI_DIR)
+	cp $(BUILD_DIR)/release/$(LIB_NAME).a $(GO_CABI_DIR)/
+
+$(GO_CABI_DIR)/zk_cred_vega_go.h: include/zk_cred_vega_go.h
+	@mkdir -p $(GO_CABI_DIR)
+	cp include/zk_cred_vega_go.h $(GO_CABI_DIR)/
 
 # ── Android cross-compilation (requires cargo-ndk + Android NDK) ────
 

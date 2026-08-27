@@ -11,29 +11,53 @@
 //! ## Byte-exact, not guessed
 //!
 //! Every fixed byte segment below was derived from, and verified against,
-//! a **real signed mdoc**: `zk-cred-longfellow`'s own
-//! `test-vectors/mdoc_zk/v6_v7_1attr_issue_date.json` (a real OWF/multipaz
-//! test credential, docType `org.iso.18013.5.1.mDL`). Decoding that
-//! credential's `issuerAuth` (Python, `cbor2`), reconstructing its
-//! `Sig_structure` byte-for-byte, and checking the real ECDSA signature
-//! against the real issuer's real x5chain certificate (Python,
-//! `cryptography`) confirmed the exact construction: `Sig_structure =
-//! ["Signature1", protected_bytes, h'', payload_bytes]` (CBOR array),
-//! `payload_bytes = #6.24(bstr <MSO CBOR bytes>)`, and — importantly —
-//! `unprotected` (which carries `x5chain`) is **not** part of the signed
-//! bytes at all, matching COSE_Sign1's definition; the issuer's public key
-//! reaches the verifier only via `x5chain`, checked independently of this
-//! circuit (see `MdocCoreCircuit`'s module doc).
+//! a **real signed mdoc issued by this stack's own `SUNET/vc` issuer**
+//! (`pkg/mdoc.MSOBuilder.Build`, `sirosfoundation/vc`): running that exact
+//! production code path (real `NewMSOBuilder`/`WithSigner`/`AddDataElement`
+//! calls, a real generated P-256 issuer cert, real ECDSA signing) and
+//! dumping the resulting `COSE_Sign1`'s `Protected`/`Payload` bytes
+//! confirmed the exact construction: `Sig_structure = ["Signature1",
+//! protected_bytes, h'', payload_bytes]` (CBOR array), `payload_bytes =
+//! #6.24(bstr <MSO CBOR bytes>)`, `protected_bytes = {1: -7}` (ES256), and
+//! -- importantly -- `unprotected` (which carries `x5chain`) is **not**
+//! part of the signed bytes at all, matching COSE_Sign1's definition; the
+//! issuer's public key reaches the verifier only via `x5chain`, checked
+//! independently of this circuit (see `MdocCoreCircuit`'s module doc).
 //!
-//! ## `digestID`s are real, variable-width CBOR uints — not fixed 0..3
+//! This module previously derived its field order from a *different* real
+//! mdoc (`zk-cred-longfellow`'s `v6_v7_1attr_issue_date.json`, an
+//! OWF/multipaz test credential) and assumed CDDL declaration order
+//! (`version`, `digestAlgorithm`, `docType`, `valueDigests`,
+//! `deviceKeyInfo`, `validityInfo`) held generally. It doesn't: `vc`'s
+//! `pkg/mdoc.NewCBOREncoder` sets `cbor.EncOptions{Sort:
+//! cbor.SortCanonical}` (`fxamacker/cbor`'s RFC 7049 canonical CBOR --
+//! shortest-key-first, then bytewise lexicographic among same-length
+//! keys), and the MSO itself is built as a plain `map[string]any` (not a
+//! tagged struct), so its declaration order in Go source is irrelevant --
+//! only the canonical sort matters. For these 6 keys that sorts to
+//! `docType`, `version`, `validityInfo`, `valueDigests`, `deviceKeyInfo`,
+//! `digestAlgorithm` -- a different byte layout from the old assumption on
+//! every field after the first two. Reconstructing the wrong layout still
+//! produces a plausible-looking `z`, just not the one ECDSA actually
+//! signed -- the exact "internally-inconsistent... valid-looking scalars"
+//! failure class this crate's own `lib.rs` doc already warns about,
+//! surfacing downstream as `InvalidSumcheckProof` at verify time with no
+//! more specific diagnostic. Confirmed empirically: switching a live
+//! end-to-end presentation from a `pid_mdoc`-docType credential to a new
+//! `org.iso.18013.5.1.mDL`-docType credential (ruling out a docType/
+//! namespace mismatch) still failed identically, which is what prompted
+//! re-deriving this module's byte layout against the real issuer instead
+//! of re-trusting the external OWF/multipaz reference.
+//!
+//! ## `digestID`s are real, variable-width CBOR uints -- not fixed 0..3
 //!
 //! ISO 18013-5 §9.1.2.4 bounds `digestID` at `< 2^31` and explicitly warns
 //! issuers against small/correlated values (see `cbor_uint`'s module
-//! doc) — a real MSO's `valueDigests` keys are 1, 2, 3, or 5 CBOR bytes
+//! doc) -- a real MSO's `valueDigests` keys are 1, 2, 3, or 5 CBOR bytes
 //! each, not always the single byte `0..3` this module originally
 //! hardcoded. [`crate::mso_splice`] assembles that variable-width section
 //! (and the fixed prefix/suffix around it) into one flat, fixed-size
-//! buffer for [`crate::sha256_var::sha256_var_sized`] to hash — see that
+//! buffer for [`crate::sha256_var::sha256_var_sized`] to hash -- see that
 //! module's doc for the one-hot-cursor technique this requires to keep
 //! the circuit's shape fixed regardless of which widths are chosen.
 //!
@@ -42,13 +66,11 @@
 //! This module bakes in `docType = "org.iso.18013.5.1.mDL"`, a single
 //! namespace `"org.iso.18013.5.1"`, `digestAlgorithm = "SHA-256"`, and
 //! exactly [`crate::MAX_CLAIMS_V1`] digestIDs (each now independently
-//! witnessed, any spec-legal value) — the same fixed-shape convention
-//! `MAX_CLAIM_BYTES_V1` already establishes elsewhere in this crate. A
-//! real MSO's map key order follows the CDDL declaration order
-//! (`version`, `digestAlgorithm`, `docType`, `valueDigests`,
-//! `deviceKeyInfo`, `validityInfo`) — confirmed from the same real test
-//! vector, **not** canonical/sorted CBOR map ordering, which real
-//! implementations evidently don't follow here.
+//! witnessed, any spec-legal value) -- the same fixed-shape convention
+//! `MAX_CLAIM_BYTES_V1` already establishes elsewhere in this crate. The
+//! real (canonical-CBOR) map key order is `docType`, `version`,
+//! `validityInfo`, `valueDigests`, `deviceKeyInfo`, `digestAlgorithm` --
+//! see above for why.
 //!
 //! Every "FIXED" segment below is therefore a compile-time constant byte
 //! string, identical for every credential of this exact shape; only the
@@ -58,8 +80,8 @@
 //! This module reconstructs a real issuer's exact `Sig_structure` bytes
 //! for *any* spec-legal digestID combination, not just the narrow
 //! `0..MAX_CLAIMS_V1` range this crate used to mint itself. The
-//! `digest_ids` witnessed here are still caller-supplied native values —
-//! this module has no way to check them itself — but they're no longer
+//! `digest_ids` witnessed here are still caller-supplied native values --
+//! this module has no way to check them itself -- but they're no longer
 //! trusted blindly end to end: [`crate::ClaimDigestStepCircuit`]
 //! independently extracts each claim's real, embedded digestID via
 //! [`crate::digest_id_extract`] and exposes it as a public value, and
@@ -73,26 +95,40 @@ use bellpepper_core::{
 };
 
 /// One fixed-length ASCII timestamp, e.g. `"2026-08-20T00:00:00Z"` (the
-/// `tdate` text form CBOR tag 0 wraps — always exactly this length for a
+/// `tdate` text form CBOR tag 0 wraps -- always exactly this length for a
 /// UTC, whole-second, `Z`-suffixed RFC 3339 timestamp).
 pub const TIMESTAMP_LEN: usize = 20;
 
-/// Everything up to (not including) the first digestID's own bytes —
-/// `{"version":"1.0","digestAlgorithm":"SHA-256","docType":
-/// "org.iso.18013.5.1.mDL","valueDigests":{"org.iso.18013.5.1":{` — a
-/// fixed 4-entry map header (`0xa4`) since [`crate::MAX_CLAIMS_V1`] is a
-/// compile-time constant; only the *keys* inside vary in encoded width.
+/// From the start of the MSO body through `validityInfo.signed`'s tag(0) +
+/// tstr(20) header -- `{"docType":"org.iso.18013.5.1.mDL","version":"1.0",
+/// "validityInfo":{"signed":0(` -- a fixed 6-entry map header (`0xa6`)
+/// since [`crate::MAX_CLAIMS_V1`] is a compile-time constant.
 const SEG_PREFIX_BASE: &[u8] = &[
-  0xa6, 0x67, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x63, 0x31, 0x2e, 0x30, 0x6f, 0x64, 0x69,
-  0x67, 0x65, 0x73, 0x74, 0x41, 0x6c, 0x67, 0x6f, 0x72, 0x69, 0x74, 0x68, 0x6d, 0x67, 0x53, 0x48,
-  0x41, 0x2d, 0x32, 0x35, 0x36, 0x67, 0x64, 0x6f, 0x63, 0x54, 0x79, 0x70, 0x65, 0x75, 0x6f, 0x72,
-  0x67, 0x2e, 0x69, 0x73, 0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e, 0x35, 0x2e, 0x31, 0x2e,
-  0x6d, 0x44, 0x4c, 0x6c, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x44, 0x69, 0x67, 0x65, 0x73, 0x74, 0x73,
-  0xa1, 0x71, 0x6f, 0x72, 0x67, 0x2e, 0x69, 0x73, 0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e,
-  0x35, 0x2e, 0x31, 0xa4,
+  0xa6, 0x67, 0x64, 0x6f, 0x63, 0x54, 0x79, 0x70, 0x65, 0x75, 0x6f, 0x72, 0x67, 0x2e, 0x69, 0x73,
+  0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e, 0x35, 0x2e, 0x31, 0x2e, 0x6d, 0x44, 0x4c, 0x67,
+  0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x63, 0x31, 0x2e, 0x30, 0x6c, 0x76, 0x61, 0x6c, 0x69,
+  0x64, 0x69, 0x74, 0x79, 0x49, 0x6e, 0x66, 0x6f, 0xa3, 0x66, 0x73, 0x69, 0x67, 0x6e, 0x65, 0x64,
+  0xc0, 0x74,
+];
+/// Between `validityInfo.signed` and `.validFrom`: `,"validFrom":0("`.
+const SEG_BETWEEN_SIGNED_VALIDFROM: &[u8] = &[
+  0x69, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x46, 0x72, 0x6f, 0x6d, 0xc0, 0x74,
+];
+/// Between `validityInfo.validFrom` and `.validUntil`: `,"validUntil":0("`.
+const SEG_BETWEEN_VALIDFROM_VALIDUNTIL: &[u8] = &[
+  0x6a, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x55, 0x6e, 0x74, 0x69, 0x6c, 0xc0, 0x74,
+];
+/// After `validityInfo.validUntil`, through `valueDigests`'s inner
+/// (namespace) map's own digest-map header -- `},"valueDigests":
+/// {"org.iso.18013.5.1":{` -- fixed at 4 entries (`0xa4`) since
+/// [`crate::MAX_CLAIMS_V1`] is a compile-time constant.
+const SEG_BEFORE_DIGESTS: &[u8] = &[
+  0x6c, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x44, 0x69, 0x67, 0x65, 0x73, 0x74, 0x73, 0xa1, 0x71, 0x6f,
+  0x72, 0x67, 0x2e, 0x69, 0x73, 0x6f, 0x2e, 0x31, 0x38, 0x30, 0x31, 0x33, 0x2e, 0x35, 0x2e, 0x31,
+  0xa4,
 ];
 /// After the last digest, through `deviceKeyInfo.deviceKey`'s `x`
-/// coordinate's `bstr` header — `},"deviceKeyInfo":{"deviceKey":{1:2,-1:1,
+/// coordinate's `bstr` header -- `},"deviceKeyInfo":{"deviceKey":{1:2,-1:1,
 /// -2:<bstr header>`.
 const SEG_AFTER_DIGESTS: &[u8] = &[
   0x6d, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0x49, 0x6e, 0x66, 0x6f, 0xa1, 0x69,
@@ -101,30 +137,23 @@ const SEG_AFTER_DIGESTS: &[u8] = &[
 ];
 /// Between device key `x` and `y`: `, -3: <bstr header>`.
 const SEG_BETWEEN_XY: &[u8] = &[0x22, 0x58, 0x20];
-/// After device key `y`, through `validityInfo.signed`'s tag(0) + tstr
-/// header — `}},"validityInfo":{"signed":0("`.
+/// After device key `y`, through the end of the MSO body --
+/// `}},"digestAlgorithm":"SHA-256"}` -- the final, fixed field, closing
+/// the map.
 const SEG_AFTER_DEVICE_KEY: &[u8] = &[
-  0x6c, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x69, 0x74, 0x79, 0x49, 0x6e, 0x66, 0x6f, 0xa3, 0x66, 0x73,
-  0x69, 0x67, 0x6e, 0x65, 0x64, 0xc0, 0x74,
-];
-/// Between `signed` and `validFrom`: `,"validFrom":0("`.
-const SEG_BETWEEN_SIGNED_VALIDFROM: &[u8] = &[
-  0x69, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x46, 0x72, 0x6f, 0x6d, 0xc0, 0x74,
-];
-/// Between `validFrom` and `validUntil`: `,"validUntil":0("`.
-const SEG_BETWEEN_VALIDFROM_VALIDUNTIL: &[u8] = &[
-  0x6a, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x55, 0x6e, 0x74, 0x69, 0x6c, 0xc0, 0x74,
+  0x6f, 0x64, 0x69, 0x67, 0x65, 0x73, 0x74, 0x41, 0x6c, 0x67, 0x6f, 0x72, 0x69, 0x74, 0x68, 0x6d,
+  0x67, 0x53, 0x48, 0x41, 0x2d, 0x32, 0x35, 0x36,
 ];
 
 /// `#6.24(bstr <MSO>)` header, minus its 2-byte length value (which is now
 /// witnessed, since the MSO body's length varies with the chosen
-/// digestIDs' widths) — `0xd8, 0x18` (tag 24) + `0x59` (bstr, 2-byte
+/// digestIDs' widths) -- `0xd8, 0x18` (tag 24) + `0x59` (bstr, 2-byte
 /// length form; always this form since real totals stay well under
 /// 65536).
 const PAYLOAD_HEADER_NO_LEN: &[u8] = &[0xd8, 0x18, 0x59];
 /// COSE_Sign1 protected header, `{1: -7}` (alg ES256/ECDSA-P256-SHA256).
 pub const PROTECTED_HEADER: &[u8] = &[0xa1, 0x01, 0x26];
-/// `["Signature1", <protected bstr>, h'', <payload bstr length marker>` —
+/// `["Signature1", <protected bstr>, h'', <payload bstr length marker>` --
 /// minus its own 2-byte length value (witnessed, same reason as
 /// [`PAYLOAD_HEADER_NO_LEN`]).
 const SIG_STRUCTURE_PREFIX_NO_LEN: &[u8] = &[
@@ -132,12 +161,21 @@ const SIG_STRUCTURE_PREFIX_NO_LEN: &[u8] = &[
   0x40, 0x59,
 ];
 
+/// Fixed byte length of everything from the start of the MSO body through
+/// (not including) the digestID section's own bytes -- [`SEG_PREFIX_BASE`]
+/// plus the three witnessed `validityInfo` timestamps and the segments
+/// between/after them -- computed once from the segment constants above
+/// rather than hand-counted, so it can never silently drift from them.
+fn prefix_fixed_len() -> usize {
+  SEG_PREFIX_BASE.len() + TIMESTAMP_LEN + SEG_BETWEEN_SIGNED_VALIDFROM.len() + TIMESTAMP_LEN + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len() + TIMESTAMP_LEN + SEG_BEFORE_DIGESTS.len()
+}
+
 /// Fixed byte length of everything after the digestID section (device
-/// key `x`/`y` + three timestamps + the constant text around them) —
-/// computed once from the segment constants above rather than hand-
-/// counted, so it can never silently drift from them.
+/// key `x`/`y` + the constant text around and after them) -- computed
+/// once from the segment constants above rather than hand-counted, so it
+/// can never silently drift from them.
 fn suffix_fixed_len() -> usize {
-  SEG_AFTER_DIGESTS.len() + 32 + SEG_BETWEEN_XY.len() + 32 + SEG_AFTER_DEVICE_KEY.len() + TIMESTAMP_LEN + SEG_BETWEEN_SIGNED_VALIDFROM.len() + TIMESTAMP_LEN + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len() + TIMESTAMP_LEN
+  SEG_AFTER_DIGESTS.len() + 32 + SEG_BETWEEN_XY.len() + 32 + SEG_AFTER_DEVICE_KEY.len()
 }
 
 /// `mso_body_len` (the MSO CBOR body's own byte length, i.e. what
@@ -149,7 +187,7 @@ fn suffix_fixed_len() -> usize {
 /// credential this crate supports (well under 65536), matching the
 /// `0x59 XXXX` 2-byte-length CBOR form both headers use unconditionally.
 fn compute_lengths(real_digest_section_len: usize) -> (u16, u16) {
-  let mso_body_len = SEG_PREFIX_BASE.len() + real_digest_section_len + suffix_fixed_len();
+  let mso_body_len = prefix_fixed_len() + real_digest_section_len + suffix_fixed_len();
   let payload_len = PAYLOAD_HEADER_NO_LEN.len() + 2 + mso_body_len;
   (
     u16::try_from(mso_body_len).expect("mso_body_len fits in a u16 for any real credential this crate supports"),
@@ -159,11 +197,24 @@ fn compute_lengths(real_digest_section_len: usize) -> (u16, u16) {
 
 /// Upper bound on the whole `Sig_structure`'s byte length: every
 /// digestID at its widest, everything else at its (fixed) real length.
-pub const MAX_SIG_STRUCTURE_BYTES: usize =
-  SIG_STRUCTURE_PREFIX_NO_LEN.len() + 2 + PAYLOAD_HEADER_NO_LEN.len() + 2 + SEG_PREFIX_BASE.len() + mso_splice::MAX_DIGEST_SECTION_BYTES + SEG_AFTER_DIGESTS.len() + 32 + SEG_BETWEEN_XY.len() + 32 + SEG_AFTER_DEVICE_KEY.len() + TIMESTAMP_LEN + SEG_BETWEEN_SIGNED_VALIDFROM.len() + TIMESTAMP_LEN + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len() + TIMESTAMP_LEN;
+pub const MAX_SIG_STRUCTURE_BYTES: usize = SIG_STRUCTURE_PREFIX_NO_LEN.len()
+  + 2
+  + PAYLOAD_HEADER_NO_LEN.len()
+  + 2
+  + SEG_PREFIX_BASE.len()
+  + TIMESTAMP_LEN * 3
+  + SEG_BETWEEN_SIGNED_VALIDFROM.len()
+  + SEG_BETWEEN_VALIDFROM_VALIDUNTIL.len()
+  + SEG_BEFORE_DIGESTS.len()
+  + mso_splice::MAX_DIGEST_SECTION_BYTES
+  + SEG_AFTER_DIGESTS.len()
+  + 32
+  + SEG_BETWEEN_XY.len()
+  + 32
+  + SEG_AFTER_DEVICE_KEY.len();
 
 /// Number of 512-bit SHA-256 blocks [`MAX_SIG_STRUCTURE_BYTES`] can occupy
-/// at most — what [`crate::sha256_var::sha256_var_sized`] must be called
+/// at most -- what [`crate::sha256_var::sha256_var_sized`] must be called
 /// with for this module's buffer.
 pub const SIG_STRUCTURE_NUM_BLOCKS: usize = crate::sha256_var::terminal_block_for_len(MAX_SIG_STRUCTURE_BYTES);
 
@@ -175,7 +226,7 @@ pub const SIG_STRUCTURE_NUM_BLOCKS: usize = crate::sha256_var::terminal_block_fo
 #[derive(Clone, Debug)]
 pub struct MsoBodyWitness {
   /// The device's public key coordinates (`deviceKeyInfo.deviceKey`, a
-  /// COSE_Key EC2/P-256 key) — not otherwise checked by this circuit yet
+  /// COSE_Key EC2/P-256 key) -- not otherwise checked by this circuit yet
   /// (no device-binding/deviceSigned verification), but part of the
   /// signed bytes regardless.
   pub device_x: [u8; 32],
@@ -201,9 +252,9 @@ fn make_tail(digest: &[u8; 32]) -> [u8; ENTRY_TAIL_LEN] {
 }
 
 /// Native (non-circuit) construction of the exact bytes ECDSA/ES256 signs
-/// — used to build real test signatures and to compute `z` natively for
+/// -- used to build real test signatures and to compute `z` natively for
 /// `MdocCoreCircuit::public_values`. `digest_ids[i]` is the real,
-/// spec-legal (`< 2^31`) digestID for `claim_digests[i]` — see
+/// spec-legal (`< 2^31`) digestID for `claim_digests[i]` -- see
 /// `cbor_uint`'s module doc.
 pub fn native_sig_structure_bytes(digest_ids: &[u32; mso_splice::NUM_ENTRIES], claim_digests: &[[u8; 32]], body: &MsoBodyWitness) -> Vec<u8> {
   assert_eq!(claim_digests.len(), mso_splice::NUM_ENTRIES, "this module's fixed byte template is for exactly MAX_CLAIMS_V1 digestIDs");
@@ -217,6 +268,12 @@ pub fn native_sig_structure_bytes(digest_ids: &[u32; mso_splice::NUM_ENTRIES], c
   prefix.extend_from_slice(PAYLOAD_HEADER_NO_LEN);
   prefix.extend_from_slice(&mso_body_len.to_be_bytes());
   prefix.extend_from_slice(SEG_PREFIX_BASE);
+  prefix.extend_from_slice(&body.signed_ts);
+  prefix.extend_from_slice(SEG_BETWEEN_SIGNED_VALIDFROM);
+  prefix.extend_from_slice(&body.valid_from_ts);
+  prefix.extend_from_slice(SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
+  prefix.extend_from_slice(&body.valid_until_ts);
+  prefix.extend_from_slice(SEG_BEFORE_DIGESTS);
 
   let mut suffix = Vec::new();
   suffix.extend_from_slice(SEG_AFTER_DIGESTS);
@@ -224,16 +281,11 @@ pub fn native_sig_structure_bytes(digest_ids: &[u32; mso_splice::NUM_ENTRIES], c
   suffix.extend_from_slice(SEG_BETWEEN_XY);
   suffix.extend_from_slice(&body.device_y);
   suffix.extend_from_slice(SEG_AFTER_DEVICE_KEY);
-  suffix.extend_from_slice(&body.signed_ts);
-  suffix.extend_from_slice(SEG_BETWEEN_SIGNED_VALIDFROM);
-  suffix.extend_from_slice(&body.valid_from_ts);
-  suffix.extend_from_slice(SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
-  suffix.extend_from_slice(&body.valid_until_ts);
 
   mso_splice::native_mso_sig_structure_bytes(&prefix, digest_ids, &tails, &suffix)
 }
 
-/// The MSO-body witness fields' allocated bits, grouped by name — used so
+/// The MSO-body witness fields' allocated bits, grouped by name -- used so
 /// a caller can `inputize` these specific bits directly.
 pub struct AllocatedMsoBodyBits {
   pub device_x: Vec<Boolean>,
@@ -269,10 +321,10 @@ fn alloc_witness_u16<F: ff::PrimeField, CS: ConstraintSystem<F>>(cs: &mut CS, va
 /// In-circuit construction of the same bytes as
 /// [`native_sig_structure_bytes`], as a fixed-size
 /// (`MAX_SIG_STRUCTURE_BYTES*8`-bit) `Boolean` buffer plus the native real
-/// (non-don't-care) length in bytes — ready for
-/// [`crate::sha256_var::sha256_var_sized`] — and the MSO-body witness bits
+/// (non-don't-care) length in bytes -- ready for
+/// [`crate::sha256_var::sha256_var_sized`] -- and the MSO-body witness bits
 /// grouped by name (see [`AllocatedMsoBodyBits`]). Fixed segments become
-/// `Boolean::constant` (no witness allocation — the verifier already
+/// `Boolean::constant` (no witness allocation -- the verifier already
 /// knows these bytes, they're part of this circuit version's definition);
 /// witness segments (digestIDs, digests, device key, timestamps, and the
 /// two length fields) become real allocated bits.
@@ -295,11 +347,19 @@ pub fn alloc_sig_structure_bits<CS: ConstraintSystem<F>, F: ff::PrimeField>(
   prefix_bits.extend(alloc_witness_u16(cs, mso_body_len, "mso_body_len")?);
   push_fixed(&mut prefix_bits, SEG_PREFIX_BASE);
 
-  let device_x_bits = alloc_witness_bytes(cs, &body.device_x, "device_x")?;
-  let device_y_bits = alloc_witness_bytes(cs, &body.device_y, "device_y")?;
   let signed_ts_bits = alloc_witness_bytes(cs, &body.signed_ts, "signed_ts")?;
   let valid_from_ts_bits = alloc_witness_bytes(cs, &body.valid_from_ts, "valid_from_ts")?;
   let valid_until_ts_bits = alloc_witness_bytes(cs, &body.valid_until_ts, "valid_until_ts")?;
+
+  prefix_bits.extend(signed_ts_bits.iter().cloned());
+  push_fixed(&mut prefix_bits, SEG_BETWEEN_SIGNED_VALIDFROM);
+  prefix_bits.extend(valid_from_ts_bits.iter().cloned());
+  push_fixed(&mut prefix_bits, SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
+  prefix_bits.extend(valid_until_ts_bits.iter().cloned());
+  push_fixed(&mut prefix_bits, SEG_BEFORE_DIGESTS);
+
+  let device_x_bits = alloc_witness_bytes(cs, &body.device_x, "device_x")?;
+  let device_y_bits = alloc_witness_bytes(cs, &body.device_y, "device_y")?;
 
   let mut suffix_bits = Vec::new();
   push_fixed(&mut suffix_bits, SEG_AFTER_DIGESTS);
@@ -307,11 +367,6 @@ pub fn alloc_sig_structure_bits<CS: ConstraintSystem<F>, F: ff::PrimeField>(
   push_fixed(&mut suffix_bits, SEG_BETWEEN_XY);
   suffix_bits.extend(device_y_bits.iter().cloned());
   push_fixed(&mut suffix_bits, SEG_AFTER_DEVICE_KEY);
-  suffix_bits.extend(signed_ts_bits.iter().cloned());
-  push_fixed(&mut suffix_bits, SEG_BETWEEN_SIGNED_VALIDFROM);
-  suffix_bits.extend(valid_from_ts_bits.iter().cloned());
-  push_fixed(&mut suffix_bits, SEG_BETWEEN_VALIDFROM_VALIDUNTIL);
-  suffix_bits.extend(valid_until_ts_bits.iter().cloned());
 
   let entries: [DigestIdEntry; mso_splice::NUM_ENTRIES] = {
     let mut built: Vec<DigestIdEntry> = Vec::with_capacity(mso_splice::NUM_ENTRIES);
@@ -356,26 +411,31 @@ mod tests {
     }
   }
 
-  /// Regression check against the pre-refactor fixed-digestID (0,1,2,3)
-  /// template's own hand-verified expectations (see this module's
-  /// history): digest_ids 0-3 are all class-0 (1-byte) encodings, so this
-  /// reproduces byte-for-byte what the old hardcoded `SEG_MID_xx`
-  /// segments produced.
+  /// Regression check against a real `vc`-issued MSO's bytes (see this
+  /// module's doc for how these were captured): docType/version/
+  /// validityInfo come first (fixed + witnessed timestamps), then the
+  /// digest section, then deviceKeyInfo, then digestAlgorithm last.
   #[test]
-  fn native_sig_structure_bytes_matches_the_old_fixed_template_for_narrow_digest_ids() {
+  fn native_sig_structure_bytes_matches_real_vc_issued_mso_layout() {
     let digest_ids = [0u32, 1, 2, 3];
     let digests = [[0xE0u8; 32], [0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]];
     let bytes = native_sig_structure_bytes(&digest_ids, &digests, &test_body());
     assert_eq!(bytes.len(), 473, "Sig_structure length must match the real reference (20 + 5 + 448)");
     assert_eq!(&bytes[..4], &[0x84, 0x6a, 0x53, 0x69], "must start with array(4), tstr(10) 'Si...'");
     assert_eq!(&bytes[20..25], &[0xd8, 0x18, 0x59, 0x01, 0xc0], "payload header + MSO body length");
-    assert_eq!(bytes[25], 0xa6, "MSO body must start with map(6)");
+    assert_eq!(&bytes[25..34], &[0xa6, 0x67, 0x64, 0x6f, 0x63, 0x54, 0x79, 0x70, 0x65], "MSO body must start with map(6), tstr(7) 'docType'");
+    let signed_ts_start = 25 + SEG_PREFIX_BASE.len();
+    assert_eq!(&bytes[signed_ts_start..signed_ts_start + 20], test_body().signed_ts, "signed_ts must sit right after SEG_PREFIX_BASE");
+    let validfrom_key_start = signed_ts_start + 20;
+    assert_eq!(&bytes[validfrom_key_start..validfrom_key_start + 12], SEG_BETWEEN_SIGNED_VALIDFROM, "\"validFrom\" key must follow signed_ts directly");
+    let digest_section_start = 25 + prefix_fixed_len();
+    assert_eq!(bytes[digest_section_start], 0x00, "first digest entry's digestID (class-0, single byte 0x00)");
   }
 
   /// The real point of this module's rewrite: a genuinely different
   /// digestID combination (spanning all four CBOR-uint length classes)
   /// produces a *longer* buffer, with lengths that self-consistently
-  /// describe the new total — not a fixed 473-byte result regardless of
+  /// describe the new total -- not a fixed 473-byte result regardless of
   /// input.
   #[test]
   fn native_sig_structure_bytes_grows_with_wider_digest_ids() {

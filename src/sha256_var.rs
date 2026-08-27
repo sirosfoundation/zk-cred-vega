@@ -68,13 +68,19 @@ const SHA256_IV: [u32; 8] = [
   0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// Maximum real message length this gadget supports. Chosen to
-/// comfortably fit real ISO 18013-5 `IssuerSignedItemBytes` for ordinary
-/// attributes (measured 79-95 bytes against a real signed test vector),
-/// with headroom. Large binary values (portraits,
-/// `signature_usual_mark`) are out of scope for this claim-byte budget,
+/// Maximum real message length this gadget supports. Originally 128,
+/// chosen against a measured 79-95 byte real signed test vector - too
+/// tight in practice: a real PID mdoc's `IssuerSignedItemBytes` hit 136
+/// bytes (longer `elementIdentifier`/`elementValue` content pushes past
+/// that headroom), confirmed live via `zk-cred-vega`'s own
+/// `deserializeProverKey`/`prepProve` rejecting it with "claim bytes
+/// exceed the fixed 128-byte circuit width, got 136". Widened to 176 -
+/// still within `NUM_BLOCKS`'s existing 3-block budget (`terminal_block_for_len`
+/// only needs a 4th block past 183 bytes, see this file's own test), so no
+/// other constant needs to move. Large binary values (portraits,
+/// `signature_usual_mark`) remain out of scope for this claim-byte budget,
 /// same kind of v1/v2 scoping limitation as `MAX_CLAIMS_V1`.
-pub const MAX_VAR_MESSAGE_BYTES: usize = 128;
+pub const MAX_VAR_MESSAGE_BYTES: usize = 176;
 
 /// Number of 512-bit blocks this gadget always processes, regardless of
 /// the real message length — the fixed R1CS shape NeutronNova folding

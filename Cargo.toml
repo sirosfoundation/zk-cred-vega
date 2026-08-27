@@ -8,6 +8,22 @@ description = "mdoc credential circuits and mobile bindings on top of Microsoft'
 [features]
 uniffi = ["dep:uniffi"]
 
+# vega-prover's own Cargo.toml sets `lto = "fat"` (and `debug = 1`), but
+# Cargo only honors [profile] sections from the crate/workspace actually
+# being built, not from dependencies - see
+# https://doc.rust-lang.org/cargo/reference/profiles.html#profile-selection.
+# This crate (not vega-prover) is the real build root for every
+# production artifact (go-cabi .so, Android AAR), and had no [profile]
+# section of its own, so vega-prover's intended LTO setting was silently
+# never applied to any real build - only Cargo's plain defaults
+# (lto = false, codegen-units = 16). Confirmed via a real before/after
+# timing of the full prep_prove+prove+verify pipeline
+# (tests/real_mdoc_fixtures.rs) on x86_64: this alone is a real,
+# measurable, zero-risk win for what's already the CPU-bound hot path.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [dependencies]
 # Forked from microsoft/vega-prover@c0ee259 (the previously-pinned rev) to
 # add #[serde(skip)] on VegaMcPrepZkSNARK's cached_step_matvec/cached_step_i64
@@ -32,6 +48,11 @@ halo2curves = "0.10.0"
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = "0.16"
 signature = "2.2"
+# For prove()'s per-presentation nonce (see lib.rs's digest-blinding doc) -
+# minimal, no dependency on a full RNG framework, well-established on
+# Android (getrandom syscall / /dev/urandom fallback) and every other
+# target this crate ships to.
+getrandom = "0.2"
 
 [dev-dependencies]
 hex = "0.4.3"
