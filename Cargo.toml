@@ -48,6 +48,11 @@ halo2curves = "0.10.0"
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = "0.16"
 signature = "2.2"
+# For prove()'s per-presentation nonce (see lib.rs's digest-blinding doc) -
+# minimal, no dependency on a full RNG framework, well-established on
+# Android (getrandom syscall / /dev/urandom fallback) and every other
+# target this crate ships to.
+getrandom = "0.2"
 
 [dev-dependencies]
 hex = "0.4.3"

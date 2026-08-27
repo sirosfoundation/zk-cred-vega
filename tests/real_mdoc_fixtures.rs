@@ -123,8 +123,10 @@ fn real_mdoc_fixture_round_trips_through_the_full_pipeline() {
   };
 
   let keys = zk_cred_vega::setup().expect("setup");
-  let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body).expect("prep_prove");
-  let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep).expect("prove");
+  let nonce = zk_cred_vega::fresh_nonce().expect("fresh_nonce");
+  let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, &nonce).expect("prep_prove");
+  let (proof, _next_prep) =
+    zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
   let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk).expect("verify");
 
   let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)

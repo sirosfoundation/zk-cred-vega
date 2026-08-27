@@ -196,8 +196,9 @@ fn forged_ecdsa_signature_binding_is_rejected() {
 
   let outcome = (|| -> Result<_, Box<dyn std::error::Error>> {
     let keys = zk_cred_vega::setup()?;
-    let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &forged_witness, &mso_body)?;
-    let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &forged_witness, &mso_body, prep)?;
+    let nonce = zk_cred_vega::fresh_nonce()?;
+    let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &forged_witness, &mso_body, &nonce)?;
+    let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &forged_witness, &mso_body, prep, &nonce)?;
     let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk)?;
     let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)?;
     Ok(verified)
@@ -210,20 +211,20 @@ fn forged_ecdsa_signature_binding_is_rejected() {
   );
 }
 
-/// Deliberately NOT tested here: "verify a genuine proof against a
-/// *different* `setup()` call's verifier key." Checked directly against
-/// the source first -- `setup()` (`src/lib.rs`) derives `pk`/`vk` from a
-/// fully fixed, hardcoded prototype witness with no randomness anywhere
-/// in the call chain, so two `setup()` calls for the same `MAX_CLAIMS_V1`
-/// circuit shape are not independent keys the way a per-tenant trusted
-/// setup would be -- they're deterministically identical, by design
-/// (this is what lets `go-zk-circuits` publish exactly one verifier key
-/// per circuit version for every relying party to share). An earlier
-/// version of this test asserted the opposite and failed -- not because
-/// of a crate bug, but because the test's own premise (that a second
-/// `setup()` call produces a meaningfully different key) doesn't hold
-/// for this circuit. Confirmed empirically before deleting the test
-/// rather than leaving a permanently-red assertion in the suite.
+// Deliberately NOT tested here: "verify a genuine proof against a
+// *different* `setup()` call's verifier key." Checked directly against
+// the source first -- `setup()` (`src/lib.rs`) derives `pk`/`vk` from a
+// fully fixed, hardcoded prototype witness with no randomness anywhere
+// in the call chain, so two `setup()` calls for the same `MAX_CLAIMS_V1`
+// circuit shape are not independent keys the way a per-tenant trusted
+// setup would be -- they're deterministically identical, by design
+// (this is what lets `go-zk-circuits` publish exactly one verifier key
+// per circuit version for every relying party to share). An earlier
+// version of this test asserted the opposite and failed -- not because
+// of a crate bug, but because the test's own premise (that a second
+// `setup()` call produces a meaningfully different key) doesn't hold
+// for this circuit. Confirmed empirically before deleting the test
+// rather than leaving a permanently-red assertion in the suite.
 
 /// Real-fixture-scale analogue of `binding_check_rejects_mismatched_digest_ids`
 /// (see this file's module doc for why the short hand-rolled version
@@ -246,8 +247,9 @@ fn wrong_digest_id_on_a_real_claim_is_rejected() {
 
   let outcome = (|| -> Result<_, Box<dyn std::error::Error>> {
     let keys = zk_cred_vega::setup()?;
-    let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body)?;
-    let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep)?;
+    let nonce = zk_cred_vega::fresh_nonce()?;
+    let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, &nonce)?;
+    let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce)?;
     let (step_public_values, core_public_values) = zk_cred_vega::verify(&proof, &keys.vk)?;
     let verified = zk_cred_vega::verify_and_check_binding(&step_public_values, &core_public_values)?;
     Ok(verified)
@@ -258,5 +260,52 @@ fn wrong_digest_id_on_a_real_claim_is_rejected() {
     "witnessing digest_id={} for a real claim whose actual embedded digestID is {real_digest_id} must be rejected \
      -- got Ok({outcome:?})",
     real_digest_id.wrapping_add(1)
+  );
+}
+
+/// The direct, positive-property regression test for the fix itself
+/// (rather than the negative/rejection tests above): presents the exact
+/// same real credential (identical claims, identical ECDSA witness/MSO
+/// body) *twice*, each through its own fresh `setup->prep_prove->prove`
+/// run (not a reused prep state -- see `fresh_nonce`'s doc for why a
+/// reused prep state can't get a fresh nonce), and confirms the wire
+/// value for an UNDISCLOSED claim (`birth_date`, never revealed) differs
+/// completely between the two presentations. Before this fix, that
+/// position on the wire was the claim's raw, unblinded SHA-256 digest --
+/// identical on every presentation of the same credential, letting any
+/// two relying parties who both saw it trivially confirm "same
+/// credential, same hidden value" without ever learning the plaintext.
+#[test]
+fn two_presentations_of_the_same_undisclosed_claim_are_unlinkable() {
+  let fixture = load_fixture();
+  let claims = fixture_claims(&fixture);
+  let mso_body = fixture_mso_body(&fixture);
+  let ecdsa_witness = fixture_ecdsa_witness(&fixture);
+
+  // birth_date (index 2 in the fixture) is undisclosed -- see the
+  // fixture's own JSON (`disclose: false`).
+  let undisclosed_index = fixture
+    .claims
+    .iter()
+    .position(|c| !c.disclose)
+    .expect("fixture has an undisclosed claim");
+  assert!(!claims[undisclosed_index].disclose);
+
+  let wire_value_for = || -> Vec<<zk_cred_vega::Engine_ as vega_prover::traits::Engine>::Scalar> {
+    let keys = zk_cred_vega::setup().expect("setup");
+    let nonce = zk_cred_vega::fresh_nonce().expect("fresh_nonce");
+    let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, &nonce).expect("prep_prove");
+    let (proof, _next_prep) =
+      zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
+    let (step_public_values, _core_public_values) = zk_cred_vega::verify(&proof, &keys.vk).expect("verify");
+    step_public_values[undisclosed_index][0..256].to_vec()
+  };
+
+  let first = wire_value_for();
+  let second = wire_value_for();
+  assert_ne!(
+    first, second,
+    "the same undisclosed claim's wire value must differ across two independent presentations of the same \
+     credential -- an identical value here means the digest is still linkable across relying parties"
   );
 }

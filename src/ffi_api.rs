@@ -226,9 +226,35 @@ pub fn deserialize_verifier_key(bytes: &[u8]) -> Result<VegaVerifierKey, VegaFfi
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
 }
 
+/// `prior_state`/`next_state`'s wire format is `nonce(32 bytes) ||
+/// bincode(VegaMcPrepZkSNARK)` — the digest-blinding nonce (see
+/// `crate::fresh_nonce`'s doc) has to persist for the whole lifetime of a
+/// prep chain (every `prove` reusing it must pass the SAME nonce back to
+/// `crate::prove`), so it's carried alongside the serialized prep state
+/// itself rather than as a separate FFI parameter — keeps the existing
+/// Kotlin/Swift `priorState`/`nextState` contract (opaque bytes, no SDK
+/// changes) exactly as-is.
+const NONCE_LEN: usize = 32;
+
+fn encode_prep_state(nonce: &[u8; NONCE_LEN], prep: VegaMcPrepZkSNARK<Engine_>) -> Result<Vec<u8>, VegaFfiError> {
+  let mut out = nonce.to_vec();
+  out.extend(bincode::serialize(&prep).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?);
+  Ok(out)
+}
+
+fn decode_prep_state(state: &[u8]) -> Result<([u8; NONCE_LEN], VegaMcPrepZkSNARK<Engine_>), VegaFfiError> {
+  if state.len() < NONCE_LEN {
+    return Err(VegaFfiError(anyhow::anyhow!("prep state too short to contain a nonce")));
+  }
+  let nonce: [u8; NONCE_LEN] = state[..NONCE_LEN].try_into().expect("checked length above");
+  let prep = bincode::deserialize(&state[NONCE_LEN..]).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  Ok((nonce, prep))
+}
+
 /// Runs `prep_prove` once for a credential, returning the (serialized)
 /// prep-state cache — see this module's doc for why this crosses the FFI
-/// boundary as bytes rather than a long-lived handle.
+/// boundary as bytes rather than a long-lived handle, and `encode_prep_state`'s
+/// doc for the nonce carried alongside it.
 #[uniffi::export]
 pub fn prep_prove(
   pk: &VegaProverKey,
@@ -239,9 +265,10 @@ pub fn prep_prove(
   let claims: Vec<ClaimWitness> = claims.into_iter().map(Into::into).collect();
   let ecdsa_witness: MdocEcdsaWitness = ecdsa_witness.try_into()?;
   let mso_body: crate::mso::MsoBodyWitness = mso_body.try_into()?;
-  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness, &mso_body)
+  let nonce = vega_mdoc::fresh_nonce().map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness, &mso_body, &nonce)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
-  bincode::serialize(&prep.into_inner()).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
+  encode_prep_state(&nonce, prep.into_inner())
 }
 
 /// Produces a proof for this presentation, rerandomizing `prior_state` for
@@ -258,16 +285,14 @@ pub fn prove(
   let claims: Vec<ClaimWitness> = claims.into_iter().map(Into::into).collect();
   let ecdsa_witness: MdocEcdsaWitness = ecdsa_witness.try_into()?;
   let mso_body: crate::mso::MsoBodyWitness = mso_body.try_into()?;
-  let prep_snark: VegaMcPrepZkSNARK<Engine_> =
-    bincode::deserialize(&prior_state).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let (nonce, prep_snark) = decode_prep_state(&prior_state)?;
   let prep = VegaMdocPrepState::from_inner(prep_snark);
 
-  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, &mso_body, prep)
+  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, &mso_body, prep, &nonce)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   let proof_bytes = bincode::serialize(&proof).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
-  let next_state = bincode::serialize(&next_prep.into_inner())
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let next_state = encode_prep_state(&nonce, next_prep.into_inner())?;
 
   Ok(FfiProveResult {
     proof_bytes,

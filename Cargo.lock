@@ -1849,6 +1849,7 @@ dependencies = [
  "bincode",
  "ecdsa",
  "ff",
+ "getrandom 0.2.17",
  "halo2curves",
  "hex",
  "num-bigint 0.4.8",

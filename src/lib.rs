@@ -94,6 +94,8 @@ pub enum VegaMdocError {
   Circuit(#[from] SynthesisError),
   #[error(transparent)]
   Vega(#[from] vega_prover::errors::VegaError),
+  #[error("failed to generate a fresh digest-blinding nonce: {0}")]
+  Rng(getrandom::Error),
 }
 
 /// One mdoc element to be digest-checked: the exact bytes that were hashed
@@ -185,6 +187,15 @@ pub struct ClaimDigestStepCircuit<Eng: Engine> {
   /// circuit (determining the MSO's byte layout) while a claim's real
   /// bytes embed a different one.
   digest_id: u32,
+  /// Per-*presentation* (not per-credential) fresh random blinding value —
+  /// see this file's `blind_digest_bytes` doc for why exposing a claim's
+  /// raw SHA-256 digest, even when undisclosed, is a real confidentiality/
+  /// unlinkability bug this field closes. Generated fresh by [`prove`] on
+  /// every call (never reused across presentations of the same
+  /// credential) and shared with [`mdoc_core::MdocCoreCircuit`] for the
+  /// same presentation — never itself exposed by this circuit (see
+  /// `blinded_digest_bits`'s doc for why that's still sound).
+  nonce: [u8; 32],
   _p: PhantomData<Eng>,
 }
 
@@ -192,7 +203,7 @@ impl<Eng: Engine> ClaimDigestStepCircuit<Eng> {
   /// `bytes` must be exactly `MAX_CLAIM_BYTES_V1` long; `real_len` (<=
   /// `MAX_CLAIM_BYTES_V1`) marks how many of those bytes are the real
   /// claim content.
-  pub fn new(bytes: Vec<u8>, real_len: usize, disclose: bool, digest_id: u32) -> Self {
+  pub fn new(bytes: Vec<u8>, real_len: usize, disclose: bool, digest_id: u32, nonce: [u8; 32]) -> Self {
     assert_eq!(bytes.len(), MAX_CLAIM_BYTES_V1, "bytes must be exactly MAX_CLAIM_BYTES_V1 long");
     assert!(real_len <= MAX_CLAIM_BYTES_V1, "real_len exceeds MAX_CLAIM_BYTES_V1");
     Self {
@@ -200,19 +211,72 @@ impl<Eng: Engine> ClaimDigestStepCircuit<Eng> {
       real_len,
       disclose,
       digest_id,
+      nonce,
       _p: PhantomData,
     }
   }
 
-  fn digest_bits(&self) -> Vec<bool> {
+  fn digest_bytes(&self) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(&self.bytes[..self.real_len]);
-    let digest = hasher.finalize();
-    digest
-      .iter()
-      .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
-      .collect()
+    hasher.finalize().into()
   }
+
+  /// The value actually exposed publicly in place of the raw digest — see
+  /// `blind_digest_bytes`'s doc.
+  fn blinded_digest_bits(&self) -> Vec<bool> {
+    bytes_to_bool_bits(&blind_digest_bytes(&self.digest_bytes(), &self.nonce))
+  }
+}
+
+/// `SHA-256(digest || nonce)` — see `ClaimDigestStepCircuit::nonce`'s doc.
+///
+/// **The bug this closes**: `ClaimDigestStepCircuit` previously exposed a
+/// claim's raw SHA-256 digest publicly *regardless of `disclose`* (flagged
+/// by an independent human reviewer directly against this file's old
+/// `public_values`). Real ISO 18013-5 salts each `IssuerSignedItem` with
+/// ≥16 random bytes specifically so a *disclosed* digest can't be
+/// dictionary-attacked — but an *undisclosed* claim's raw digest, once
+/// exposed, is a **stable value across every future presentation of the
+/// same credential**: any two relying parties who both see it can trivially
+/// confirm "same credential, same undisclosed value" without ever seeing
+/// the plaintext, and (worse) a low-entropy field like `age_over_18`
+/// (2 possible values) is trivially dictionary-attackable in isolation
+/// even *with* salting, once its own digest is singled out and exposed on
+/// its own (unlike the combined `z` over every claim at once, which
+/// remains a much harder joint search). Blinding with a nonce that's fresh
+/// on *every* `prove()` call (never reused across presentations, unlike
+/// the credential data itself) makes the exposed value look independently
+/// random each time, closing both the per-field dictionary-attack surface
+/// and the stable cross-presentation correlation.
+///
+/// **Why `nonce` itself never needs to be exposed for this to be sound**:
+/// the binding check (`verify_and_check_binding`) only ever compares two
+/// *already-blinded* values for equality — it never needs to invert the
+/// blinding to recover a claimed digest. Two independently-chosen
+/// `(digest, nonce)` pairs colliding under SHA-256 is a first-preimage-
+/// level break (~2^256), not a mere collision (~2^128), *even* granting a
+/// dishonest prover full freedom to pick both halves on each side
+/// independently — so equality of the blinded outputs still implies
+/// equality of the real digests with overwhelming probability, whether or
+/// not `nonce` is ever made public. `MdocCoreCircuit` exposes `nonce`
+/// anyway (cheap, and it's uniformly random so doing so leaks nothing) so
+/// the disclosed-plaintext defense-in-depth check in
+/// `verify_and_check_binding` can still work natively.
+pub(crate) fn blind_digest_bytes(digest: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
+  let mut hasher = Sha256::new();
+  hasher.update(digest);
+  hasher.update(nonce);
+  hasher.finalize().into()
+}
+
+/// Big-endian bit expansion, MSB-first per byte — the plain (non-circuit)
+/// counterpart of `mdoc_core::native_bytes_to_bits`, but returning `bool`s
+/// rather than field elements (this crate's step-circuit code works in
+/// `bool`/`Boolean` up to the point it's packed into a public value, unlike
+/// `mdoc_core`'s field-element-native style).
+fn bytes_to_bool_bits(bytes: &[u8]) -> Vec<bool> {
+  bytes.iter().flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1)).collect()
 }
 
 impl<Eng: Engine> VegaCircuit<Eng> for ClaimDigestStepCircuit<Eng>
@@ -220,8 +284,9 @@ where
   Eng::Scalar: PrimeFieldBits,
 {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
+    // Blinded, not the raw digest -- see `blind_digest_bytes`'s doc.
     let mut values: Vec<Eng::Scalar> = self
-      .digest_bits()
+      .blinded_digest_bits()
       .into_iter()
       .map(|b| if b { Eng::Scalar::ONE } else { Eng::Scalar::ZERO })
       .collect();
@@ -272,7 +337,24 @@ where
 
     let (digest_bits, msg_active_bits) =
       sha256_var::sha256_var(cs.namespace(|| "sha256_var(issuer_signed_item)"), &input_bits, self.real_len)?;
-    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &digest_bits, "digest")?;
+
+    // Blind the digest before exposing it -- NEVER inputize digest_bits
+    // directly (see `blind_digest_bytes`'s doc for why the raw digest,
+    // even for an undisclosed claim, was a real confidentiality/
+    // unlinkability bug). Fixed 64-byte input (32-byte digest || 32-byte
+    // nonce), so the plain fixed-length `sha256` gadget is used here, not
+    // `sha256_var`'s variable-length machinery.
+    let nonce_bits: Vec<Boolean> = self
+      .nonce
+      .iter()
+      .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
+      .enumerate()
+      .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("nonce byte-bit {i}")), Some(b)).map(Boolean::from))
+      .collect::<Result<Vec<_>, _>>()?;
+    let mut blind_input = digest_bits.clone();
+    blind_input.extend(nonce_bits);
+    let blinded_digest_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "blind(digest, nonce)"), &blind_input)?;
+    mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &blinded_digest_bits, "digest")?;
 
     let disclose_bit = Boolean::from(AllocatedBit::alloc(
       cs.namespace(|| "disclose"),
@@ -423,7 +505,15 @@ pub struct VegaMdocKeys {
 
 /// Runs `VegaMcZkSNARK::setup` for the fixed claim-count circuit shape.
 pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
-  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1], 0, false, 0);
+  // Fixed, not `fresh_nonce()` -- setup() is deliberately fully
+  // deterministic (see `setup_prototype_ecdsa_witness`'s doc): the nonce
+  // only affects circuit *witness values*, never the circuit *shape*
+  // `setup()` derives keys from, so any fixed value works here, and using
+  // one keeps that determinism property intact (real `go-zk-circuits`
+  // published keys must be reproducible from source, not seeded by an RNG
+  // at build time).
+  let proto_nonce = [0u8; 32];
+  let step_proto = ClaimDigestStepCircuit::<Engine_>::new(vec![0u8; MAX_CLAIM_BYTES_V1], 0, false, 0, proto_nonce);
   let w = setup_prototype_ecdsa_witness();
   let core_proto = MdocCoreCircuit::<Engine_>::new(
     w.qx,
@@ -434,6 +524,7 @@ pub fn setup() -> Result<VegaMdocKeys, VegaMdocError> {
     [0u32; MAX_CLAIMS_V1],
     vec![[0u8; 32]; MAX_CLAIMS_V1],
     setup_prototype_mso_body(),
+    proto_nonce,
   );
   let (pk, vk) = VegaMcZkSNARK::<Engine_>::setup(&step_proto, &core_proto, MAX_CLAIMS_V1)?;
   Ok(VegaMdocKeys { pk, vk })
@@ -550,20 +641,47 @@ pub(crate) fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]
   )
 }
 
+/// Fresh 32 bytes of OS randomness for a presentation's digest blinding —
+/// see `blind_digest_bytes`'s doc. Callers mint one of these per
+/// `prep_prove` call and must pass the SAME value into every `prove` call
+/// against the resulting (and any later fold-and-reused) prep state —
+/// `vega_mc_zkp` requires a step circuit's public values to stay identical
+/// between `prep_prove` and every `prove` call that reuses that prep chain
+/// (confirmed empirically: a differing nonce there fails with "Step
+/// circuit N public values changed between prep_prove and prove"), so the
+/// nonce is necessarily fixed for the lifetime of one prep chain, not
+/// freshenable on every individual `prove` call the way it ideally would
+/// be. **This is a real, currently-latent limitation**: today
+/// `SirosWallet.kt` always calls `prep_prove` fresh per presentation (never
+/// threads `priorState`/`nextState`), so every real presentation still gets
+/// a genuinely fresh nonce — but if/when that fold-and-reuse optimization
+/// is ever wired up, every presentation reusing the same prep chain would
+/// share one nonce (and therefore one set of blinded digests), reopening
+/// the cross-presentation correlation this fix closes. Revisit before
+/// wiring up `priorState` reuse for real.
+pub fn fresh_nonce() -> Result<[u8; 32], VegaMdocError> {
+  let mut nonce = [0u8; 32];
+  getrandom::getrandom(&mut nonce).map_err(VegaMdocError::Rng)?;
+  Ok(nonce)
+}
+
 /// Runs `prep_prove` once for a given credential's claim set and ECDSA
 /// witness. `mso_body` is the per-credential MSO data (device key,
 /// validity timestamps) that isn't otherwise carried by `claims` or
-/// `ecdsa_witness` — see `crate::mso`.
+/// `ecdsa_witness` — see `crate::mso`. `nonce` should be a fresh
+/// [`fresh_nonce`] — see that function's doc for why the SAME value must
+/// also be passed to every `prove` call against the state this returns.
 pub fn prep_prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
   ecdsa_witness: &MdocEcdsaWitness,
   mso_body: &crate::mso::MsoBodyWitness,
+  nonce: &[u8; 32],
 ) -> Result<VegaMdocPrepState, VegaMdocError> {
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
+    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id, *nonce))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -574,24 +692,29 @@ pub fn prep_prove(
     core_digest_ids(claims)?,
     core_claim_digests(claims)?,
     mso_body.clone(),
+    *nonce,
   );
   let prep = VegaMcZkSNARK::<Engine_>::prep_prove(pk, &step_circuits, &core_circuit, false)?;
   Ok(VegaMdocPrepState(prep))
 }
 
 /// Produces a proof, consuming and rerandomizing the prep state so it can
-/// be reused for the next presentation of the same credential.
+/// be reused for the next presentation of the same credential. `nonce`
+/// MUST be the exact same value passed to the `prep_prove` call that
+/// (possibly transitively, via earlier `prove` calls' `next_prep`)
+/// produced `prep` — see [`fresh_nonce`]'s doc for why.
 pub fn prove(
   pk: &VegaMcProverKey<Engine_>,
   claims: &[ClaimWitness],
   ecdsa_witness: &MdocEcdsaWitness,
   mso_body: &crate::mso::MsoBodyWitness,
   prep: VegaMdocPrepState,
+  nonce: &[u8; 32],
 ) -> Result<(VegaMcZkSNARK<Engine_>, VegaMdocPrepState), VegaMdocError> {
   let padded = pad_claims(claims)?;
   let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
     .iter()
-    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
+    .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id, *nonce))
     .collect();
   let core_circuit = MdocCoreCircuit::<Engine_>::new(
     ecdsa_witness.qx,
@@ -602,6 +725,7 @@ pub fn prove(
     core_digest_ids(claims)?,
     core_claim_digests(claims)?,
     mso_body.clone(),
+    *nonce,
   );
   let (proof, next_prep) =
     VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, false)?;
@@ -649,14 +773,20 @@ fn bits_to_bytes(bits: &[<Engine_ as Engine>::Scalar]) -> Vec<u8> {
 }
 
 /// One claim slot's verified disclosure outcome: whether it was disclosed,
-/// its digest (always meaningful — this is what's checked against
-/// `valueDigests`), its real (unpadded) byte length, and its plaintext
-/// `IssuerSignedItem` bytes — always exactly `real_len` bytes long,
-/// meaningful only when `disclosed` (all-zero otherwise, see
-/// `ClaimDigestStepCircuit`'s doc for why it's masked rather than simply
-/// absent). `real_len` itself is exposed regardless of `disclosed` — see
-/// `ClaimDigestStepCircuit`'s doc for why it must be, now that the digest
-/// is computed over the claim's real length rather than a fixed width.
+/// its real (unpadded) byte length, and its plaintext `IssuerSignedItem`
+/// bytes — always exactly `real_len` bytes long, meaningful only when
+/// `disclosed` (all-zero otherwise, see `ClaimDigestStepCircuit`'s doc for
+/// why it's masked rather than simply absent). `real_len` itself is
+/// exposed regardless of `disclosed`.
+///
+/// `digest` is **only ever meaningful when `disclosed` is true** (and even
+/// then it's redundant — any caller with `plaintext` can derive it
+/// themselves): `[0u8; 32]` otherwise, same masking convention as
+/// `plaintext`. This crate used to always populate it with the claim's
+/// real SHA-256 digest regardless of disclosure — a real confidentiality/
+/// unlinkability bug (see `blind_digest_bytes`'s doc) fixed by never
+/// exposing (or, therefore, ever learning) an undisclosed claim's real
+/// digest anywhere in this crate anymore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisclosedClaim {
   pub disclosed: bool,
@@ -685,28 +815,37 @@ pub struct VerifiedPresentation {
 }
 
 /// The step<->core binding check `mdoc_core`'s module doc describes: given
-/// `verify`'s two outputs, independently reconstructs the real MSO
-/// `Sig_structure` (`crate::mso`) from *only* public data — the step
-/// circuits' exposed per-claim digests plus the core circuit's exposed
-/// MSO-body fields (device key, validity timestamps) — and confirms its
-/// `SHA-256` equals the core circuit's exposed `z`. This is the check
-/// that gives "the ECDSA signature core proved is valid" and "these are
-/// the digests step proved" any actual connection to each other — without
-/// it, a prover could mix a valid core proof for one claim set with valid
-/// step proofs for a *different* one. Returns everything a caller needs on
-/// success: `Q` (for trust-anchor checking), each claim's disclosed
-/// plaintext (or just its digest, if undisclosed), and the MSO-body fields
-/// (for expiry/device-binding checks) — see `VerifiedPresentation`.
+/// `verify`'s two outputs, confirms — for every claim slot — that the step
+/// circuit's own blinded digest equals the core circuit's own blinded
+/// digest for that same slot (both `SHA-256(digest || nonce)`, `nonce`
+/// read from the core circuit's public output; see
+/// `blind_digest_bytes`'s doc for why comparing only the *blinded* values,
+/// never the raw digests, is still sound). This is the check that gives
+/// "the ECDSA signature core proved is valid" and "these are the digests
+/// step proved" any actual connection to each other — without it, a
+/// prover could mix a valid core proof for one claim set with valid step
+/// proofs for a *different* one. (An earlier version of this function
+/// instead reconstructed the real MSO `Sig_structure` from the step
+/// circuits' *raw* exposed digests and compared its hash against the
+/// core's exposed `z` — that raw exposure was the actual bug being fixed
+/// here; `z` and the real per-claim digests are no longer public at all,
+/// so that reconstruction is no longer possible or needed.) Returns
+/// everything a caller needs on success: `Q` (for trust-anchor checking),
+/// each claim's disclosed plaintext (or just its digest, if undisclosed),
+/// and the MSO-body fields (for expiry/device-binding checks) — see
+/// `VerifiedPresentation`.
 pub fn verify_and_check_binding(
   step_public_values: &[Vec<<Engine_ as Engine>::Scalar>],
   core_public_values: &[<Engine_ as Engine>::Scalar],
 ) -> Result<VerifiedPresentation, VegaMdocError> {
-  // qx, qy, z(256), device_x(256), device_y(256), signed_ts, valid_from_ts,
-  // valid_until_ts (each mso::TIMESTAMP_LEN*8 bits), then MAX_CLAIMS_V1
-  // digestIDs (32 bits each) — must match MdocCoreCircuit::public_values's
-  // exact order.
+  // qx, qy, nonce(256), device_x(256), device_y(256), signed_ts,
+  // valid_from_ts, valid_until_ts (each mso::TIMESTAMP_LEN*8 bits), then
+  // MAX_CLAIMS_V1 digestIDs (32 bits each), then MAX_CLAIMS_V1 blinded
+  // per-claim digests (256 bits each) — must match
+  // MdocCoreCircuit::public_values's exact order.
   const TS_BITS: usize = mso::TIMESTAMP_LEN * 8;
-  const EXPECTED_LEN: usize = 2 + 256 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS + MAX_CLAIMS_V1 * 32;
+  const EXPECTED_LEN: usize =
+    2 + 256 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS + MAX_CLAIMS_V1 * 32 + MAX_CLAIMS_V1 * 256;
   if core_public_values.len() != EXPECTED_LEN {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
@@ -727,7 +866,7 @@ pub fn verify_and_check_binding(
     cursor += len;
     slice
   };
-  let core_z_bits = take(256);
+  let nonce: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let device_x: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let device_y: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
@@ -737,15 +876,16 @@ pub fn verify_and_check_binding(
     let bytes = bits_to_bytes(take(32));
     u32::from_be_bytes(bytes.try_into().unwrap())
   });
+  let core_blinded_digests: [[u8; 32]; MAX_CLAIMS_V1] =
+    std::array::from_fn(|_| bits_to_bytes(take(256)).try_into().unwrap());
 
   if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
-  // digest(256) + disclosed flag(1) + real_len(REAL_LEN_BITS) + masked
-  // plaintext(MAX_CLAIM_BYTES_V1*8) + digest_id(32) per step — must match
-  // ClaimDigestStepCircuit::public_values's exact order.
+  // blinded_digest(256) + disclosed flag(1) + real_len(REAL_LEN_BITS) +
+  // masked plaintext(MAX_CLAIM_BYTES_V1*8) + digest_id(32) per step — must
+  // match ClaimDigestStepCircuit::public_values's exact order.
   const STEP_LEN: usize = 256 + 1 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8 + 32;
-  let mut claim_digests: Vec<[u8; 32]> = Vec::with_capacity(step_public_values.len());
   let mut claims: Vec<DisclosedClaim> = Vec::with_capacity(step_public_values.len());
   for v in step_public_values {
     if v.len() != STEP_LEN {
@@ -759,14 +899,14 @@ pub fn verify_and_check_binding(
       // Same defence-in-depth as above, for the digest/plaintext bits.
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
-    let digest_bits = &v[0..256];
+    let blinded_digest_bits = &v[0..256];
     let disclosed_scalar = v[256];
     let real_len_bits = &v[257..257 + REAL_LEN_BITS];
     let plaintext_end = 257 + REAL_LEN_BITS + MAX_CLAIM_BYTES_V1 * 8;
     let plaintext_bits = &v[257 + REAL_LEN_BITS..plaintext_end];
     let step_digest_id_bits = &v[plaintext_end..STEP_LEN];
 
-    let digest: [u8; 32] = bits_to_bytes(digest_bits)
+    let step_blinded_digest: [u8; 32] = bits_to_bytes(blinded_digest_bits)
       .try_into()
       .map_err(|_| VegaMdocError::Circuit(SynthesisError::Unsatisfiable))?;
     let disclosed = disclosed_scalar == <Engine_ as Engine>::Scalar::ONE;
@@ -788,29 +928,41 @@ pub fn verify_and_check_binding(
     );
 
     // Free extra guard (found valuable by an independent review): for a
-    // disclosed claim, the revealed plaintext is provably the SHA-256
-    // preimage of `digest` by construction of the masking circuit
-    // (`ClaimDigestStepCircuit`'s doc) — but re-deriving it here, rather
-    // than trusting that invariant blindly, catches any future bug where
-    // the two public-value groups silently diverge (e.g. a bit-order
-    // mismatch between the two `inputize_bits` calls, or between
-    // `real_len` and the digest's own real-length hashing).
-    if disclosed && claim_digest_bytes(&plaintext) != digest {
+    // disclosed claim, the revealed plaintext is provably the blinded
+    // SHA-256 preimage of `blinded_digest` by construction of the masking
+    // circuit (`ClaimDigestStepCircuit`'s doc) — but re-deriving it here,
+    // rather than trusting that invariant blindly, catches any future bug
+    // where the two public-value groups silently diverge. Only possible
+    // for disclosed claims: an undisclosed claim's real digest is, by
+    // design, never learned by this function at all anymore.
+    let digest = if disclosed {
+      let real_digest = claim_digest_bytes(&plaintext);
+      if blind_digest_bytes(&real_digest, &nonce) != step_blinded_digest {
+        return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
+      }
+      real_digest
+    } else {
+      [0u8; 32]
+    };
+
+    // The binding check this whole field exists for: the step circuit's
+    // own blinded digest must equal the core circuit's own blinded digest
+    // for the same claim slot — see this function's own doc. Without it,
+    // a prover could witness one set of claim digests to the core circuit
+    // (determining the MSO's byte layout it signs) while the step
+    // circuits prove a *different* set.
+    if step_blinded_digest != core_blinded_digests[claims.len()] {
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
 
-    // The binding check this whole field exists for: the step circuit's
-    // own digest_id (provably extracted from this claim's real bytes —
-    // see ClaimDigestStepCircuit's doc) must equal what the core circuit
-    // witnessed for the same claim slot (used to build the MSO's
-    // valueDigests map key). Without this, a prover could witness one
-    // digest_id to the core circuit while a claim's real bytes embed a
-    // different one — see mdoc_core::MdocCoreCircuit's doc.
+    // Same reasoning as the digest cross-check above, for digestID: the
+    // step circuit's own digest_id (provably extracted from this claim's
+    // real bytes — see ClaimDigestStepCircuit's doc) must equal what the
+    // core circuit witnessed for the same claim slot.
     if step_digest_id != digest_ids[claims.len()] {
       return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
     }
 
-    claim_digests.push(digest);
     claims.push(DisclosedClaim {
       disclosed,
       digest,
@@ -818,21 +970,6 @@ pub fn verify_and_check_binding(
       plaintext,
       digest_id: step_digest_id,
     });
-  }
-
-  let mso_body = mso::MsoBodyWitness {
-    device_x,
-    device_y,
-    signed_ts,
-    valid_from_ts,
-    valid_until_ts,
-  };
-  let sig_structure = mso::native_sig_structure_bytes(&digest_ids, &claim_digests, &mso_body);
-  let expected_z_bytes: [u8; 32] = Sha256::digest(&sig_structure).into();
-  let expected_z_bits = native_bytes_to_bits_pub(&expected_z_bytes);
-
-  if core_z_bits != expected_z_bits.as_slice() {
-    return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
 
   Ok(VerifiedPresentation {
@@ -845,14 +982,6 @@ pub fn verify_and_check_binding(
     valid_from_ts,
     valid_until_ts,
   })
-}
-
-fn native_bytes_to_bits_pub(bytes: &[u8]) -> Vec<<Engine_ as Engine>::Scalar> {
-  bytes
-    .iter()
-    .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
-    .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
-    .collect()
 }
 
 #[cfg(test)]
@@ -933,10 +1062,11 @@ mod tests {
     // digest_id doesn't need to genuinely appear in `real_bytes`'s own
     // CBOR framing (unlike the full-pipeline tests below, which do).
     let digest_id = 42u32;
-    let disclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, true, digest_id)
+    let nonce = [0x99u8; 32];
+    let disclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, true, digest_id, nonce)
       .public_values()
       .expect("public_values");
-    let undisclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, false, digest_id)
+    let undisclosed = ClaimDigestStepCircuit::<Engine_>::new(bytes.clone(), real_len, false, digest_id, nonce)
       .public_values()
       .expect("public_values");
 
@@ -944,16 +1074,19 @@ mod tests {
     assert_eq!(disclosed.len(), STEP_LEN);
     assert_eq!(undisclosed.len(), STEP_LEN);
 
+    // Position 0..256 holds the *blinded* digest (see `blind_digest_bytes`'s
+    // doc) -- never the raw one, regardless of disclosure.
     let digest = claim_digest_bytes(real_bytes);
+    let blinded_digest = blind_digest_bytes(&digest, &nonce);
     assert_eq!(
       bits_to_bytes(&disclosed[0..256]),
-      digest,
-      "disclosed[0..256] must be the claim's digest (of the REAL bytes, not the padded buffer)"
+      blinded_digest,
+      "disclosed[0..256] must be the claim's BLINDED digest (of the REAL bytes, not the padded buffer)"
     );
     assert_eq!(
       bits_to_bytes(&undisclosed[0..256]),
-      digest,
-      "the digest slot must be exposed regardless of disclosure"
+      blinded_digest,
+      "the blinded digest slot must be exposed regardless of disclosure"
     );
     assert_eq!(disclosed[256], <Engine_ as Engine>::Scalar::ONE);
     assert_eq!(undisclosed[256], <Engine_ as Engine>::Scalar::ZERO);
@@ -998,11 +1131,13 @@ mod tests {
     real_len: usize,
     disclose: bool,
     digest_id: u32,
+    nonce: &[u8; 32],
   ) -> Vec<<Engine_ as Engine>::Scalar> {
     let mut hasher = Sha256::new();
     hasher.update(&padded_bytes[..real_len]);
-    let mut values: Vec<<Engine_ as Engine>::Scalar> = hasher
-      .finalize()
+    let digest: [u8; 32] = hasher.finalize().into();
+    let blinded = blind_digest_bytes(&digest, nonce);
+    let mut values: Vec<<Engine_ as Engine>::Scalar> = blinded
       .iter()
       .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
       .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
@@ -1050,21 +1185,31 @@ mod tests {
     let digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
     let ecdsa_witness = real_ecdsa_witness_over(&digest_ids, &claim_digests);
 
-    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
-    let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
-    let (step_public_values, _core_public_values) = verify(&proof, &keys.vk).expect("verify");
+    let call_nonce = fresh_nonce().expect("fresh_nonce");
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), &call_nonce).expect("prep_prove");
+    let (proof, _next_prep) =
+      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
+    let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
+
+    // Also independently extract the nonce the core circuit publicly
+    // exposed (bits [2..258], right after qx/qy) and confirm it matches
+    // `call_nonce` -- not just trust it, so `expected_step_public_values`
+    // below blinds with a value confirmed to be what the real proof
+    // actually used.
+    let nonce: [u8; 32] = bits_to_bytes(&core_public_values[2..258]).try_into().expect("32 bytes");
+    assert_eq!(nonce, call_nonce, "core circuit must expose exactly the nonce it was given");
 
     // Confirm the circuit is actually constraining the real values, not
     // vacuously satisfiable: the padded claim set is [Doe, Jane, pad, pad]
-    // (see `pad_claims`), so check the exposed public values (digest +
-    // disclosed flag + masked plaintext + digest_id) for all four slots
-    // equal an independently-computed expectation.
+    // (see `pad_claims`), so check the exposed public values (blinded
+    // digest + disclosed flag + masked plaintext + digest_id) for all four
+    // slots equal an independently-computed expectation.
     let padded = pad_claims(&claims).expect("pad_claims");
     for (step_values, claim) in step_public_values.iter().zip(padded.iter()) {
       assert_eq!(
         step_values,
-        &expected_step_public_values(&claim.bytes, claim.real_len, claim.disclose, claim.digest_id),
-        "step circuit's exposed public values must match digest + disclosed flag + masked plaintext + digest_id"
+        &expected_step_public_values(&claim.bytes, claim.real_len, claim.disclose, claim.digest_id, &nonce),
+        "step circuit's exposed public values must match blinded digest + disclosed flag + masked plaintext + digest_id"
       );
     }
   }
@@ -1107,8 +1252,10 @@ mod tests {
     let digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
     let ecdsa_witness = real_ecdsa_witness_over(&digest_ids, &claim_digests);
 
-    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body()).expect("prep_prove");
-    let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep).expect("prove");
+    let call_nonce = fresh_nonce().expect("fresh_nonce");
+    let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), &call_nonce).expect("prep_prove");
+    let (proof, next_prep) =
+      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
     let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     let verified = verify_and_check_binding(&step_public_values, &core_public_values)
@@ -1122,14 +1269,23 @@ mod tests {
       assert_eq!(verified_claim.disclosed, expected.disclose);
       assert_eq!(verified_claim.real_len, expected.real_len);
       assert_eq!(verified_claim.digest_id, expected.digest_id, "digestID must round-trip through the proof, at every CBOR-uint width class");
-      assert_eq!(verified_claim.digest, claim_digest_bytes(&expected.bytes[..expected.real_len]));
       if expected.disclose {
+        assert_eq!(
+          verified_claim.digest,
+          claim_digest_bytes(&expected.bytes[..expected.real_len]),
+          "a disclosed claim's digest is safe to expose (derivable from plaintext anyway) and must round-trip"
+        );
         assert_eq!(
           verified_claim.plaintext,
           expected.bytes[..expected.real_len].to_vec(),
           "a disclosed claim's plaintext must round-trip through the proof"
         );
       } else {
+        assert_eq!(
+          verified_claim.digest,
+          [0u8; 32],
+          "an undisclosed claim's real digest must never be exposed -- masked to all-zero, same as plaintext"
+        );
         assert_eq!(
           verified_claim.plaintext,
           vec![0u8; expected.real_len],
@@ -1141,8 +1297,11 @@ mod tests {
     // The fold-and-reuse prep state must also work for a second
     // presentation of the same credential (a different verifier, say) —
     // exercising `nextState`'s round-trip, not just a single `prove` call.
-    let (proof2, _next_prep2) =
-      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), next_prep).expect("second prove reusing prep state");
+    // MUST reuse `call_nonce`, not a fresh one -- see `fresh_nonce`'s doc
+    // for why a nonce is tied to the lifetime of one prep chain, and why
+    // that's a real, currently-latent limitation on real freshness.
+    let (proof2, _next_prep2) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), next_prep, &call_nonce)
+      .expect("second prove reusing prep state");
     let (step_public_values2, core_public_values2) = verify(&proof2, &keys.vk).expect("verify 2");
     verify_and_check_binding(&step_public_values2, &core_public_values2)
       .expect("binding check must also pass for the reused-prep-state proof");
@@ -1176,10 +1335,15 @@ mod tests {
       digest_id: 5,
     }];
 
+    // Deliberately the SAME nonce for both circuits below -- this test is
+    // isolating the claim-digest mismatch specifically, not an incidental
+    // nonce mismatch (which would also fail the binding check, but for the
+    // wrong reason).
+    let nonce = [0x77u8; 32];
     let padded = pad_claims(&real_claims).expect("pad_claims");
     let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
       .iter()
-      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
+      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id, nonce))
       .collect();
 
     let mismatched_digests = core_claim_digests(&other_claims).expect("core_claim_digests");
@@ -1194,6 +1358,7 @@ mod tests {
       mismatched_digest_ids,
       mismatched_digests,
       test_mso_body(),
+      nonce,
     );
 
     let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
@@ -1231,15 +1396,18 @@ mod tests {
       disclose: true,
       digest_id: 7,
     }];
+    // Same nonce on both sides, deliberately -- see the analogous comment
+    // in `binding_check_rejects_mismatched_claims`.
+    let nonce = [0x88u8; 32];
     let padded = pad_claims(&claims).expect("pad_claims");
     let step_circuits: Vec<ClaimDigestStepCircuit<Engine_>> = padded
       .iter()
-      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id))
+      .map(|c| ClaimDigestStepCircuit::new(c.bytes.clone(), c.real_len, c.disclose, c.digest_id, nonce))
       .collect();
 
     // The core circuit signs the SAME claim_digests (so the pre-existing
-    // digest/z binding alone would pass) but under a DIFFERENT digestID
-    // -- a genuinely valid signature over a differently-keyed MSO.
+    // blinded-digest binding alone would pass) but under a DIFFERENT
+    // digestID -- a genuinely valid signature over a differently-keyed MSO.
     let claim_digests = core_claim_digests(&claims).expect("core_claim_digests");
     let mut wrong_digest_ids = core_digest_ids(&claims).expect("core_digest_ids");
     wrong_digest_ids[0] = 8; // differs from the step circuit's real digest_id=7
@@ -1253,6 +1421,7 @@ mod tests {
       wrong_digest_ids,
       claim_digests,
       test_mso_body(),
+      nonce,
     );
 
     let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)

@@ -534,8 +534,10 @@ mod tests {
       s_inv,
     };
 
-    let prep = crate::prep_prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body).expect("prep_prove");
-    let (proof, _next_prep) = crate::prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, prep).expect("prove");
+    let nonce = crate::fresh_nonce().expect("fresh_nonce");
+    let prep = crate::prep_prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, &nonce).expect("prep_prove");
+    let (proof, _next_prep) =
+      crate::prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
     let proof_bytes = bincode::serialize(&proof).expect("serialize proof");
 
     GoldenFixture {
