@@ -226,7 +226,7 @@ pub fn deserialize_verifier_key(bytes: &[u8]) -> Result<VegaVerifierKey, VegaFfi
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
 }
 
-/// `prior_state`/`next_state`'s wire format is `nonce(32 bytes) ||
+/// `prior_state`/`next_state`'s wire format is `nonce(BLIND_NONCE_BYTES) ||
 /// bincode(VegaMcPrepZkSNARK)` — the digest-blinding nonce (see
 /// `crate::fresh_nonce`'s doc) has to persist for the whole lifetime of a
 /// prep chain (every `prove` reusing it must pass the SAME nonce back to
@@ -234,7 +234,7 @@ pub fn deserialize_verifier_key(bytes: &[u8]) -> Result<VegaVerifierKey, VegaFfi
 /// itself rather than as a separate FFI parameter — keeps the existing
 /// Kotlin/Swift `priorState`/`nextState` contract (opaque bytes, no SDK
 /// changes) exactly as-is.
-const NONCE_LEN: usize = 32;
+const NONCE_LEN: usize = vega_mdoc::BLIND_NONCE_BYTES;
 
 fn encode_prep_state(nonce: &[u8; NONCE_LEN], prep: VegaMcPrepZkSNARK<Engine_>) -> Result<Vec<u8>, VegaFfiError> {
   let mut out = nonce.to_vec();
@@ -303,14 +303,36 @@ pub fn prove(
 /// Verifies a proof and checks the step↔core binding (see this module's
 /// doc) in one call — a caller never sees an unbound "valid" proof.
 #[uniffi::export]
-pub fn verify(vk: &VegaVerifierKey, proof_bytes: Vec<u8>) -> Result<FfiVerifyResult, VegaFfiError> {
+pub fn verify(
+  vk: &VegaVerifierKey,
+  proof_bytes: Vec<u8>,
+  disclosed_bytes: Vec<Vec<u8>>,
+) -> Result<FfiVerifyResult, VegaFfiError> {
   let proof: VegaMcZkSNARK<Engine_> =
     bincode::deserialize(&proof_bytes).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   let (step_public_values, core_public_values) =
     vega_mdoc::verify(&proof, &vk.0).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
-  let verified = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values)
+  // One entry per claim slot, in order: the real IssuerSignedItem bytes
+  // for a disclosed slot, EMPTY for an undisclosed one. These are no
+  // longer carried inside the proof (see `verify_and_check_binding`);
+  // they travel beside it and are bound by the blinded digest, which
+  // this call checks. Passing the wrong count is rejected rather than
+  // silently padded.
+  if disclosed_bytes.len() != vega_mdoc::MAX_CLAIMS_V1 {
+    return Err(VegaFfiError(anyhow::anyhow!(
+      "expected exactly {} disclosed-bytes entries (empty for undisclosed slots), got {}",
+      vega_mdoc::MAX_CLAIMS_V1,
+      disclosed_bytes.len()
+    )));
+  }
+  let disclosed: Vec<Option<Vec<u8>>> = disclosed_bytes
+    .into_iter()
+    .map(|b| if b.is_empty() { None } else { Some(b) })
+    .collect();
+
+  let verified = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed)
     .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   Ok(FfiVerifyResult {
@@ -471,22 +493,25 @@ mod tests {
       prep_state,
     )
     .expect("prove 1");
-    let verified1 = verify(&vk, result1.proof_bytes).expect("verify 1");
+    let expected_claim0_bytes = claim_bytes_with_digest_id(26, b"family_name:Doe");
+    let disclosed_in = vec![expected_claim0_bytes.clone(), Vec::new(), Vec::new(), Vec::new()];
+    let verified1 = verify(&vk, result1.proof_bytes, disclosed_in.clone()).expect("verify 1");
     assert_eq!(verified1.qx, ecdsa_witness.qx);
     assert_eq!(verified1.qy, ecdsa_witness.qy);
-    let expected_claim0_bytes = claim_bytes_with_digest_id(26, b"family_name:Doe");
-    let expected_claim1_bytes = claim_bytes_with_digest_id(300, b"given_name:Jane");
+    let _expected_claim1_bytes = claim_bytes_with_digest_id(300, b"given_name:Jane");
     assert_eq!(verified1.claims.len(), crate::MAX_CLAIMS_V1);
     assert!(verified1.claims[0].disclosed);
     assert_eq!(verified1.claims[0].real_len, expected_claim0_bytes.len() as u32);
     assert_eq!(verified1.claims[0].plaintext, expected_claim0_bytes);
     assert_eq!(verified1.claims[0].digest_id, 26);
     assert!(!verified1.claims[1].disclosed, "second claim wasn't disclosed");
-    assert_eq!(verified1.claims[1].real_len, expected_claim1_bytes.len() as u32);
     assert_eq!(
-      verified1.claims[1].plaintext,
-      vec![0u8; expected_claim1_bytes.len()],
-      "an undisclosed claim's plaintext must be masked to all-zero over the FFI boundary too"
+      verified1.claims[1].real_len, 0,
+      "an undisclosed claim's length must not leak across the FFI boundary either"
+    );
+    assert!(
+      verified1.claims[1].plaintext.iter().all(|&b| b == 0),
+      "an undisclosed claim carries no plaintext across the FFI boundary"
     );
     assert_eq!(verified1.claims[1].digest_id, 300);
     assert_eq!(verified1.device_x, mso_body_native.device_x.to_vec());
@@ -501,7 +526,7 @@ mod tests {
       result1.next_state,
     )
     .expect("prove 2 (reused prep state)");
-    let verified2 = verify(&vk, result2.proof_bytes).expect("verify 2");
+    let verified2 = verify(&vk, result2.proof_bytes, disclosed_in).expect("verify 2");
     assert_eq!(verified2.qx, ecdsa_witness.qx);
   }
 

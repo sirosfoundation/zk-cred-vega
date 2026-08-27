@@ -86,6 +86,24 @@ typedef struct {
  *   window, each exactly ZK_CRED_VEGA_TIMESTAMP_LEN ASCII bytes
  *   (e.g. "2026-08-20T00:00:00Z").
  */
+/*
+ * One claim slot's disclosed bytes, supplied IN to zk_cred_vega_verify().
+ *
+ * The IssuerSignedItem plaintext is no longer a public value of the proof:
+ * it travels beside the proof and is bound by the blinded digest, which
+ * verification checks. This mirrors BBS (disclosed_messages passed to
+ * ProofVerify) and Longfellow (PublicAttribute fed into the statement).
+ *
+ * Set present = 0 for an undisclosed slot. Set present = 1 and fill
+ * len/bytes for a disclosed one. Exactly MAX_CLAIMS (4) entries must be
+ * passed, in claim-slot order.
+ */
+typedef struct {
+    uint8_t present;
+    size_t  len;
+    uint8_t bytes[ZK_CRED_VEGA_MAX_CLAIM_BYTES];
+} CDisclosedInput;
+
 typedef struct {
     uint8_t qx[32];
     uint8_t qy[32];
@@ -148,6 +166,11 @@ void zk_cred_vega_free_error_string(char *ptr);
  *   (must not be NULL, freed, or concurrently being freed by another
  *   thread).
  * `proof`/`proof_len`: the serialized proof bytes.
+ * `disclosed`/`disclosed_len`: REQUIRED. Exactly MAX_CLAIMS (4) entries in
+ *   claim-slot order, carrying the real IssuerSignedItem bytes for every
+ *   slot the proof reports as disclosed and present = 0 for the rest.
+ *   These bytes are not inside the proof; verification binds them by
+ *   re-deriving their blinded digest. A mismatch fails verification.
  * `result_out`: optional (may be NULL, in which case the proof is still
  *   validated and a status code returned, just without writing the public
  *   values anywhere). If non-NULL, must point to a valid, writable
@@ -173,6 +196,8 @@ int32_t zk_cred_vega_verify(
     const GoVegaVerifierKey *verifier_key,
     const uint8_t *proof,
     size_t proof_len,
+    const CDisclosedInput *disclosed,
+    size_t disclosed_len,
     CVerifyResult *result_out,
     char **error_out
 );

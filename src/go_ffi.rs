@@ -134,6 +134,20 @@ impl Default for CDisclosedClaim {
   }
 }
 
+/// One claim slot's disclosed bytes, supplied *in* to
+/// [`zk_cred_vega_verify`]. The `IssuerSignedItem` plaintext is no longer
+/// a public value of the proof (see `crate::verify_and_check_binding`):
+/// it travels beside the proof and is bound by the blinded digest, which
+/// verification checks. Set `present = 0` for an undisclosed slot; set
+/// `present = 1` and fill `len`/`bytes` for a disclosed one.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CDisclosedInput {
+  pub present: u8,
+  pub len: usize,
+  pub bytes: [u8; MAX_CLAIM_BYTES_V1],
+}
+
 /// The verified, bound public output of a presentation - a fixed-size (no
 /// heap allocation) twin of [`crate::VerifiedPresentation`]. The caller
 /// allocates this struct itself (e.g. on the stack, or as a Go value) and
@@ -396,6 +410,8 @@ pub unsafe extern "C" fn zk_cred_vega_verify(
   verifier_key: *const GoVegaVerifierKey,
   proof: *const u8,
   proof_len: usize,
+  disclosed: *const CDisclosedInput,
+  disclosed_len: usize,
   result_out: *mut CVerifyResult,
   error_out: *mut *mut c_char,
 ) -> i32 {
@@ -421,8 +437,32 @@ pub unsafe extern "C" fn zk_cred_vega_verify(
     }
     let proof: VegaMcZkSNARK<crate::Engine_> = bincode::deserialize(proof_bytes).map_err(|e| anyhow::anyhow!("failed to deserialize proof: {e}"))?;
 
+    if disclosed.is_null() {
+      return Err(anyhow::anyhow!("disclosed must not be null"));
+    }
+    if disclosed_len != MAX_CLAIMS_V1 {
+      return Err(anyhow::anyhow!(
+        "disclosed_len must be exactly {MAX_CLAIMS_V1}, got {disclosed_len}"
+      ));
+    }
+    // SAFETY: forwarded from this function's safety contract -- the caller
+    // guarantees `disclosed` points to `disclosed_len` initialised entries.
+    let disclosed_slice = unsafe { std::slice::from_raw_parts(disclosed, disclosed_len) };
+    let disclosed_vec: Vec<Option<Vec<u8>>> = disclosed_slice
+      .iter()
+      .map(|d| {
+        if d.present == 0 {
+          Ok(None)
+        } else if d.len > MAX_CLAIM_BYTES_V1 {
+          Err(anyhow::anyhow!("disclosed len {} exceeds MAX_CLAIM_BYTES_V1", d.len))
+        } else {
+          Ok(Some(d.bytes[..d.len].to_vec()))
+        }
+      })
+      .collect::<Result<_, _>>()?;
+
     let (step_public_values, core_public_values) = crate::verify(&proof, &verifier_key.0).map_err(|e| anyhow::anyhow!(e))?;
-    let verified = crate::verify_and_check_binding(&step_public_values, &core_public_values).map_err(|e| anyhow::anyhow!(e))?;
+    let verified = crate::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_vec).map_err(|e| anyhow::anyhow!(e))?;
 
     to_c_result(verified)
   });
@@ -556,6 +596,20 @@ mod tests {
   /// verifier key, verify a real proof, then free. Confirms the returned
   /// public values match what the safe API itself reports for the same
   /// proof.
+  /// Slot 0 is the only disclosed claim in the golden fixture; slot 1 is
+  /// deliberately undisclosed and slots 2/3 are padding.
+  fn disclosed_inputs(claim0: &[u8]) -> [CDisclosedInput; MAX_CLAIMS_V1] {
+    let mut d: [CDisclosedInput; MAX_CLAIMS_V1] = [CDisclosedInput {
+      present: 0,
+      len: 0,
+      bytes: [0u8; MAX_CLAIM_BYTES_V1],
+    }; MAX_CLAIMS_V1];
+    d[0].present = 1;
+    d[0].len = claim0.len();
+    d[0].bytes[..claim0.len()].copy_from_slice(claim0);
+    d
+  }
+
   #[test]
   fn c_abi_round_trip_succeeds() {
     let golden = build_golden_fixture();
@@ -572,10 +626,13 @@ mod tests {
 
       let mut result = std::mem::MaybeUninit::<CVerifyResult>::uninit();
       let mut error_out: *mut c_char = std::ptr::null_mut();
+      let disclosed = disclosed_inputs(&golden.claim0);
       let status = zk_cred_vega_verify(
         vk_handle,
         golden.proof_bytes.as_ptr(),
         golden.proof_bytes.len(),
+        disclosed.as_ptr(),
+        disclosed.len(),
         result.as_mut_ptr(),
         &mut error_out,
       );
@@ -637,7 +694,8 @@ mod tests {
 
       let mut result = std::mem::MaybeUninit::<CVerifyResult>::uninit();
       let mut error_out: *mut c_char = std::ptr::null_mut();
-      let status = zk_cred_vega_verify(vk_handle, garbage_proof.as_ptr(), garbage_proof.len(), result.as_mut_ptr(), &mut error_out);
+      let disclosed = disclosed_inputs(b"unused: the proof is garbage");
+      let status = zk_cred_vega_verify(vk_handle, garbage_proof.as_ptr(), garbage_proof.len(), disclosed.as_ptr(), disclosed.len(), result.as_mut_ptr(), &mut error_out);
       assert_ne!(status, 0, "garbage proof must not verify");
       assert!(!error_out.is_null(), "expected an error message");
       let message = CStr::from_ptr(error_out).to_str().unwrap();
@@ -666,7 +724,7 @@ mod tests {
       zk_cred_vega_free_error_string(error_out);
 
       let mut error_out: *mut c_char = std::ptr::null_mut();
-      let status = zk_cred_vega_verify(std::ptr::null(), std::ptr::null(), 0, std::ptr::null_mut(), &mut error_out);
+      let status = zk_cred_vega_verify(std::ptr::null(), std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null_mut(), &mut error_out);
       assert_ne!(status, 0);
       assert!(!error_out.is_null());
       zk_cred_vega_free_error_string(error_out);
