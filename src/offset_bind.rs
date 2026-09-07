@@ -104,6 +104,24 @@ const DEVICE_KEY_INFO: &[u8] = b"\x6ddeviceKeyInfo";
 /// `67 "docType"`.
 const DOC_TYPE_KEY: &[u8] = b"\x67docType";
 
+/// The canonical CBOR text-string header for a string of `len` bytes.
+///
+/// One byte below 24, two from 24 to 255. This matters more than it
+/// looks: `eu.europa.ec.eudi.pid.1` is exactly 23 characters, one short
+/// of needing the wider form, while several of its siblings in the same
+/// family — `eu.europa.ec.eudi.hiid.1`, `.iban.1`, `.ehic.1` at 24, and
+/// `.msisdn.1` at 26 — are already over it. An earlier revision assumed
+/// the one-byte form throughout, which happened to be right for the one
+/// document type it was tested against and wrong for the next one.
+fn tstr_header(len: usize) -> Vec<u8> {
+  assert!(len < 256, "this binding encodes text-string headers as one or two bytes");
+  if len < 24 {
+    vec![0x60 | len as u8]
+  } else {
+    vec![0x78, len as u8]
+  }
+}
+
 /// A byte's value as a linear combination of its eight big-endian bits,
 /// scaled by `scale`. Free: no constraint, just a re-weighting of
 /// variables the caller has already allocated for the hash.
@@ -340,7 +358,7 @@ pub fn bind_digest_region<Scalar, CS>(
   bits: &[Boolean],
   native: &[u8],
   namespace: &str,
-  doc_type_len: usize,
+  doc_type: &str,
   num_entries: usize,
   landmarks: Landmarks,
 ) -> Result<RegionBinding<Scalar>, SynthesisError>
@@ -352,8 +370,7 @@ where
 
   // ---- Start anchor: `6C "valueDigests" A1 <tstr ns> <map hdr>` ----
   let mut open = VALUE_DIGESTS_OPEN.to_vec();
-  assert!(namespace.len() < 24, "namespace tstr header is assumed to be one byte");
-  open.push(0x60 | namespace.len() as u8);
+  open.extend_from_slice(&tstr_header(namespace.len()));
   open.extend_from_slice(namespace.as_bytes());
   if num_entries < 24 {
     open.push(0xa0 | num_entries as u8);
@@ -406,7 +423,8 @@ where
   )?;
 
   // ---- docType, read out for the verifier --------------------------
-  let doc_type_window_len = DOC_TYPE_KEY.len() + 1 + doc_type_len;
+  let doc_type_header = tstr_header(doc_type.len());
+  let doc_type_window_len = DOC_TYPE_KEY.len() + doc_type_header.len() + doc_type.len();
   let doc_candidates = window_offsets(native.len(), doc_type_window_len);
   let doc_window = select_window::<Scalar, _>(
     cs.namespace(|| "docType"),
@@ -416,16 +434,20 @@ where
     landmarks.doc_type_key,
     doc_type_window_len,
   )?;
-  // Only the `67 "docType"` key and the value's tstr header are fixed;
-  // the value itself is what the verifier learns.
-  let mut key_prefix = DOC_TYPE_KEY.to_vec();
-  key_prefix.push(0x60 | doc_type_len as u8);
-  // Constrain the key bytes by comparing the first pack against a
-  // literal built from the real prefix plus the real docType bytes: the
-  // docType value is public output, so there is nothing to hide in it.
+  // The whole window is pinned to a literal: the key, the value's tstr
+  // header, and the value itself. The docType is a public output, so
+  // there is nothing in it to hide — and pinning it to the bytes that
+  // were actually signed is what stops a prover naming a document type
+  // the issuer did not.
+  let mut expected = DOC_TYPE_KEY.to_vec();
+  expected.extend_from_slice(&doc_type_header);
+  expected.extend_from_slice(doc_type.as_bytes());
   let doc_type_bytes = &native[landmarks.doc_type_key..landmarks.doc_type_key + doc_type_window_len];
-  assert_eq!(&doc_type_bytes[..key_prefix.len()], key_prefix.as_slice(), "docType landmark does not point at the docType key");
-  enforce_window_equals(cs.namespace(|| "docType literal"), &doc_window, doc_type_bytes)?;
+  assert_eq!(
+    doc_type_bytes, expected,
+    "the docType landmark does not point at `{doc_type}` in the signed bytes"
+  );
+  enforce_window_equals(cs.namespace(|| "docType literal"), &doc_window, &expected)?;
 
   Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs })
 }

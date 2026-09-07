@@ -266,3 +266,48 @@ fn the_issuer_key_reaches_the_caller_so_it_can_be_made_public() {
         .collect();
     assert_eq!(&recovered[..], CUTOFF.as_slice(), "the cutoff must be recoverable from the outputs");
 }
+
+/// A `docType` past the one-byte CBOR text-string header boundary.
+///
+/// `eu.europa.ec.eudi.pid.1` is 23 characters, one short of the length at
+/// which a text-string header needs a second byte — so the PID this
+/// circuit was built against could never exercise the wider form, while
+/// `eu.europa.ec.eudi.ehic.1` and `.iban.1` (24) and `.msisdn.1` (26) all
+/// sit on the far side of it. An earlier revision hard-coded the one-byte
+/// header and would have produced a malformed anchor literal for every
+/// one of them.
+#[test]
+fn a_doc_type_needing_a_two_byte_header_still_binds() {
+  let l = load("pid_arf18_long_doctype");
+  assert_eq!(l.witness.doc_type.len(), 24, "this fixture only tests what it claims if the docType crosses 23");
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF).expect("synthesis");
+  assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+  assert!(out.old_enough.get_value().unwrap());
+}
+
+/// The `docType` is pinned to the signed bytes, not taken on trust.
+///
+/// The witness names a document type; the binding constrains the whole
+/// `67 "docType" <tstr>` window in the credential to match it. Claiming a
+/// type the issuer did not sign has to fail, or a PID could be passed off
+/// as any other attestation.
+#[test]
+fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
+  let l = load("pid_arf18_random");
+  let mut wrong = l.witness.clone();
+  wrong.doc_type = "org.iso.18013.5.1.mDL".to_string();
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF);
+    cs.which_is_unsatisfied().is_some()
+  }));
+  match result {
+    // The native landmark check fires first for an honest prover's own
+    // benefit; a prover who removes it still hits the circuit constraint.
+    Err(_) => {}
+    Ok(unsatisfied) => assert!(unsatisfied, "a docType the issuer did not sign must not be provable"),
+  }
+}

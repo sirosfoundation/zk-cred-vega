@@ -83,7 +83,14 @@ pub struct PidAgeWitness {
   pub landmarks: Landmarks,
   /// The namespace whose digests the proof is about.
   pub namespace: String,
-  /// The credential's `docType`, revealed to the verifier.
+  /// The credential's `docType`.
+  ///
+  /// This is a *claim about* the signed bytes, not an input the verifier
+  /// takes on trust: [`crate::offset_bind::bind_digest_region`] pins the
+  /// whole `67 "docType" <tstr>` window in the credential to this exact
+  /// string, so naming a document type the issuer did not sign fails the
+  /// anchor. What reaches the verifier is the window read out of the
+  /// signed bytes, returned as [`PidAgeOutputs::doc_type`].
   pub doc_type: String,
   /// How many entries the namespace's `valueDigests` map holds.
   pub num_entries: usize,
@@ -305,7 +312,7 @@ where
     &sig_bits,
     &padded,
     &witness.namespace,
-    witness.doc_type.len(),
+    &witness.doc_type,
     witness.num_entries,
     witness.landmarks,
   )?;

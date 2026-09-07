@@ -51,8 +51,16 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+/// The PID's own document type and namespace, 23 characters — one short
+/// of the length at which a CBOR text-string header needs a second byte.
+/// Several siblings in the same family sit on the other side of that
+/// boundary (`eu.europa.ec.eudi.ehic.1` and `.iban.1` at 24,
+/// `.msisdn.1` at 26), which is why one variant below deliberately uses
+/// a long one.
 const NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const DOC_TYPE: &str = "eu.europa.ec.eudi.pid.1";
+/// A real EUDI attestation type that crosses the 24-byte header boundary.
+const LONG_DOC_TYPE: &str = "eu.europa.ec.eudi.ehic.1";
 
 // ---- Minimal canonical CBOR, only the shapes a PID MSO needs --------
 
@@ -265,6 +273,9 @@ enum DigestIdProfile {
   Sequential,
   /// Uniform over the full legal range, as ISO 18013-5 §9.1.2.4 directs.
   Random,
+  /// A document type of 24 characters, the first length whose CBOR
+  /// text-string header needs two bytes rather than one.
+  LongDocType,
   /// Random digestIDs, but with the holder's `deviceKey` x-coordinate set
   /// to the SHA-256 of a fabricated `birth_date` item. An offset proof
   /// with no structural binding accepts this; `offset_bind` must not.
@@ -285,12 +296,17 @@ fn gen_pid(profile: DigestIdProfile, name: &str, description: &str) {
   let mut pseudonym_seed = [0u8; 32];
   rng.fill_bytes(&mut pseudonym_seed);
 
+  let (doc_type, namespace) = match profile {
+    DigestIdProfile::LongDocType => (LONG_DOC_TYPE, LONG_DOC_TYPE),
+    _ => (DOC_TYPE, NAMESPACE),
+  };
+
   let elements = pid_elements(&portrait, &pseudonym_seed);
   let n = elements.len();
 
   let digest_ids: Vec<u32> = match profile {
     DigestIdProfile::Sequential => (0..n as u32).collect(),
-    DigestIdProfile::Random | DigestIdProfile::PlantedDeviceKey => {
+    DigestIdProfile::Random | DigestIdProfile::PlantedDeviceKey | DigestIdProfile::LongDocType => {
       let mut seen = std::collections::BTreeSet::new();
       while seen.len() < n {
         seen.insert(rng.gen_range(0..=zk_cred_vega::cbor_uint::MAX_DIGEST_ID));
@@ -396,7 +412,7 @@ fn gen_pid(profile: DigestIdProfile, name: &str, description: &str) {
   let mut mso = vec![0xa6];
   let doc_type_offset_in_mso = mso.len();
   mso.extend(tstr("docType"));
-  mso.extend(tstr(DOC_TYPE));
+  mso.extend(tstr(doc_type));
   mso.extend(tstr("version"));
   mso.extend(tstr("1.0"));
   mso.extend(tstr("validityInfo"));
@@ -404,7 +420,7 @@ fn gen_pid(profile: DigestIdProfile, name: &str, description: &str) {
   let value_digests_key_offset_in_mso = mso.len();
   mso.extend(tstr("valueDigests"));
   mso.push(0xa1); // one namespace
-  mso.extend(tstr(NAMESPACE));
+  mso.extend(tstr(namespace));
   mso.extend(head(5, n as u64)); // the digestID map header
   let region_start_in_mso = mso.len();
   mso.extend_from_slice(&region);
@@ -469,8 +485,8 @@ fn gen_pid(profile: DigestIdProfile, name: &str, description: &str) {
 
   let fixture = PidFixture {
     description: description.to_string(),
-    doc_type: DOC_TYPE.to_string(),
-    namespace: NAMESPACE.to_string(),
+    doc_type: doc_type.to_string(),
+    namespace: namespace.to_string(),
     signed_ts: signed_ts.to_string(),
     valid_from_ts: valid_from_ts.to_string(),
     valid_until_ts: valid_until_ts.to_string(),
@@ -520,6 +536,14 @@ fn main() {
     "Full 34-attribute EUDI PID (eu.europa.ec.eudi.pid.1), digestIDs assigned by a \
      per-namespace counter as our own MSOBuilder does. Real canonical CBOR, real \
      2 kB portrait, real ECDSA-P256 signature over the real Sig_structure.",
+  );
+  gen_pid(
+    DigestIdProfile::LongDocType,
+    "pid_arf18_long_doctype",
+    "Same 34-attribute credential, but with a 24-character docType and namespace \
+     (eu.europa.ec.eudi.ehic.1) -- the first length at which a CBOR text-string header \
+     needs two bytes instead of one. eu.europa.ec.eudi.pid.1 is 23 characters, so the \
+     PID itself sits one short of this boundary and would never exercise it.",
   );
   gen_pid(
     DigestIdProfile::PlantedDeviceKey,
