@@ -161,6 +161,17 @@ fn pack_constant<Scalar: PrimeField>(window: &[u8]) -> Vec<Scalar> {
     .collect()
 }
 
+/// Every offset at which a `window_len`-byte window fits entirely inside
+/// `len` bytes — that is `0..=len - window_len`, **inclusive** of the
+/// last one. Getting this wrong by one silently excludes a legal offset,
+/// and `select_window`'s own assertion then rejects an honest prover.
+pub fn window_offsets(len: usize, window_len: usize) -> Vec<usize> {
+  if window_len > len {
+    return Vec::new();
+  }
+  (0..=len - window_len).collect()
+}
+
 /// The result of selecting a window at a witnessed offset.
 pub struct SelectedWindow<Scalar: PrimeField> {
   /// The window's bytes, packed [`BYTES_PER_PACK`] at a time.
@@ -317,9 +328,13 @@ pub struct Landmarks {
 /// namespace's digest region inside the signed bytes, and reads out the
 /// credential's `docType`.
 ///
-/// `candidates` bounds where each landmark may sit; passing every byte
-/// offset is sound but pays for candidates a real MSO can never use, so
-/// callers should pass a realistic window.
+/// Each landmark is searched over *every* offset where its window fits.
+/// A real MSO puts all three in the first couple of hundred bytes, so a
+/// narrower candidate set would be cheaper — but it would also bake an
+/// assumption about issuer layout into the circuit shape, and the saving
+/// is a fraction of a percent against the hash this sits beside. If that
+/// ever becomes worth it, the bound belongs in a parameter here rather
+/// than hard-coded inside.
 pub fn bind_digest_region<Scalar, CS>(
   mut cs: CS,
   bits: &[Boolean],
@@ -351,7 +366,7 @@ where
   // A real MSO puts `valueDigests` after docType, version and
   // validityInfo, all of which are short and bounded; a generous window
   // still costs far less than the hash it sits beside.
-  let start_candidates: Vec<usize> = (0..native.len().saturating_sub(open_len)).collect();
+  let start_candidates = window_offsets(native.len(), open_len);
   let open_window = select_window::<Scalar, _>(
     cs.namespace(|| "valueDigests anchor"),
     bits,
@@ -366,7 +381,7 @@ where
   let region_start = open_window.offset.clone() + (Scalar::from(open_len as u64), CS::one());
 
   // ---- End anchor: `6D "deviceKeyInfo"` ----------------------------
-  let end_candidates: Vec<usize> = (0..native.len().saturating_sub(DEVICE_KEY_INFO.len())).collect();
+  let end_candidates = window_offsets(native.len(), DEVICE_KEY_INFO.len());
   let end_window = select_window::<Scalar, _>(
     cs.namespace(|| "deviceKeyInfo anchor"),
     bits,
@@ -392,7 +407,7 @@ where
 
   // ---- docType, read out for the verifier --------------------------
   let doc_type_window_len = DOC_TYPE_KEY.len() + 1 + doc_type_len;
-  let doc_candidates: Vec<usize> = (0..native.len().saturating_sub(doc_type_window_len)).collect();
+  let doc_candidates = window_offsets(native.len(), doc_type_window_len);
   let doc_window = select_window::<Scalar, _>(
     cs.namespace(|| "docType"),
     bits,

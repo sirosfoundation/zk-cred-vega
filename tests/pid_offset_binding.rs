@@ -17,10 +17,15 @@ use zk_cred_vega::Engine_;
 use bellpepper_core::test_cs::TestConstraintSystem;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
+use ff::PrimeField;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
-/// Today minus eighteen years, as a verifier would compute it.
+/// A fixed threshold date, deliberately not derived from the clock: it is
+/// eighteen years before the fixtures' issuance date, so these tests
+/// assert the same thing whenever they run. A real verifier computes this
+/// from today's date; a test that did the same would change behaviour as
+/// the fixtures aged and start passing or failing for the wrong reason.
 const CUTOFF: &[u8; 10] = b"2008-09-04";
 
 struct Loaded {
@@ -198,4 +203,66 @@ fn a_proof_is_bound_to_the_entry_count() {
   let mut cs = TestConstraintSystem::<Scalar>::new();
   let _ = synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF).expect("synthesis");
   assert!(cs.which_is_unsatisfied().is_some(), "a mismatched entry count must not be satisfiable");
+}
+
+/// The cutoff must be a circuit *variable*, not a constant folded into
+/// the constraint system.
+///
+/// This is the regression test for a bug that no functional test would
+/// have caught: an earlier revision took the cutoff as bytes and emitted
+/// its bits as `Boolean::constant`, which made the emitted constraints
+/// depend on the threshold's bit pattern. Every proof still verified — but
+/// each distinct cutoff was a *different R1CS*, so a fixed-setup folding
+/// system would have needed its own setup and its own published artifact
+/// per threshold date. Per day, in practice.
+///
+/// Two thresholds with different bit patterns and different answers must
+/// produce byte-identical circuit shapes.
+#[test]
+fn the_circuit_shape_does_not_depend_on_the_cutoff() {
+  let l = load("pid_arf18_random");
+
+  let mut shapes = Vec::new();
+  for (cutoff, expected) in [(b"2008-09-04", true), (b"1990-01-01", false)] {
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff).expect("synthesis");
+    assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+    assert_eq!(out.old_enough.get_value().unwrap(), expected, "cutoff {:?}", std::str::from_utf8(cutoff));
+    shapes.push((cs.num_constraints(), cs.num_inputs()));
+  }
+  assert_eq!(
+    shapes[0], shapes[1],
+    "the two cutoffs produced different circuit shapes ({:?} vs {:?}) -- each would need its own setup",
+    shapes[0], shapes[1]
+  );
+}
+
+/// The issuer key has to reach the caller, or the statement is empty.
+///
+/// `synthesize` verifies the signature against `qx`/`qy` allocated as
+/// private witnesses. If those never become public inputs, the proof says
+/// only "signed by some key whose private half I hold" — which any prover
+/// satisfies with a key they generated a moment ago. Exposing them in
+/// `PidAgeOutputs` is what lets a `VegaCircuit` pin them, so this checks
+/// the plumbing actually carries the issuer's real key.
+#[test]
+fn the_issuer_key_reaches_the_caller_so_it_can_be_made_public() {
+    let l = load("pid_arf18_random");
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF).expect("synthesis");
+    assert!(cs.is_satisfied());
+
+    assert_eq!(out.issuer_qx.get_value().unwrap(), l.ecdsa.qx, "issuer qx must be the key the signature verified against");
+    assert_eq!(out.issuer_qy.get_value().unwrap(), l.ecdsa.qy, "issuer qy must be the key the signature verified against");
+
+    // And the cutoff, so a verifier can see which threshold was compared.
+    let recovered: Vec<u8> = out
+        .cutoff
+        .iter()
+        .map(|c| {
+            let repr = c.get_value().unwrap().to_repr();
+            repr.as_ref()[0]
+        })
+        .collect();
+    assert_eq!(&recovered[..], CUTOFF.as_slice(), "the cutoff must be recoverable from the outputs");
 }

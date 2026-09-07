@@ -93,11 +93,31 @@ pub struct PidAgeWitness {
   pub digest_offset: usize,
 }
 
-/// What the circuit establishes, for a caller to `inputize` as it sees
-/// fit.
+/// What the circuit establishes.
+///
+/// **Every field here must be `inputize`d by the caller.** They are
+/// returned rather than made public inside [`synthesize`] so that a
+/// `VegaCircuit` implementation can control the public-input *order*,
+/// which the folding layer requires to be stable — but a caller that
+/// forgets one silently weakens the statement:
+///
+/// * without `issuer_qx`/`issuer_qy` the proof says "signed by *some*
+///   key whose private half I know", which any prover can satisfy with a
+///   key they generated themselves;
+/// * without `cutoff` the verifier cannot tell which threshold was
+///   actually compared against;
+/// * without `doc_type` it cannot tell an mDL from a PID;
+/// * without `old_enough` it learns nothing at all.
 pub struct PidAgeOutputs<Scalar: ff::PrimeField> {
   /// The credential's `docType` key and value, packed 16 bytes at a time.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
+  /// The issuer public key the signature was verified against. A
+  /// verifier must check this is an issuer it actually trusts.
+  pub issuer_qx: AllocatedNum<Scalar>,
+  /// The issuer public key the signature was verified against.
+  pub issuer_qy: AllocatedNum<Scalar>,
+  /// The ten ASCII bytes of the threshold date the comparison used.
+  pub cutoff: Vec<AllocatedNum<Scalar>>,
   /// True iff the holder's birthdate is at or before `cutoff`.
   pub old_enough: Boolean,
 }
@@ -185,7 +205,21 @@ where
 
 /// `date <= cutoff`, bytewise over ten ASCII characters, MSB-first with a
 /// running "all earlier bytes equal" flag.
-fn date_not_after<Scalar, CS>(mut cs: CS, date: &[AllocatedNum<Scalar>], cutoff: &[u8; 10]) -> Result<Boolean, SynthesisError>
+///
+/// **Both operands are circuit variables.** An earlier revision took the
+/// cutoff as `&[u8; 10]` and folded its bits in as `Boolean::constant`,
+/// which was wrong in a way that would not have shown up in any test:
+/// the constant bits changed *which constraints were emitted at all*, so
+/// every threshold date produced a different R1CS. Under a
+/// fixed-setup folding system that means a separate setup and a separate
+/// published artifact per cutoff — i.e. per day. Allocating the cutoff
+/// makes the shape identical for every date, at the cost of the few
+/// constraints the constant-folding used to save.
+fn date_not_after<Scalar, CS>(
+  mut cs: CS,
+  date: &[AllocatedNum<Scalar>],
+  cutoff: &[AllocatedNum<Scalar>],
+) -> Result<Boolean, SynthesisError>
 where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
@@ -194,17 +228,18 @@ where
   let mut is_before = Boolean::constant(false);
   for i in 0..10 {
     let d_bits = date[i].to_bits_le(cs.namespace(|| format!("date bits {i}")))?;
+    let c_bits = cutoff[i].to_bits_le(cs.namespace(|| format!("cutoff bits {i}")))?;
     let mut lt = Boolean::constant(false);
     let mut eq_so_far = Boolean::constant(true);
     for b in (0..8).rev() {
-      let cbit = (cutoff[i] >> b) & 1 == 1;
       let dbit = &d_bits[b];
-      if cbit {
-        let nd = dbit.not();
-        let t = Boolean::and(cs.namespace(|| format!("lt {i} {b}")), &eq_so_far, &nd)?;
-        lt = Boolean::or(cs.namespace(|| format!("lt or {i} {b}")), &lt, &t)?;
-      }
-      let same = Boolean::xor(cs.namespace(|| format!("x {i} {b}")), dbit, &Boolean::constant(cbit))?.not();
+      let cbit = &c_bits[b];
+      // lt |= eq_so_far & !dbit & cbit
+      let nd = dbit.not();
+      let t = Boolean::and(cs.namespace(|| format!("lt {i} {b} a")), &eq_so_far, &nd)?;
+      let t = Boolean::and(cs.namespace(|| format!("lt {i} {b} b")), &t, cbit)?;
+      lt = Boolean::or(cs.namespace(|| format!("lt or {i} {b}")), &lt, &t)?;
+      let same = Boolean::xor(cs.namespace(|| format!("x {i} {b}")), dbit, cbit)?.not();
       eq_so_far = Boolean::and(cs.namespace(|| format!("eq {i} {b}")), &eq_so_far, &same)?;
     }
     let contributes = Boolean::and(cs.namespace(|| format!("c {i}")), &still_equal, &lt)?;
@@ -216,8 +251,10 @@ where
 
 /// Synthesises the whole statement.
 ///
-/// `cutoff` is the verifier's date, not the prover's, and belongs in the
-/// public input.
+/// `cutoff` is the verifier's date, not the prover's. It is allocated as
+/// a circuit variable and returned in [`PidAgeOutputs`] for the caller to
+/// `inputize`; see that type's docs for why every returned field has to
+/// be made public.
 pub fn synthesize<Scalar, CS>(
   cs: &mut CS,
   witness: &PidAgeWitness,
@@ -249,10 +286,18 @@ where
 
   // 2. The issuer's signature over *that* hash — derived in-circuit, so
   //    the signature and the bytes every later step reads cannot diverge.
-  let qx = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(ecdsa.qx))?;
-  let qy = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(ecdsa.qy))?;
+  let issuer_qx = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(ecdsa.qx))?;
+  let issuer_qy = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(ecdsa.qy))?;
   let z_bn = crate::mdoc_core::bits_be_to_bignat::<Scalar, CS>(&z_bits)?;
-  crate::ecdsa::verify_ecdsa_p256_with_digest(cs.namespace(|| "ecdsa"), &qx, &qy, &ecdsa.r, &ecdsa.s, &ecdsa.s_inv, &z_bn)?;
+  crate::ecdsa::verify_ecdsa_p256_with_digest(
+    cs.namespace(|| "ecdsa"),
+    &issuer_qx,
+    &issuer_qy,
+    &ecdsa.r,
+    &ecdsa.s,
+    &ecdsa.s_inv,
+    &z_bn,
+  )?;
 
   // 3. Where this credential's digests actually live.
   let binding = offset_bind::bind_digest_region::<Scalar, _>(
@@ -268,7 +313,7 @@ where
   // 4. The claimed digest, pinned inside that region. Without both range
   //    checks this whole proof would accept a digest planted anywhere in
   //    the signed bytes — see `offset_bind`'s module docs.
-  let candidates: Vec<usize> = (0..MAX_SIG_STRUCTURE_BYTES - 32).collect();
+  let candidates = offset_bind::window_offsets(MAX_SIG_STRUCTURE_BYTES, 32);
   let located = offset_bind::select_window::<Scalar, _>(
     cs.namespace(|| "locate digest"),
     &sig_bits,
@@ -318,10 +363,21 @@ where
   ));
   let date = extract_birth_date(cs.namespace(|| "extract"), &item_bits, &item_padded, width)?;
 
-  // 7. The predicate.
-  let old_enough = date_not_after(cs.namespace(|| "age"), &date, cutoff)?;
+  // 7. The predicate, against a cutoff the verifier chose.
+  let cutoff_vars = cutoff
+    .iter()
+    .enumerate()
+    .map(|(i, &b)| AllocatedNum::alloc(cs.namespace(|| format!("cutoff byte {i}")), || Ok(Scalar::from(b as u64))))
+    .collect::<Result<Vec<_>, _>>()?;
+  let old_enough = date_not_after(cs.namespace(|| "age"), &date, &cutoff_vars)?;
 
-  Ok(PidAgeOutputs { doc_type: binding.doc_type, old_enough })
+  Ok(PidAgeOutputs {
+    doc_type: binding.doc_type,
+    issuer_qx,
+    issuer_qy,
+    cutoff: cutoff_vars,
+    old_enough,
+  })
 }
 
 /// The `digestID` embedded in an `IssuerSignedItem`, read natively. It
