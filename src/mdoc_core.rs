@@ -180,7 +180,11 @@ pub(crate) fn native_u32_to_bits<S: ff::PrimeField>(value: u32) -> Vec<S> {
 /// convention ([`LIMB_WIDTH`]/[`N_LIMBS`]). `limb[k]`'s bit `j` (LSB-first
 /// within the limb) is the overall value's bit `64*k + j` (from the LSB),
 /// which is `bits[255 - 64*k - j]` in the big-endian input.
-fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(
+/// Public because [`crate::pid_age`] needs the same conversion: an
+/// offset-based circuit derives its ECDSA message digest from an
+/// in-circuit SHA-256 exactly as this module does, and re-deriving it a
+/// second, independent way is how the two drift apart.
+pub fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(
   bits: &[Boolean],
 ) -> Result<BigNat<Scalar>, SynthesisError> {
   assert_eq!(bits.len(), N_LIMBS * LIMB_WIDTH);
