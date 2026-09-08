@@ -272,11 +272,26 @@ where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
 {
-  assert!(
-    witness.sig_structure.len() <= MAX_SIG_STRUCTURE_BYTES,
-    "Sig_structure is {} bytes, over the {MAX_SIG_STRUCTURE_BYTES}-byte budget",
-    witness.sig_structure.len()
-  );
+  if witness.sig_structure.len() > MAX_SIG_STRUCTURE_BYTES {
+    return Err(offset_bind::reject(format!(
+      "Sig_structure is {} bytes, over the {MAX_SIG_STRUCTURE_BYTES}-byte budget this circuit was set up for",
+      witness.sig_structure.len()
+    )));
+  }
+  if witness.item_bytes.len() > crate::MAX_CLAIM_BYTES_V1 {
+    return Err(offset_bind::reject(format!(
+      "the birth_date item is {} bytes, over the {}-byte claim budget",
+      witness.item_bytes.len(),
+      crate::MAX_CLAIM_BYTES_V1
+    )));
+  }
+  // No *lower* bound is checked, deliberately. The item is padded to
+  // `MAX_CLAIM_BYTES_V1` before anything reads it and the extraction
+  // touches at most index 115, so a short item cannot index out of
+  // range — it simply hashes to something other than the located digest
+  // and leaves the circuit unsatisfied, which is the right answer. An
+  // earlier revision did add a lower bound, computed by eye rather than
+  // from the offsets, and it rejected a legitimate 112-byte item.
   let one = CS::one();
 
   // 1. The signed bytes, witnessed opaquely and hashed once.
@@ -363,11 +378,9 @@ where
   }
 
   // 6. That item is a `birth_date` carrying a `full-date`.
-  let width = crate::cbor_uint::class_byte_width(crate::cbor_uint::length_class(
-    // The item's own digestID, read natively only to pick which of the
-    // four width cases is the live one; the circuit constrains all four.
-    read_item_digest_id(&item_padded),
-  ));
+  // The item's own digestID, read natively only to pick which of the
+  // four width cases is the live one; the circuit constrains all four.
+  let width = crate::cbor_uint::class_byte_width(crate::cbor_uint::length_class(read_item_digest_id(&item_padded)?));
   let date = extract_birth_date(cs.namespace(|| "extract"), &item_bits, &item_padded, width)?;
 
   // 7. The predicate, against a cutoff the verifier chose.
@@ -390,13 +403,20 @@ where
 /// The `digestID` embedded in an `IssuerSignedItem`, read natively. It
 /// begins at [`ITEM_VALUE_KEY_OFFSET`]; the `elementValue` key follows it
 /// once its own width is known.
-fn read_item_digest_id(item: &[u8]) -> u32 {
+fn read_item_digest_id(item: &[u8]) -> Result<u32, SynthesisError> {
   let at = ITEM_VALUE_KEY_OFFSET;
-  match item[at] {
+  if at + crate::cbor_uint::MAX_CBOR_UINT_BYTES > item.len() {
+    return Err(offset_bind::reject("item is too short to hold a digestID at the canonical offset"));
+  }
+  Ok(match item[at] {
     b if b < 24 => b as u32,
     0x18 => item[at + 1] as u32,
     0x19 => u16::from_be_bytes([item[at + 1], item[at + 2]]) as u32,
     0x1a => u32::from_be_bytes([item[at + 1], item[at + 2], item[at + 3], item[at + 4]]),
-    head => panic!("digestID head {head:#04x} is not a canonical CBOR uint — the item is not canonically encoded"),
-  }
+    head => {
+      return Err(offset_bind::reject(format!(
+        "digestID head {head:#04x} is not a canonical CBOR uint -- the item is not canonically encoded"
+      )))
+    }
+  })
 }

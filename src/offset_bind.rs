@@ -89,6 +89,28 @@ use bellpepper_core::{
 };
 use ff::PrimeField;
 
+/// Rejects a malformed witness instead of aborting.
+///
+/// Every check in this module that used to be an `assert!` funnels
+/// through here. That matters more for this crate than for a pure-Rust
+/// library: it is built as `cdylib`/`staticlib` and linked into an
+/// Android AAR and a Go cgo binary, so a panic does not unwind into a
+/// caller that can handle it — it takes the host process down. A wallet
+/// should reject a malformed credential, not crash.
+///
+/// `SynthesisError` has no variant carrying a message, and these are
+/// exactly the checks that catch an integration wiring its landmarks up
+/// wrongly — which is how two bugs in this module's own development were
+/// found. So the reason goes to stderr under `debug_assertions` and the
+/// caller gets `Unsatisfiable`; a release build prints nothing.
+pub(crate) fn reject(reason: impl core::fmt::Display) -> SynthesisError {
+  #[cfg(debug_assertions)]
+  eprintln!("zk-cred-vega: rejecting malformed witness: {reason}");
+  #[cfg(not(debug_assertions))]
+  let _ = reason;
+  SynthesisError::Unsatisfiable
+}
+
 /// Bytes packed per field element. 16 bytes is 128 bits, comfortably
 /// inside every scalar field this crate targets, and lets a 32-byte
 /// digest be compared in two multiplications instead of thirty-two.
@@ -113,13 +135,15 @@ const DOC_TYPE_KEY: &[u8] = b"\x67docType";
 /// `.msisdn.1` at 26 — are already over it. An earlier revision assumed
 /// the one-byte form throughout, which happened to be right for the one
 /// document type it was tested against and wrong for the next one.
-fn tstr_header(len: usize) -> Vec<u8> {
-  assert!(len < 256, "this binding encodes text-string headers as one or two bytes");
-  if len < 24 {
+fn tstr_header(len: usize) -> Result<Vec<u8>, SynthesisError> {
+  if len >= 256 {
+    return Err(reject(format!("text-string header for {len} bytes needs more than two bytes")));
+  }
+  Ok(if len < 24 {
     vec![0x60 | len as u8]
   } else {
     vec![0x78, len as u8]
-  }
+  })
 }
 
 /// A byte's value as a linear combination of its eight big-endian bits,
@@ -218,7 +242,9 @@ where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  assert!(candidates.contains(&real_offset), "real offset {real_offset} is not among the candidates");
+  if !candidates.contains(&real_offset) {
+    return Err(reject(format!("offset {real_offset} is not among the {} candidate offsets", candidates.len())));
+  }
   let one_hot = crate::onehot_cursor::alloc_one_hot::<Scalar, _>(cs.namespace(|| "offset"), candidates, real_offset)?;
   let n_packs = window_len.div_ceil(BYTES_PER_PACK);
 
@@ -270,7 +296,18 @@ where
   CS: ConstraintSystem<Scalar>,
 {
   let packed = pack_constant::<Scalar>(expected);
-  assert_eq!(packed.len(), window.packs.len(), "window length disagrees with the expected literal");
+  if packed.len() != window.packs.len() {
+    // Unlike the other checks here this one signals a caller bug rather
+    // than a bad credential — the literal's length has to match the
+    // window the caller already selected. It still returns instead of
+    // panicking, because across the FFI boundary a panic is a host
+    // process abort either way.
+    return Err(reject(format!(
+      "expected literal packs into {} field elements but the window has {}",
+      packed.len(),
+      window.packs.len()
+    )));
+  }
   for (p, (var, expect)) in window.packs.iter().zip(packed).enumerate() {
     cs.enforce(
       || format!("window pack {p} matches literal"),
@@ -366,11 +403,13 @@ where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  assert!(num_entries < 256, "this binding encodes the namespace map header as 1 or 2 bytes");
+  if num_entries >= 256 {
+    return Err(reject(format!("{num_entries} valueDigests entries needs a wider map header than this binding encodes")));
+  }
 
   // ---- Start anchor: `6C "valueDigests" A1 <tstr ns> <map hdr>` ----
   let mut open = VALUE_DIGESTS_OPEN.to_vec();
-  open.extend_from_slice(&tstr_header(namespace.len()));
+  open.extend_from_slice(&tstr_header(namespace.len())?);
   open.extend_from_slice(namespace.as_bytes());
   if num_entries < 24 {
     open.push(0xa0 | num_entries as u8);
@@ -413,7 +452,12 @@ where
   // The region must be non-empty and must not run backwards. Without
   // this a prover could claim an end anchor that precedes the start and
   // then satisfy the digest range check vacuously.
-  assert!(landmarks.device_key_info > landmarks.region_start, "landmarks describe an empty or inverted region");
+  if landmarks.device_key_info <= landmarks.region_start {
+    return Err(reject(format!(
+      "landmarks describe an empty or inverted digest region: starts at {}, ends at {}",
+      landmarks.region_start, landmarks.device_key_info
+    )));
+  }
   enforce_ge(
     cs.namespace(|| "region end follows region start"),
     &region_end,
@@ -423,7 +467,7 @@ where
   )?;
 
   // ---- docType, read out for the verifier --------------------------
-  let doc_type_header = tstr_header(doc_type.len());
+  let doc_type_header = tstr_header(doc_type.len())?;
   let doc_type_window_len = DOC_TYPE_KEY.len() + doc_type_header.len() + doc_type.len();
   let doc_candidates = window_offsets(native.len(), doc_type_window_len);
   let doc_window = select_window::<Scalar, _>(
@@ -442,11 +486,21 @@ where
   let mut expected = DOC_TYPE_KEY.to_vec();
   expected.extend_from_slice(&doc_type_header);
   expected.extend_from_slice(doc_type.as_bytes());
-  let doc_type_bytes = &native[landmarks.doc_type_key..landmarks.doc_type_key + doc_type_window_len];
-  assert_eq!(
-    doc_type_bytes, expected,
-    "the docType landmark does not point at `{doc_type}` in the signed bytes"
-  );
+  let doc_type_end = landmarks.doc_type_key + doc_type_window_len;
+  if doc_type_end > native.len() {
+    return Err(reject(format!(
+      "docType landmark at {} plus a {doc_type_window_len}-byte window runs past the {}-byte buffer",
+      landmarks.doc_type_key,
+      native.len()
+    )));
+  }
+  let doc_type_bytes = &native[landmarks.doc_type_key..doc_type_end];
+  if doc_type_bytes != expected.as_slice() {
+    return Err(reject(format!(
+      "the docType landmark at {} does not point at `{doc_type}` in the signed bytes",
+      landmarks.doc_type_key
+    )));
+  }
   enforce_window_equals(cs.namespace(|| "docType literal"), &doc_window, &expected)?;
 
   Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs })

@@ -300,14 +300,83 @@ fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
   wrong.doc_type = "org.iso.18013.5.1.mDL".to_string();
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    let _ = synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF);
-    cs.which_is_unsatisfied().is_some()
-  }));
-  match result {
-    // The native landmark check fires first for an honest prover's own
-    // benefit; a prover who removes it still hits the circuit constraint.
-    Err(_) => {}
-    Ok(unsatisfied) => assert!(unsatisfied, "a docType the issuer did not sign must not be provable"),
+  match synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF) {
+    Ok(_) => panic!("a docType the issuer did not sign must be rejected"),
+    Err(e) => assert!(matches!(e, bellpepper_core::SynthesisError::Unsatisfiable), "got {e:?}"),
+  }
+}
+
+/// A truncated item is an unsatisfied circuit, not an error.
+///
+/// It is padded to `MAX_CLAIM_BYTES_V1` before anything reads it, so it
+/// cannot index out of range; it just hashes to something other than the
+/// digest the offset points at. Worth pinning, because an earlier
+/// revision rejected it up front with a length bound computed by eye,
+/// and that bound also rejected a legitimate 112-byte item.
+#[test]
+fn a_truncated_item_leaves_the_circuit_unsatisfied() {
+  let l = load("pid_arf18_random");
+  let mut w = l.witness.clone();
+  w.item_bytes.truncate(64);
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &w, &l.ecdsa, CUTOFF).expect("short item is synthesised, not rejected");
+  assert!(cs.which_is_unsatisfied().is_some(), "a truncated item must not satisfy the circuit");
+}
+
+/// Malformed witnesses come back as errors, never as panics.
+///
+/// This crate is built as `cdylib`/`staticlib` and linked into an Android
+/// AAR and a Go cgo binary. A panic there does not unwind into a caller
+/// that can catch it — it aborts the host process, so a wallet handed a
+/// corrupt credential would crash rather than decline it. Every
+/// precondition in `offset_bind` and `pid_age` therefore has to return
+/// `Err`, and this test walks the ones reachable from witness data.
+#[test]
+fn every_malformed_witness_returns_an_error_rather_than_panicking() {
+  let l = load("pid_arf18_random");
+
+  /// A named way of corrupting an otherwise-good witness.
+  type Corruption = (&'static str, Box<dyn Fn(&mut PidAgeWitness)>);
+
+  let cases: Vec<Corruption> = vec![
+    ("Sig_structure over the byte budget", Box::new(|w: &mut PidAgeWitness| {
+      w.sig_structure = vec![0u8; 4096];
+    })),
+    ("item over the claim budget", Box::new(|w: &mut PidAgeWitness| {
+      w.item_bytes = vec![0u8; 4096];
+    })),
+    ("item with a non-canonical digestID head", Box::new(|w: &mut PidAgeWitness| {
+      w.item_bytes[55] = 0x1f; // reserved additional-information value
+    })),
+    ("inverted digest region", Box::new(|w: &mut PidAgeWitness| {
+      w.landmarks.device_key_info = w.landmarks.region_start - 1;
+    })),
+    ("docType landmark past the end of the buffer", Box::new(|w: &mut PidAgeWitness| {
+      w.landmarks.doc_type_key = usize::MAX - 64;
+    })),
+    ("more valueDigests entries than the map header encodes", Box::new(|w: &mut PidAgeWitness| {
+      w.num_entries = 300;
+    })),
+    ("a namespace too long for a two-byte header", Box::new(|w: &mut PidAgeWitness| {
+      w.namespace = "n".repeat(300);
+    })),
+  ];
+
+  for (name, mutate) in cases {
+    let mut w = l.witness.clone();
+    mutate(&mut w);
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      synthesize(&mut cs, &w, &l.ecdsa, CUTOFF).map(|_| ())
+    }));
+    match result {
+      Err(_) => panic!("{name}: panicked instead of returning an error"),
+      Ok(Ok(())) => panic!("{name}: was accepted, but the witness is malformed"),
+      Ok(Err(e)) => assert!(
+        matches!(e, bellpepper_core::SynthesisError::Unsatisfiable),
+        "{name}: expected Unsatisfiable, got {e:?}"
+      ),
+    }
   }
 }
