@@ -37,7 +37,20 @@ GO_CABI_DIR  := $(BUILD_DIR)/go-cabi
 
 # iOS targets
 IOS_TARGETS      := aarch64-apple-ios
-IOS_SIM_TARGETS  := aarch64-apple-ios-sim x86_64-apple-ios
+# x86_64-apple-ios (legacy Intel simulator) deliberately excluded, unlike
+# zk-cred-longfellow: vega-prover's halo2curves dependency gates its `asm`
+# feature on `cfg!(target_arch = "x86_64")` evaluated INSIDE its own build
+# script, which always reflects the HOST architecture (build scripts always
+# run on the host, never cross-compiled) - not the actual compile target.
+# Cross-compiling from an Apple Silicon host (aarch64) for x86_64-apple-ios
+# therefore fails with "feature asm can only be enabled on x86_64 arch",
+# even though the real target triple is x86_64. Confirmed: aarch64-apple-ios
+# and aarch64-apple-ios-sim both build cleanly (host and target arch agree,
+# so the same host/target-arch mix-up resolves correctly by coincidence).
+# Modern Xcode (15+) defaults to Apple Silicon simulators, so this isn't a
+# real coverage gap in practice; revisit if halo2curves/vega-prover ever
+# fixes the underlying TARGET-vs-host detection in its build script.
+IOS_SIM_TARGETS  := aarch64-apple-ios-sim
 
 # Minimum iOS deployment target - matches zk-cred-longfellow's/
 # siros-wscd-manager's own pin.
