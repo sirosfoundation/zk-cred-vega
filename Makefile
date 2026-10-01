@@ -1,21 +1,21 @@
-# zk-cred-vega Makefile — UniFFI binding generation & Android cross-compilation
+# zk-cred-vega Makefile — UniFFI binding generation & cross-compilation
 #
 # Mirrors zk-cred-longfellow's own Makefile (same org, same UniFFI/cross-
-# compile shape, itself adapted from siros-wscd-manager's). Kotlin/Android
-# only for this pass, per the tracked plan ("Kotlin first") — no iOS/
-# XCFramework targets here yet.
+# compile shape, itself adapted from siros-wscd-manager's).
 #
 # Targets:
-#   make bindings-kotlin — generate Kotlin bindings from the host library
-#   make android          — cross-compile for Android (arm64, armv7, x86_64)
-#   make aar               — package Android AAR
-#   make publish-local     — build AAR + POM and install to ~/.m2 (mavenLocal)
-#   make go-cabi            — build the plain C-ABI cdylib/staticlib for Go's
-#                             cgo verifier (default features, NOT
-#                             --features uniffi), staged alongside the
-#                             hand-written C header
-#   make check-bindings    — CI helper: fail if generated bindings are stale
-#   make clean              — remove build artifacts
+#   make bindings       — generate Swift + Kotlin bindings from the host library
+#   make ios            — cross-compile for iOS (aarch64-apple-ios + simulator)
+#   make xcframework    — build XCFramework from iOS static libraries
+#   make android        — cross-compile for Android (arm64, armv7, x86_64)
+#   make aar            — package Android AAR
+#   make publish-local  — build AAR + POM and install to ~/.m2 (mavenLocal)
+#   make go-cabi        — build the plain C-ABI cdylib/staticlib for Go's
+#                          cgo verifier (default features, NOT
+#                          --features uniffi), staged alongside the
+#                          hand-written C header
+#   make check-bindings — CI helper: fail if generated bindings are stale
+#   make clean          — remove build artifacts
 
 CRATE_NAME := zk_cred_vega
 LIB_NAME   := lib$(CRATE_NAME)
@@ -30,15 +30,38 @@ VERSION    := $(shell cargo metadata --no-deps --format-version 1 | python3 -c "
 # Directories
 BUILD_DIR    := target
 BINDINGS_DIR := bindings
+SWIFT_DIR    := $(BINDINGS_DIR)/swift
 KOTLIN_DIR   := $(BINDINGS_DIR)/kotlin
+XCFRAMEWORK  := $(BUILD_DIR)/$(CRATE_NAME).xcframework
 GO_CABI_DIR  := $(BUILD_DIR)/go-cabi
+
+# iOS targets
+IOS_TARGETS      := aarch64-apple-ios
+# x86_64-apple-ios (legacy Intel simulator) deliberately excluded, unlike
+# zk-cred-longfellow: vega-prover's halo2curves dependency gates its `asm`
+# feature on `cfg!(target_arch = "x86_64")` evaluated INSIDE its own build
+# script, which always reflects the HOST architecture (build scripts always
+# run on the host, never cross-compiled) - not the actual compile target.
+# Cross-compiling from an Apple Silicon host (aarch64) for x86_64-apple-ios
+# therefore fails with "feature asm can only be enabled on x86_64 arch",
+# even though the real target triple is x86_64. Confirmed: aarch64-apple-ios
+# and aarch64-apple-ios-sim both build cleanly (host and target arch agree,
+# so the same host/target-arch mix-up resolves correctly by coincidence).
+# Modern Xcode (15+) defaults to Apple Silicon simulators, so this isn't a
+# real coverage gap in practice; revisit if halo2curves/vega-prover ever
+# fixes the underlying TARGET-vs-host detection in its build script.
+IOS_SIM_TARGETS  := aarch64-apple-ios-sim
+
+# Minimum iOS deployment target - matches zk-cred-longfellow's/
+# siros-wscd-manager's own pin.
+export IPHONEOS_DEPLOYMENT_TARGET ?= 16.0
 
 # Android targets (via cargo-ndk)
 ANDROID_TARGETS := aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-.PHONY: all bindings-kotlin android aar pom publish-local clean check-bindings dump-setup go-cabi
+.PHONY: all bindings bindings-swift bindings-kotlin ios android xcframework aar pom publish-local clean check-bindings dump-setup go-cabi
 
-all: bindings-kotlin
+all: bindings
 
 # ── Setup-artifact generation (for go-zk-circuits publication) ───────
 
@@ -46,6 +69,16 @@ dump-setup:
 	cargo run --release --bin dump_setup
 
 # ── Binding generation ───────────────────────────────────────────────
+
+bindings: bindings-swift bindings-kotlin
+
+bindings-swift: $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT)
+	@mkdir -p $(SWIFT_DIR)
+	cargo run --release --features uniffi --bin uniffi-bindgen -- generate \
+		--library $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT) \
+		--language swift \
+		--out-dir $(SWIFT_DIR)
+	@echo "Swift bindings generated in $(SWIFT_DIR)"
 
 bindings-kotlin: $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT)
 	@mkdir -p $(KOTLIN_DIR)
@@ -83,6 +116,53 @@ $(GO_CABI_DIR)/$(LIB_NAME).a: $(GO_CABI_DIR)/zk_cred_vega_go.h
 $(GO_CABI_DIR)/zk_cred_vega_go.h: include/zk_cred_vega_go.h
 	@mkdir -p $(GO_CABI_DIR)
 	cp include/zk_cred_vega_go.h $(GO_CABI_DIR)/
+
+# ── iOS cross-compilation (must run on macOS with Xcode toolchains) ─
+
+ios: $(foreach t,$(IOS_TARGETS) $(IOS_SIM_TARGETS),ios-$(t))
+
+ios-%:
+	cargo build --release --target $* --features uniffi
+
+# ── XCFramework ─────────────────────────────────────────────────────
+
+xcframework: ios bindings-swift
+	@rm -rf $(XCFRAMEWORK)
+	# Create fat simulator library
+	@mkdir -p $(BUILD_DIR)/ios-sim-universal
+	lipo -create \
+		$(foreach t,$(IOS_SIM_TARGETS),$(BUILD_DIR)/$(t)/release/$(LIB_NAME).a) \
+		-output $(BUILD_DIR)/ios-sim-universal/$(LIB_NAME).a
+	# Plain "module", not "framework module": this XCFramework is built
+	# from static libraries (-library/-headers), not real .framework
+	# bundles - "framework module" fails to resolve at import time.
+	#
+	# Headers are nested under $(CRATE_NAME)FFI/, not placed directly at
+	# Headers/ root: when an app links two or more static-archive
+	# XCFrameworks at once (e.g. this one alongside zk-cred-longfellow's or
+	# siros-wscd-manager's), Xcode's own ProcessXCFramework build step
+	# copies each one's Headers/ contents into the SAME shared per-product
+	# `include/` directory - a flat `Headers/module.modulemap` from each
+	# XCFramework collides at that fixed destination ("Multiple commands
+	# produce .../include/module.modulemap"), regardless of the module's
+	# own name inside the map. Nesting under a per-module subdirectory here
+	# preserves that subdirectory through the copy, so the destination
+	# becomes include/$(CRATE_NAME)FFI/module.modulemap - unique per
+	# framework. Mirrors zk-cred-longfellow's own xcframework target
+	# exactly (confirmed there via a real xcodebuild of an app product
+	# linking multiple such XCFrameworks together).
+	@rm -rf $(BUILD_DIR)/Headers
+	@mkdir -p $(BUILD_DIR)/Headers/$(CRATE_NAME)FFI
+	@cp $(SWIFT_DIR)/$(CRATE_NAME)FFI.h $(BUILD_DIR)/Headers/$(CRATE_NAME)FFI/
+	@echo "module $(CRATE_NAME)FFI { header \"$(CRATE_NAME)FFI.h\" export * }" \
+		> $(BUILD_DIR)/Headers/$(CRATE_NAME)FFI/module.modulemap
+	xcodebuild -create-xcframework \
+		-library $(BUILD_DIR)/aarch64-apple-ios/release/$(LIB_NAME).a \
+		-headers $(BUILD_DIR)/Headers \
+		-library $(BUILD_DIR)/ios-sim-universal/$(LIB_NAME).a \
+		-headers $(BUILD_DIR)/Headers \
+		-output $(XCFRAMEWORK)
+	@echo "XCFramework created at $(XCFRAMEWORK)"
 
 # ── Android cross-compilation (requires cargo-ndk + Android NDK) ────
 
@@ -154,12 +234,12 @@ publish-local: aar pom
 
 # ── CI helper: verify bindings are up-to-date ───────────────────────
 
-check-bindings: bindings-kotlin
+check-bindings: bindings
 	@git diff --exit-code $(BINDINGS_DIR) || \
-		(echo "ERROR: Generated bindings are out of date. Run 'make bindings-kotlin' and commit." && exit 1)
+		(echo "ERROR: Generated bindings are out of date. Run 'make bindings' and commit." && exit 1)
 
 # ── Clean ────────────────────────────────────────────────────────────
 
 clean:
 	cargo clean
-	rm -rf $(BINDINGS_DIR) $(BUILD_DIR)/aar $(BUILD_DIR)/aar-classes
+	rm -rf $(BINDINGS_DIR) $(BUILD_DIR)/aar $(BUILD_DIR)/aar-classes $(BUILD_DIR)/ios-sim-universal $(BUILD_DIR)/Headers

@@ -51,8 +51,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Proves the UniFFI surface still generates, which catches bad
-      # `#[uniffi::export]` annotations. Not a staleness check: the
-      # generated bindings are gitignored here (consuming SDK repos vendor
-      # their own copy), so there is nothing committed to diff against.
-      - run: make bindings-kotlin
+      # Proves the UniFFI surface still generates (both Swift and Kotlin),
+      # which catches bad `#[uniffi::export]` annotations. Not a staleness
+      # check: the generated bindings are gitignored here (consuming SDK
+      # repos vendor their own copy), so there is nothing committed to diff
+      # against.
+      - run: make bindings
