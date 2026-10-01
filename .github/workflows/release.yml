@@ -1,9 +1,8 @@
-# Release — AAR (Android only).
+# Release — XCFramework + AAR.
 #
-# Mirrors zk-cred-longfellow's release.yml, minus its XCFramework job:
-# this crate has no iOS target yet (no `make xcframework`), per the
-# "Kotlin first" scope. Add an `ios:` job here when that lands.
-name: Release — AAR
+# Mirrors zk-cred-longfellow's release.yml, plus this crate's own
+# version-check job and experimental-software release-note warning.
+name: Release — XCFramework + AAR
 
 on:
   push:
@@ -46,7 +45,7 @@ jobs:
             exit 1
           fi
 
-  # ── Generate Kotlin bindings on Linux (fast) ───────────────────────
+  # ── Generate bindings on Linux (fast) ──────────────────────────────
   bindings:
     name: Generate bindings
     runs-on: ubuntu-latest
@@ -54,11 +53,40 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: make bindings-kotlin
+      - run: make bindings
       - uses: actions/upload-artifact@v6
         with:
           name: bindings
           path: bindings/
+
+  # ── iOS / XCFramework (requires macOS) ─────────────────────────────
+  ios:
+    name: Build XCFramework
+    runs-on: macos-latest
+    needs: bindings
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    steps:
+      - uses: actions/checkout@v5
+      # This crate has no rust-toolchain.toml (unlike zk-cred-longfellow) -
+      # targets are declared explicitly here, same as the android job below.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: bindings
+          path: bindings/
+      - run: make xcframework
+      - name: Package XCFramework
+        run: |
+          cd target
+          zip -r zk_cred_vega.xcframework.zip zk_cred_vega.xcframework
+      - uses: actions/upload-artifact@v6
+        with:
+          name: xcframework
+          path: target/zk_cred_vega.xcframework.zip
 
   # ── Android / AAR (requires NDK) ──────────────────────────────────
   android:
@@ -147,11 +175,15 @@ jobs:
     name: Create Release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    needs: [version-check, android, bindings]
+    needs: [version-check, ios, android, bindings]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: xcframework
+          path: artifacts/
       - uses: actions/download-artifact@v8
         with:
           name: aar
@@ -177,6 +209,7 @@ jobs:
             > circuits. It has not had an independent security review. Do not
             > rely on it to protect real credentials or real users.
           files: |
+            artifacts/zk_cred_vega.xcframework.zip
             artifacts/zk_cred_vega-*.aar
             artifacts/zk-cred-vega-*.pom
             artifacts/bindings.zip
