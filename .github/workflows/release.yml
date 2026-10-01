@@ -67,10 +67,14 @@ jobs:
     env:
       IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     steps:
-      - uses: actions/checkout@v5
+      # SonarCloud's new-code gate flags unpinned (tag-only) third-party
+      # actions on new lines, unlike the rest of this file's pre-existing
+      # jobs (out of its "new code" window) - SHA-pinned here rather than
+      # matching the tag-only convention elsewhere in this file.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # This crate has no rust-toolchain.toml (unlike zk-cred-longfellow) -
       # targets are declared explicitly here, same as the android job below.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
