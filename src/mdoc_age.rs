@@ -1,4 +1,4 @@
-//! An offset-based age proof over a spec-conformant EUDI PID.
+//! An offset-based age proof over a real mdoc credential.
 //!
 //! # The statement
 //!
@@ -26,6 +26,41 @@
 //! from `birth_date` makes it correct for any threshold, on any date,
 //! from a credential issued at any time.
 //!
+//! # One circuit, three document types
+//!
+//! The statement is the same for every ISO 18013-5-shaped credential that
+//! carries a `birth_date`, so the document type is witness data rather
+//! than circuit structure:
+//!
+//! | credential | `docType` | `birth_date` namespace |
+//! |---|---|---|
+//! | mDL | `org.iso.18013.5.1.mDL` | `org.iso.18013.5.1` |
+//! | EU PID 1.8 | `eu.europa.ec.eudi.pid.1` | `eu.europa.ec.eudi.pid.1` |
+//! | Photo ID | `org.iso.23220.photoid.1` | `org.iso.23220.1` |
+//!
+//! Each of those rows breaks an assumption the single-document version
+//! made. The mDL's namespace is not its `docType` and is a different
+//! length. Photo ID carries three namespaces, and the one holding
+//! `birth_date` sorts *first*, so its entries are followed by another
+//! namespace rather than by `deviceKeyInfo` — see [`crate::offset_bind`].
+//!
+//! # Salt length is witnessed, not assumed
+//!
+//! An `IssuerSignedItem`'s `random` salt shifts every field after it.
+//! ISO 18013-5 requires at least 16 bytes and real issuers differ: 32 is
+//! common, and our own `MSOBuilder` emits 16 to stay inside Longfellow's
+//! smaller item ceiling. A fixed offset is therefore an interoperability
+//! bug, not a simplification — and it was a live one: a hardcoded
+//! 32-byte assumption made every claim of a real device presentation fail
+//! `InvalidSumcheckProof`, because the circuit was reading the issuer's
+//! bytes at the wrong place.
+//!
+//! The salt length is now part of the witness. Together with the
+//! `digestID`'s own CBOR width it determines where `elementValue` starts,
+//! so the two collapse into a single selector over the offsets they can
+//! jointly produce — 22 of them across salts of 16 to 32 bytes, rather
+//! than the 68 combinations taken separately.
+//!
 //! # Why this shape rather than [`crate::mso`]'s
 //!
 //! [`crate::mso`] reconstructs the issuer's `Sig_structure` byte-exactly,
@@ -52,31 +87,126 @@ use ff::PrimeFieldBits;
 
 use crate::offset_bind::{self, Landmarks};
 
-/// Byte budget for the signed `Sig_structure`. 28 SHA-256 blocks; a
-/// 34-attribute PID with full-width (5-byte) `digestID`s is 1668 bytes,
-/// so this leaves room for a handful more attributes without a new
-/// circuit and a new setup.
-pub const MAX_SIG_STRUCTURE_BYTES: usize = 28 * 64 - 9;
-/// SHA-256 blocks covering [`MAX_SIG_STRUCTURE_BYTES`].
-pub const SIG_STRUCTURE_BLOCKS: usize = 28;
-
-/// Offset of the `6c "elementValue"` key inside an `IssuerSignedItem`,
-/// before the `digestID`'s own width is added.
+/// Byte budget for the signed `Sig_structure`, in SHA-256 blocks.
 ///
-/// The canonical key order is `random`(6) < `digestID`(8) <
-/// `elementValue`(12) < `elementIdentifier`(17), so the layout is
-/// `d8 18 58 LL a4 66"random" 58 20 <32 salt> 68"digestID" <uint>` — 55
-/// bytes — and everything after it shifts by the `digestID`'s CBOR width.
-const ITEM_VALUE_KEY_OFFSET: usize = 55;
+/// Sized for the largest of the three document types rather than the
+/// most common one, because one circuit serving all three means one
+/// setup and one published artifact:
+///
+/// | credential | `Sig_structure` | blocks |
+/// |---|---|---|
+/// | EU PID 1.8, 34 entries | 1542 B | 25 |
+/// | mDL, 35 entries | 1570 B | 25 |
+/// | Photo ID, 56 entries over 3 namespaces | 2343 B | 37 |
+///
+/// Photo ID is the outlier: three namespaces and 56 digests, where the
+/// other two carry one namespace each. 40 blocks leaves headroom for a
+/// few more attributes without a new setup.
+///
+/// This is the one parameter that is baked into the setup artifact and
+/// cannot be changed without a new circuit revision, so it is sized
+/// deliberately rather than tightly. The cost is real and falls on every
+/// document type: the SHA-256 over the credential is ~80% of the circuit,
+/// and 40 blocks costs about 310k more constraints than 28 would. Issuing
+/// two size tiers would claw that back for mDL and PID at the price of a
+/// second setup and a second artifact to keep in the catalog.
+pub const SIG_STRUCTURE_BLOCKS: usize = 40;
+/// Largest `Sig_structure` that still fits [`SIG_STRUCTURE_BLOCKS`].
+pub const MAX_SIG_STRUCTURE_BYTES: usize = SIG_STRUCTURE_BLOCKS * 64 - 9;
+
+/// Smallest and largest `random` salt this circuit accepts. ISO 18013-5
+/// §9.1.2.5 requires at least 16 bytes; 32 is the largest any issuer we
+/// target emits, and is also the largest that keeps a `birth_date` item
+/// inside [`crate::MAX_CLAIM_BYTES_V1`].
+pub const MIN_SALT_BYTES: usize = 16;
+pub const MAX_SALT_BYTES: usize = 32;
 
 /// The four canonical CBOR major-type-0 widths a spec-conformant issuer
 /// may choose for a `digestID` (ISO 18013-5 §9.1.2.4 bounds it below
 /// 2^31, and directs issuers to spread values across that range).
 const DIGEST_ID_WIDTHS: [usize; 4] = [1, 2, 3, 5];
 
+/// Byte offset of the `6c "elementValue"` key inside a canonically
+/// encoded `IssuerSignedItem`, for a given salt length and `digestID`
+/// width.
+///
+/// The layout is `d8 18` (2) `58 LL` (2) `a4` (1) `66 "random"` (7)
+/// `<salt header><salt>` `68 "digestID"` (9) `<digestID>`, and the salt's
+/// own bstr header is one byte below 24 and two above — so a 16-byte salt
+/// puts `digestID` at 38 and a 32-byte salt puts it at 55.
+pub fn element_value_key_offset(salt_bytes: usize, digest_id_width: usize) -> usize {
+  let salt_header = if salt_bytes < 24 { 1 } else { 2 };
+  2 + 2 + 1 + 7 + salt_header + salt_bytes + 9 + digest_id_width
+}
+
+/// Every offset `element_value_key_offset` can produce, deduplicated.
+/// Different (salt, width) pairs collide — a 23-byte salt with a 3-byte
+/// `digestID` lands where a 24-byte salt with a 1-byte one does — so the
+/// selector is over 22 offsets rather than 17x4 combinations.
+pub fn candidate_value_key_offsets() -> Vec<usize> {
+  let mut v: Vec<usize> = (MIN_SALT_BYTES..=MAX_SALT_BYTES)
+    .flat_map(|s| DIGEST_ID_WIDTHS.iter().map(move |&w| element_value_key_offset(s, w)))
+    .collect();
+  v.sort_unstable();
+  v.dedup();
+  v
+}
+
+/// `6c "elementValue"` is 13 bytes; everything else sits at a delta from
+/// the end of it that depends on how the date is encoded.
+const VALUE_KEY_LEN: usize = 13;
+
+/// How an issuer encodes a `birth_date` `elementValue`.
+///
+/// mDL and EU PID use a bare `full-date`. ISO/IEC 23220-2 §6.3.1.1.3
+/// instead allows Photo ID to wrap it in a map, so that a partially
+/// unknown date can carry an `approximate_mask` alongside it:
+///
+/// ```text
+/// birth date = { "birth_date": full-date, ? "approximate_mask": tstr }
+/// ```
+///
+/// Both shapes are real, so the circuit constrains both and the prover
+/// witnesses which one the issuer used. Treating the wrapped form as if
+/// it were bare would read the map header as the date's first characters.
+///
+/// The `approximate_mask` variant is deliberately **not** accepted: a
+/// masked date is not a date this circuit can compare, and silently
+/// proving an age against one would be worse than refusing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateEncoding {
+  /// `d9 03 ec 6a <10 ASCII bytes>` — mDL, EU PID.
+  Bare,
+  /// `a1 6a "birth_date" d9 03 ec 6a <10 ASCII bytes>` — Photo ID.
+  PhotoIdMap,
+}
+
+impl DateEncoding {
+  /// The literal bytes between the `elementValue` key and the ten ASCII
+  /// date characters.
+  fn prefix(self) -> &'static [u8] {
+    match self {
+      DateEncoding::Bare => &[0xd9, 0x03, 0xec, 0x6a],
+      DateEncoding::PhotoIdMap => b"\xa1\x6abirth_date\xd9\x03\xec\x6a",
+    }
+  }
+  fn date_rel(self) -> usize {
+    VALUE_KEY_LEN + self.prefix().len()
+  }
+  fn identifier_rel(self) -> usize {
+    self.date_rel() + 10
+  }
+  /// Total `IssuerSignedItem` length for this encoding, given where the
+  /// `elementValue` key starts.
+  pub fn item_len(self, value_key_offset: usize) -> usize {
+    value_key_offset + self.identifier_rel() + b"\x71elementIdentifier\x6abirth_date".len()
+  }
+  const ALL: [DateEncoding; 2] = [DateEncoding::Bare, DateEncoding::PhotoIdMap];
+}
+
 /// Everything the prover holds.
 #[derive(Clone, Debug)]
-pub struct PidAgeWitness {
+pub struct MdocAgeWitness {
   /// The issuer's `Sig_structure` bytes, exactly as signed.
   pub sig_structure: Vec<u8>,
   /// Where the digest region and `docType` sit within them.
@@ -90,14 +220,24 @@ pub struct PidAgeWitness {
   /// whole `67 "docType" <tstr>` window in the credential to this exact
   /// string, so naming a document type the issuer did not sign fails the
   /// anchor. What reaches the verifier is the window read out of the
-  /// signed bytes, returned as [`PidAgeOutputs::doc_type`].
+  /// signed bytes, returned as [`MdocAgeOutputs::doc_type`].
   pub doc_type: String,
-  /// How many entries the namespace's `valueDigests` map holds.
+  /// How many namespaces the credential's `valueDigests` table holds.
+  /// One for an mDL or an EU PID, three for a Photo ID.
+  pub num_namespaces: usize,
+  /// How many entries the requested namespace's own map holds.
   pub num_entries: usize,
   /// The `birth_date` `IssuerSignedItem`, tag(24)-wrapped, as signed.
   pub item_bytes: Vec<u8>,
   /// Offset of that item's digest within `sig_structure`.
   pub digest_offset: usize,
+  /// Offset of the `6c "elementValue"` key inside `item_bytes`. Absorbs
+  /// the issuer's salt length and the `digestID`'s CBOR width; see
+  /// [`element_value_key_offset`] for how to compute it.
+  pub element_value_key_offset: usize,
+  /// How the issuer encoded the date -- bare `full-date`, or the map
+  /// form ISO/IEC 23220-2 allows for Photo ID.
+  pub date_encoding: DateEncoding,
 }
 
 /// What the circuit establishes.
@@ -115,7 +255,7 @@ pub struct PidAgeWitness {
 ///   actually compared against;
 /// * without `doc_type` it cannot tell an mDL from a PID;
 /// * without `old_enough` it learns nothing at all.
-pub struct PidAgeOutputs<Scalar: ff::PrimeField> {
+pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// The credential's `docType` key and value, packed 16 bytes at a time.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
   /// The issuer public key the signature was verified against. A
@@ -149,39 +289,59 @@ fn alloc_bits<CS: ConstraintSystem<Scalar>, Scalar: ff::PrimeField>(
 /// Without this the proof would say only "some attribute's digest is in
 /// the credential and I know its preimage", which is true of every
 /// attribute and says nothing about anyone's age.
+///
+/// `value_key_offset` is witnessed, not derived: it absorbs both the
+/// salt length and the `digestID` width (see
+/// [`element_value_key_offset`]). A prover who claims the wrong one has
+/// to make 56 bytes of `elementValue`/`full-date`/`elementIdentifier`
+/// literal appear at that position instead, which is a preimage problem.
 fn extract_birth_date<Scalar, CS>(
   mut cs: CS,
   item_bits: &[Boolean],
   item_bytes: &[u8],
-  real_width: usize,
+  value_key_offset: usize,
+  encoding: DateEncoding,
 ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
 where
   Scalar: ff::PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
   let one = CS::one();
-  let widths = DIGEST_ID_WIDTHS.to_vec();
-  let sel = crate::onehot_cursor::alloc_one_hot::<Scalar, _>(cs.namespace(|| "digestID width"), &widths, real_width)?;
+  // One selector over (offset, encoding) pairs rather than two selectors
+  // multiplied together, which would make every literal check degree 3.
+  let candidates: Vec<(usize, DateEncoding)> = candidate_value_key_offsets()
+    .into_iter()
+    .flat_map(|o| DateEncoding::ALL.into_iter().map(move |e| (o, e)))
+    .collect();
+  let Some(real) = candidates.iter().position(|&c| c == (value_key_offset, encoding)) else {
+    return Err(offset_bind::reject(format!(
+      "elementValue key offset {value_key_offset} is not reachable from any salt in \
+       {MIN_SALT_BYTES}..={MAX_SALT_BYTES} with a canonical digestID width"
+    )));
+  };
+  let indices: Vec<usize> = (0..candidates.len()).collect();
+  let sel = crate::onehot_cursor::alloc_one_hot::<Scalar, _>(
+    cs.namespace(|| "elementValue offset and encoding"),
+    &indices,
+    real,
+  )?;
 
-  // `elementValue` key, then the value's own `#6.1004(tstr(10))` header,
-  // then the `elementIdentifier` key and the literal `"birth_date"`.
-  let mut literals: Vec<(usize, u8)> = Vec::new();
-  for (i, &b) in b"\x6celementValue".iter().enumerate() {
-    literals.push((ITEM_VALUE_KEY_OFFSET + i, b));
-  }
-  for (i, &b) in [0xd9u8, 0x03, 0xec, 0x6a].iter().enumerate() {
-    literals.push((ITEM_VALUE_KEY_OFFSET + 13 + i, b));
-  }
-  for (i, &b) in b"\x71elementIdentifier\x6abirth_date".iter().enumerate() {
-    literals.push((ITEM_VALUE_KEY_OFFSET + 27 + i, b));
-  }
-
-  for (w_idx, &w) in widths.iter().enumerate() {
-    for &(rel, expect) in &literals {
+  for (k, &(base, enc)) in candidates.iter().enumerate() {
+    let mut literals: Vec<(usize, u8)> = Vec::new();
+    for (i, &b) in b"\x6celementValue".iter().enumerate() {
+      literals.push((i, b));
+    }
+    for (i, &b) in enc.prefix().iter().enumerate() {
+      literals.push((VALUE_KEY_LEN + i, b));
+    }
+    for (i, &b) in b"\x71elementIdentifier\x6abirth_date".iter().enumerate() {
+      literals.push((enc.identifier_rel() + i, b));
+    }
+    for (rel, expect) in literals {
       cs.enforce(
-        || format!("width {w} literal at {rel}"),
-        |lc| lc + &sel[w_idx].lc(one, Scalar::ONE),
-        |lc| lc + &offset_bind::byte_lc::<Scalar>(item_bits, one, rel + w, Scalar::ONE) - (Scalar::from(expect as u64), one),
+        || format!("cand {k} literal at +{rel}"),
+        |lc| lc + &sel[k].lc(one, Scalar::ONE),
+        |lc| lc + &offset_bind::byte_lc::<Scalar>(item_bits, one, base + rel, Scalar::ONE) - (Scalar::from(expect as u64), one),
         |lc| lc,
       );
     }
@@ -189,17 +349,17 @@ where
 
   let mut out = Vec::with_capacity(10);
   for j in 0..10 {
-    let value = Scalar::from(item_bytes[ITEM_VALUE_KEY_OFFSET + 17 + real_width + j] as u64);
+    let value = Scalar::from(item_bytes[value_key_offset + encoding.date_rel() + j] as u64);
     let d = AllocatedNum::alloc(cs.namespace(|| format!("date byte {j}")), || Ok(value))?;
     let mut acc = LinearCombination::<Scalar>::zero();
-    for (w_idx, &w) in widths.iter().enumerate() {
-      let term = AllocatedNum::alloc(cs.namespace(|| format!("date {j} term {w}")), || {
-        Ok(if w == real_width { value } else { Scalar::ZERO })
+    for (k, &(base, enc)) in candidates.iter().enumerate() {
+      let term = AllocatedNum::alloc(cs.namespace(|| format!("date {j} term {k}")), || {
+        Ok(if k == real { value } else { Scalar::ZERO })
       })?;
       cs.enforce(
-        || format!("date {j} select {w}"),
-        |lc| lc + &sel[w_idx].lc(one, Scalar::ONE),
-        |lc| lc + &offset_bind::byte_lc::<Scalar>(item_bits, one, ITEM_VALUE_KEY_OFFSET + 17 + w + j, Scalar::ONE),
+        || format!("date {j} select {k}"),
+        |lc| lc + &sel[k].lc(one, Scalar::ONE),
+        |lc| lc + &offset_bind::byte_lc::<Scalar>(item_bits, one, base + enc.date_rel() + j, Scalar::ONE),
         |lc| lc + term.get_variable(),
       );
       acc = acc + term.get_variable();
@@ -259,15 +419,15 @@ where
 /// Synthesises the whole statement.
 ///
 /// `cutoff` is the verifier's date, not the prover's. It is allocated as
-/// a circuit variable and returned in [`PidAgeOutputs`] for the caller to
+/// a circuit variable and returned in [`MdocAgeOutputs`] for the caller to
 /// `inputize`; see that type's docs for why every returned field has to
 /// be made public.
 pub fn synthesize<Scalar, CS>(
   cs: &mut CS,
-  witness: &PidAgeWitness,
+  witness: &MdocAgeWitness,
   ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
   cutoff: &[u8; 10],
-) -> Result<PidAgeOutputs<Scalar>, SynthesisError>
+) -> Result<MdocAgeOutputs<Scalar>, SynthesisError>
 where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
@@ -326,9 +486,12 @@ where
     cs.namespace(|| "region"),
     &sig_bits,
     &padded,
-    &witness.namespace,
-    &witness.doc_type,
-    witness.num_entries,
+    offset_bind::CredentialShape {
+      namespace: &witness.namespace,
+      doc_type: &witness.doc_type,
+      num_namespaces: witness.num_namespaces,
+      num_entries: witness.num_entries,
+    },
     witness.landmarks,
   )?;
 
@@ -378,10 +541,13 @@ where
   }
 
   // 6. That item is a `birth_date` carrying a `full-date`.
-  // The item's own digestID, read natively only to pick which of the
-  // four width cases is the live one; the circuit constrains all four.
-  let width = crate::cbor_uint::class_byte_width(crate::cbor_uint::length_class(read_item_digest_id(&item_padded)?));
-  let date = extract_birth_date(cs.namespace(|| "extract"), &item_bits, &item_padded, width)?;
+  let date = extract_birth_date(
+    cs.namespace(|| "extract"),
+    &item_bits,
+    &item_padded,
+    witness.element_value_key_offset,
+    witness.date_encoding,
+  )?;
 
   // 7. The predicate, against a cutoff the verifier chose.
   let cutoff_vars = cutoff
@@ -391,32 +557,11 @@ where
     .collect::<Result<Vec<_>, _>>()?;
   let old_enough = date_not_after(cs.namespace(|| "age"), &date, &cutoff_vars)?;
 
-  Ok(PidAgeOutputs {
+  Ok(MdocAgeOutputs {
     doc_type: binding.doc_type,
     issuer_qx,
     issuer_qy,
     cutoff: cutoff_vars,
     old_enough,
-  })
-}
-
-/// The `digestID` embedded in an `IssuerSignedItem`, read natively. It
-/// begins at [`ITEM_VALUE_KEY_OFFSET`]; the `elementValue` key follows it
-/// once its own width is known.
-fn read_item_digest_id(item: &[u8]) -> Result<u32, SynthesisError> {
-  let at = ITEM_VALUE_KEY_OFFSET;
-  if at + crate::cbor_uint::MAX_CBOR_UINT_BYTES > item.len() {
-    return Err(offset_bind::reject("item is too short to hold a digestID at the canonical offset"));
-  }
-  Ok(match item[at] {
-    b if b < 24 => b as u32,
-    0x18 => item[at + 1] as u32,
-    0x19 => u16::from_be_bytes([item[at + 1], item[at + 2]]) as u32,
-    0x1a => u32::from_be_bytes([item[at + 1], item[at + 2], item[at + 3], item[at + 4]]),
-    head => {
-      return Err(offset_bind::reject(format!(
-        "digestID head {head:#04x} is not a canonical CBOR uint -- the item is not canonically encoded"
-      )))
-    }
   })
 }

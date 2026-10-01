@@ -73,14 +73,41 @@
 //! This module is a **prototype for a construction that has not been
 //! independently reviewed**. See the crate README.
 //!
-//! # Scope
+//! # Scope and what is deliberately left unproved
 //!
-//! Single-namespace `valueDigests` only, which is what the EUDI PID
-//! rulebook defines (`eu.europa.ec.eudi.pid.1`). A multi-namespace mdoc
-//! whose requested namespace is not the last one would need its region
-//! terminated by the next namespace's `tstr` header rather than by
-//! `deviceKeyInfo`; [`bind_digest_region`] rejects that case rather than
-//! binding the wrong range.
+//! Three anchors are pinned, not two:
+//!
+//! 1. `6C "valueDigests" <namespace-count map header>` — opens the table.
+//! 2. `<tstr target namespace><entry-count map header>` — opens the
+//!    requested namespace's own sub-map, somewhere inside the table.
+//! 3. `6D "deviceKeyInfo"` — the MSO key that canonically follows
+//!    `valueDigests`, closing the table.
+//!
+//! A digest offset must sit at or after (2) and strictly before (3). That
+//! is a **lower** bound at the requested namespace and a **hard upper**
+//! bound at the end of the whole table.
+//!
+//! The upper bound is the one carrying the security weight, because
+//! everything past it is `deviceKeyInfo` — see the attack above. The
+//! lower bound rules out an earlier namespace. What is *not* proved is
+//! that the offset falls before the *next* namespace begins, so a digest
+//! in a later namespace of the same credential would also satisfy this.
+//!
+//! That gap is deliberate, and it does not weaken an age statement: the
+//! prover must still exhibit a preimage of the digest they point at, and
+//! the only preimage they have for any entry is the `IssuerSignedItem`
+//! the issuer actually signed. To exploit a later namespace they would
+//! need the issuer to have signed a *second* `birth_date` item, with a
+//! different date, in that namespace. None of the three document types
+//! this targets does that. Closing it properly means walking the entry
+//! chain, which costs real constraints for no reachable attack today.
+//!
+//! An earlier revision pinned only one namespace and anchored the
+//! region's end directly on `deviceKeyInfo`, which assumed the requested
+//! namespace was the *last* one. ISO/IEC 23220-4 Photo ID breaks that:
+//! `birth_date` lives in `org.iso.23220.1`, which sorts first of its
+//! three namespaces, so its entries are followed by another namespace
+//! rather than by `deviceKeyInfo`.
 
 use bellpepper_core::{
   boolean::Boolean,
@@ -116,9 +143,20 @@ pub(crate) fn reject(reason: impl core::fmt::Display) -> SynthesisError {
 /// digest be compared in two multiplications instead of thirty-two.
 pub const BYTES_PER_PACK: usize = 16;
 
-/// The literal that opens the digest region, minus the namespace and the
-/// map header: `6C "valueDigests" A1`.
-const VALUE_DIGESTS_OPEN: &[u8] = b"\x6cvalueDigests\xa1";
+/// The `valueDigests` map key. The namespace-count header follows it and
+/// is built from the witnessed count, so a credential with one namespace
+/// (mDL, EU PID) and one with three (Photo ID) differ only in that byte.
+const VALUE_DIGESTS_OPEN_KEY: &[u8] = b"\x6cvalueDigests";
+
+/// The canonical CBOR map header for a map of `n` entries, one byte below
+/// 24 and two from 24 to 255.
+fn map_header(n: usize) -> Vec<u8> {
+  if n < 24 {
+    vec![0xa0 | n as u8]
+  } else {
+    vec![0xb8, n as u8]
+  }
+}
 
 /// The literal that closes it: `6D "deviceKeyInfo"`.
 const DEVICE_KEY_INFO: &[u8] = b"\x6ddeviceKeyInfo";
@@ -201,6 +239,23 @@ fn pack_constant<Scalar: PrimeField>(window: &[u8]) -> Vec<Scalar> {
     .chunks(BYTES_PER_PACK)
     .map(|c| c.iter().fold(Scalar::ZERO, |acc, &b| acc * Scalar::from(256u64) + Scalar::from(b as u64)))
     .collect()
+}
+
+/// Largest anchor literal this module will select.
+///
+/// Anchor searches use a candidate set sized by *this* constant rather
+/// than by the literal's own length, so that the number of candidates --
+/// and therefore the number of constraints -- does not depend on how long
+/// a credential's `docType` or namespace happens to be. Deriving it from
+/// the literal leaked the document type into the circuit shape: an mDL
+/// and an EU PID differed by 24 constraints, which under a fixed-setup
+/// folding system means two setups for what is meant to be one circuit.
+pub const MAX_ANCHOR_WINDOW: usize = 48;
+
+/// The candidate offsets every anchor search uses. Constant for a given
+/// buffer size, independent of the literal being searched for.
+pub fn anchor_offsets(buffer_len: usize) -> Vec<usize> {
+  window_offsets(buffer_len, MAX_ANCHOR_WINDOW)
 }
 
 /// Every offset at which a `window_len`-byte window fits entirely inside
@@ -289,6 +344,55 @@ where
   Ok(SelectedWindow { packs, offset })
 }
 
+/// Selects and pins an anchor literal, with a candidate set and pack
+/// count that are both independent of the literal's content.
+///
+/// A `select_window` call emits one selection constraint per candidate per
+/// pack, so a literal that rounds to a different number of packs changes
+/// the circuit's shape. Each anchor therefore declares the pack count it
+/// must always occupy — the counts differ between anchors, which is fine;
+/// what matters is that none of them varies with the *document*.
+///
+/// That is a real restriction on which document types this circuit can
+/// serve without a new setup, so it is enforced rather than assumed: a
+/// `docType` or namespace long enough to spill into another pack has to
+/// be caught here, not discovered as a shape mismatch after the artifact
+/// ships. The three target types sit comfortably inside their bands --
+/// namespace windows run 18 to 26 bytes and `docType` windows 30 to 32,
+/// both two packs.
+pub fn select_anchor<Scalar, CS>(
+  mut cs: CS,
+  bits: &[Boolean],
+  native: &[u8],
+  real_offset: usize,
+  expected: &[u8],
+  expected_packs: usize,
+  label: &str,
+) -> Result<SelectedWindow<Scalar>, SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  let packs = expected.len().div_ceil(BYTES_PER_PACK);
+  if packs != expected_packs {
+    return Err(reject(format!(
+      "{label} anchor is {} bytes ({packs} packs) but this circuit's shape fixes it at \
+       {expected_packs}, so such a credential would need its own setup",
+      expected.len()
+    )));
+  }
+  let window = select_window::<Scalar, _>(
+    cs.namespace(|| "select"),
+    bits,
+    native,
+    &anchor_offsets(native.len()),
+    real_offset,
+    expected.len(),
+  )?;
+  enforce_window_equals(cs.namespace(|| "literal"), &window, expected)?;
+  Ok(window)
+}
+
 /// Constrains a selected window to equal a fixed byte string.
 pub fn enforce_window_equals<Scalar, CS>(mut cs: CS, window: &SelectedWindow<Scalar>, expected: &[u8]) -> Result<(), SynthesisError>
 where
@@ -356,13 +460,34 @@ where
 /// Everything [`bind_digest_region`] establishes about where a
 /// credential's digests live.
 pub struct RegionBinding<Scalar: PrimeField> {
-  /// Offset of the first byte of the first `valueDigests` entry.
+  /// Offset of the first entry of the **requested namespace's** sub-map:
+  /// the lower bound a digest offset must meet.
   pub region_start: LinearCombination<Scalar>,
-  /// Offset one past the region's last byte — the `deviceKeyInfo` key.
+  /// Offset of the `deviceKeyInfo` key, which closes the whole
+  /// `valueDigests` table: the hard upper bound.
   pub region_end: LinearCombination<Scalar>,
   /// The credential's `docType`, read from the signed bytes so a verifier
   /// learns which document type the proof is about.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
+}
+
+/// What the prover claims the credential *is*, as opposed to where its
+/// parts sit. Pinned to the signed bytes by the anchors, so a prover
+/// cannot name a document type, namespace or table shape the issuer did
+/// not sign.
+#[derive(Clone, Copy, Debug)]
+pub struct CredentialShape<'a> {
+  /// The namespace whose digests the proof is about — `org.iso.18013.5.1`
+  /// for an mDL, `org.iso.23220.1` for a Photo ID's `birth_date`.
+  pub namespace: &'a str,
+  /// The credential's `docType`, which for an mDL is neither equal to nor
+  /// the same length as its namespace.
+  pub doc_type: &'a str,
+  /// How many namespaces the `valueDigests` table holds: one for an mDL
+  /// or EU PID, three for a Photo ID.
+  pub num_namespaces: usize,
+  /// How many entries the requested namespace's own map holds.
+  pub num_entries: usize,
 }
 
 /// Native (out-of-circuit) landmarks the prover supplies as witness.
@@ -371,7 +496,13 @@ pub struct RegionBinding<Scalar: PrimeField> {
 pub struct Landmarks {
   /// Offset of the `6C "valueDigests"` key.
   pub value_digests_key: usize,
-  /// Offset of the first entry — the byte after the namespace map header.
+  /// Offset of the requested namespace's own `tstr` key inside the
+  /// `valueDigests` table. For a single-namespace credential this sits
+  /// immediately after the table header; for Photo ID it is one of
+  /// three.
+  pub namespace_key: usize,
+  /// Offset of the requested namespace's first entry — the byte after
+  /// its entry-count map header.
   pub region_start: usize,
   /// Offset of the `6D "deviceKeyInfo"` key.
   pub device_key_info: usize,
@@ -394,64 +525,91 @@ pub fn bind_digest_region<Scalar, CS>(
   mut cs: CS,
   bits: &[Boolean],
   native: &[u8],
-  namespace: &str,
-  doc_type: &str,
-  num_entries: usize,
+  shape: CredentialShape<'_>,
   landmarks: Landmarks,
 ) -> Result<RegionBinding<Scalar>, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  if num_entries >= 256 {
-    return Err(reject(format!("{num_entries} valueDigests entries needs a wider map header than this binding encodes")));
+  if shape.num_entries >= 256 {
+    return Err(reject(format!("{} valueDigests entries needs a wider map header than this binding encodes", shape.num_entries)));
+  }
+  if shape.num_namespaces >= 256 {
+    return Err(reject(format!("{} namespaces needs a wider map header than this binding encodes", shape.num_namespaces)));
   }
 
-  // ---- Start anchor: `6C "valueDigests" A1 <tstr ns> <map hdr>` ----
-  let mut open = VALUE_DIGESTS_OPEN.to_vec();
-  open.extend_from_slice(&tstr_header(namespace.len())?);
-  open.extend_from_slice(namespace.as_bytes());
-  if num_entries < 24 {
-    open.push(0xa0 | num_entries as u8);
-  } else {
-    open.push(0xb8);
-    open.push(num_entries as u8);
-  }
+  // ---- Anchor 1: `6C "valueDigests" <namespace-count map header>` ---
+  // Opens the table. Pinning the namespace count here stops a prover
+  // claiming a table of a different shape than the issuer signed.
+  let mut open = VALUE_DIGESTS_OPEN_KEY.to_vec();
+  open.extend_from_slice(&map_header(shape.num_namespaces));
   let open_len = open.len();
-
-  // A real MSO puts `valueDigests` after docType, version and
-  // validityInfo, all of which are short and bounded; a generous window
-  // still costs far less than the hash it sits beside.
-  let start_candidates = window_offsets(native.len(), open_len);
-  let open_window = select_window::<Scalar, _>(
+  let table_window = select_anchor::<Scalar, _>(
     cs.namespace(|| "valueDigests anchor"),
     bits,
     native,
-    &start_candidates,
     landmarks.value_digests_key,
-    open_len,
+    &open,
+    1,
+    "valueDigests",
   )?;
-  enforce_window_equals(cs.namespace(|| "valueDigests literal"), &open_window, &open)?;
 
-  // The region starts immediately after the anchor.
-  let region_start = open_window.offset.clone() + (Scalar::from(open_len as u64), CS::one());
+  // ---- Anchor 2: `<tstr namespace><entry-count map header>` --------
+  // The requested namespace's own sub-map, somewhere inside the table.
+  // For a single-namespace credential this sits immediately after anchor
+  // 1; for Photo ID it is one of three, and `org.iso.23220.1` -- where
+  // `birth_date` lives -- sorts first rather than last.
+  let mut ns_open = tstr_header(shape.namespace.len())?;
+  ns_open.extend_from_slice(shape.namespace.as_bytes());
+  ns_open.extend_from_slice(&map_header(shape.num_entries));
+  let ns_open_len = ns_open.len();
+  let ns_window = select_anchor::<Scalar, _>(
+    cs.namespace(|| "namespace anchor"),
+    bits,
+    native,
+    landmarks.namespace_key,
+    &ns_open,
+    2,
+    "namespace",
+  )?;
 
-  // ---- End anchor: `6D "deviceKeyInfo"` ----------------------------
-  let end_candidates = window_offsets(native.len(), DEVICE_KEY_INFO.len());
-  let end_window = select_window::<Scalar, _>(
+  // The namespace's entries begin right after its own header.
+  let region_start = ns_window.offset.clone() + (Scalar::from(ns_open_len as u64), CS::one());
+
+  // The namespace sub-map must sit inside the table, not before it.
+  if landmarks.namespace_key < landmarks.value_digests_key + open_len {
+    return Err(reject(format!(
+      "the namespace key at {} precedes the end of the valueDigests header at {}",
+      landmarks.namespace_key,
+      landmarks.value_digests_key + open_len
+    )));
+  }
+  enforce_ge(
+    cs.namespace(|| "namespace sits inside the table"),
+    &ns_window.offset,
+    &(table_window.offset.clone() + (Scalar::from(open_len as u64), CS::one())),
+    landmarks.namespace_key - (landmarks.value_digests_key + open_len),
+    16,
+  )?;
+
+  // ---- Anchor 3: `6D "deviceKeyInfo"` ------------------------------
+  // Closes the whole table. This is the bound doing the security work:
+  // everything past it is the holder's own deviceKey.
+  let end_window = select_anchor::<Scalar, _>(
     cs.namespace(|| "deviceKeyInfo anchor"),
     bits,
     native,
-    &end_candidates,
     landmarks.device_key_info,
-    DEVICE_KEY_INFO.len(),
+    DEVICE_KEY_INFO,
+    1,
+    "deviceKeyInfo",
   )?;
-  enforce_window_equals(cs.namespace(|| "deviceKeyInfo literal"), &end_window, DEVICE_KEY_INFO)?;
   let region_end = end_window.offset.clone();
 
-  // The region must be non-empty and must not run backwards. Without
-  // this a prover could claim an end anchor that precedes the start and
-  // then satisfy the digest range check vacuously.
+  // The span must be non-empty and must not run backwards. Without this
+  // a prover could claim an end anchor preceding the start and satisfy
+  // the digest range check vacuously.
   if landmarks.device_key_info <= landmarks.region_start {
     return Err(reject(format!(
       "landmarks describe an empty or inverted digest region: starts at {}, ends at {}",
@@ -467,17 +625,9 @@ where
   )?;
 
   // ---- docType, read out for the verifier --------------------------
-  let doc_type_header = tstr_header(doc_type.len())?;
-  let doc_type_window_len = DOC_TYPE_KEY.len() + doc_type_header.len() + doc_type.len();
-  let doc_candidates = window_offsets(native.len(), doc_type_window_len);
-  let doc_window = select_window::<Scalar, _>(
-    cs.namespace(|| "docType"),
-    bits,
-    native,
-    &doc_candidates,
-    landmarks.doc_type_key,
-    doc_type_window_len,
-  )?;
+  let doc_type_header = tstr_header(shape.doc_type.len())?;
+  let doc_type_window_len = DOC_TYPE_KEY.len() + doc_type_header.len() + shape.doc_type.len();
+
   // The whole window is pinned to a literal: the key, the value's tstr
   // header, and the value itself. The docType is a public output, so
   // there is nothing in it to hide — and pinning it to the bytes that
@@ -485,7 +635,7 @@ where
   // the issuer did not.
   let mut expected = DOC_TYPE_KEY.to_vec();
   expected.extend_from_slice(&doc_type_header);
-  expected.extend_from_slice(doc_type.as_bytes());
+  expected.extend_from_slice(shape.doc_type.as_bytes());
   let doc_type_end = landmarks.doc_type_key + doc_type_window_len;
   if doc_type_end > native.len() {
     return Err(reject(format!(
@@ -497,11 +647,19 @@ where
   let doc_type_bytes = &native[landmarks.doc_type_key..doc_type_end];
   if doc_type_bytes != expected.as_slice() {
     return Err(reject(format!(
-      "the docType landmark at {} does not point at `{doc_type}` in the signed bytes",
-      landmarks.doc_type_key
+      "the docType landmark at {} does not point at `{}` in the signed bytes",
+      landmarks.doc_type_key, shape.doc_type
     )));
   }
-  enforce_window_equals(cs.namespace(|| "docType literal"), &doc_window, &expected)?;
+  let doc_window = select_anchor::<Scalar, _>(
+    cs.namespace(|| "docType anchor"),
+    bits,
+    native,
+    landmarks.doc_type_key,
+    &expected,
+    2,
+    "docType",
+  )?;
 
   Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs })
 }

@@ -1,0 +1,479 @@
+{
+  "description": "ISO/IEC 23220-4 Annex C Photo ID: three namespaces, and birth_date lives in org.iso.23220.1, which sorts FIRST -- so its entries are followed by another namespace, not by deviceKeyInfo. Its elementValue uses the ISO 23220-2 map form.",
+  "doc_type": "org.iso.23220.photoid.1",
+  "namespace": "org.iso.23220.1",
+  "salt_bytes": 16,
+  "date_encoding": "PhotoIdMap",
+  "element_value_key_offset": 39,
+  "sig_structure_len": 2343,
+  "sig_structure_hex": "846a5369676e61747572653143a1012640590913d81859090ea667646f6354797065776f72672e69736f2e32333232302e70686f746f69642e316776657273696f6e63312e306c76616c6964697479496e666fa3667369676e6564c074323032362d31302d30315430303a30303a30305a6976616c696446726f6dc074323032362d31302d30315430303a30303a30305a6a76616c6964556e74696cc074323033312d31302d30315430303a30303a30305a6c76616c756544696765737473a36f6f72672e69736f2e32333232302e31b81b0058207dd3e2936b8ecb7e6c025c64fd339bdbf9890c302b36fc642c3d56fe2b7b50560158206eb73aa4bae474271a62f060d157c2b5366d0c759395d0728a73366f182ee4bc0258207cf9b0f11cd04d467fc26501b7b5d405cccac7216901498022e81aeafdcaac2f0358204b027b08c26719195c5bad35018f235fe7b137e04ad356851422cada8bd24a63045820ee83225bf19640bc3f9643146b0f8543154c16d431bb746ab25fbc13e6e54e70055820ef3c387d1e335e6c09403e7459162d857822c16040c55434a1f640ad26df401e06582021f9ac18475da4e57b4b323830f9a2c8ae932994fa95b163633d9ddfbb81a7e70758203d9860a719e759caa29ad5667884f078bc33d5927516daf569f0fdec09300be908582085c6a257630ca3686329041e8f8b4479b96653980f41d7522cb8819fb0390288095820424e00d6c3c3d0c428ea7d2881abb359c070b855a690d8ca4352a1591cf112140a582092af110b32fea413849ca767df8afb23bdd0afaef9ef863cad50a10ffbd64dc80b5820e94038af0261bf87e1c192c695f51b64631c80ad3edf8b6e54580a73c5c3024f0c5820337eeb163f9f2f5412b0034345f7aa462024fa067b43dfd0894b7921d72080dc0d582092c5b340fc3864a37ef3bfe74b583b1c39723181b2ff6f2ce1f828722eab62870e58202d31b1e7aa4645e67d7f2e72c1839bc5223d7ef91694d548efffa635b62aa6180f5820a8487995fe0ce0034811300ba02cfd52e1ef0a80c29750585e147312731d50e9105820232040a5e235231272fcbd975dd863c37162d076515c873c33a184079ee73738115820f79275d13dcc2ea3b8081b22e1290e417071dcfe004bd95cfc9cf571d402deaf12582039455f3d2733ac63a25351927698fe855fb8a1effce859500cae6ef173b9d03513582066c3abdce556bd4133b1238d8ddb5d8399ce3a31cc249a1ef2dd611efb5198d4145820345b9de9d02b60be7075eb9dd4e6074a5549e0efd7b538e1789337e1d61db00a1558204afb305ff9593acb58fe9574193233c123c0d52cf9b59a838ee8fca45ec16269165820d5f9ae21605377001369bfd0eb1d8ca945144dd35d0227d04631eec601e0317f175820f0b839a96256d92a89d497db6c6768ece11a4328ac4ab53d972b05fedb732d5c18185820091204f4b2e031f94b3ac7fd16eec89a0ac1ef7945cdc02b363f1e2d94cac5a218195820ea17e998076443b677a97ff716f8ff190b4c208881d5901e8396c5e5e89ed913181a58207fea22519d487099a9184e12d1a74f669287a9f5c15c62b83272fbeef971a5ba736f72672e69736f2e32333232302e6474632e31b200582055c8084ab1ab2bb708866df5cd87a4d274d24b11f767cc484e0833d89be887f40158201415ea09908303db326d28e38c2b59101460c37407b08051ed8a432a95bd873b0258201f69f54b7ad9bc9192e3b0df9589fa0f3de1931dd4282e247b57e09487c4b4c5035820028871e16783e627790d2cc02a1c83d5a3d143228dec36227bcdec101b0a774c04582007a859b155ed0e79e2d721cfdea5cc663d3b9ad2960dbfa7be420949628c84de055820fe8ca6b11c1df1d45b57d03a6c23b69a30b9736087be0d915cea30840dc5325d065820cde60b2d587eed0cb83064af11336ed931241edb6889f18b359e627a1796cb0b0758202671b3eafa8e7683b7a7dbdcfaf9f98963645e151033f3e881ad9948a750c73c085820e6f7cdc90669d68e22ddcb5b5064579c3fe0caf25e6f1baeb4e4e01dbfb553cb095820485de269e09475086c533f71ddfe41c3875d9ea8c0264aca6b5b39609e68dee00a5820b9bcdbb5fdd5e75e3d803391c550685f4c8b08fcaae88526c1d1c291bf5b50a20b58201e3d262d76a36b92aa50b8054e590a6ff0dda686d8ab17f925888c7b868db4990c5820a3b8709a49bc6d79a81e15a2f1469d2c25ad27fe0837e68bc4012778076744970d58203d69e4cf80f9829a7b65596b89e83c5954d70d6d7c21d49710a80c7994b6b37f0e5820206d91cf2bdaf97f490c19c09a7545e0a986f1683d61ed5695650a9a8a61e03e0f5820f25a4655187e899c121573e196ad2b7475e30ec6f94e79adef5690a77829a0b81058200bc684e79caaeb71e35dadc5f7bb75cd5658072a9927c5d09df396bd30764a3c115820955cba4ee31a776a5dcc5d5402b923a8a5b0ef0b3e5904dc45a253ded20ed941776f72672e69736f2e32333232302e70686f746f69642e31ab0058209d6e611a89f9d236b791da90ccd5b08af2e22963fe4a859a6cc182595659c8c9015820df75ff21dcd17a7269b4f7392f561dda1fd2a478075d46cfd56adb6e3035ff43025820299cdf85f6c6521022ccd179bb0b89f731bcd4a68728732b87771091e6b74ae70358201a01487dbdc8412d6f19a0cbb01aa704a98386f6bf5c74836f0da7f9b9f2980c0458209c3366eb29e0530bca39576b06daaa8f42d16d2430b91a3a8be338e872d4dfd3055820d02f431aa781cd9689cc03645644b6e6d8aa0dc4ec5824398ee68b670b2ab56c06582093ec1ceb12a6a93bb6ecfbf3fb11437eb3474986464d1f8bd872a5c2844862b4075820faa55221bbb2c79efcaedd9de723c8a35755204f5ffbc6b74bd3c0e479b6f87a0858201461270972743aefae5b0c4a8699c2ebcd949c0d8f1f17fb6a57e81a0b3c139c0958204d838677885cef2250fe5e91f35b7e5106520cdbd8c379f72330e5ae95a594a20a5820ced4b78b9e13ba3cff4a96e2e3877e0a70d257348d0ccd4b5b53254763ed2ae06d6465766963654b6579496e666fa1696465766963654b6579a401022001215820ff779186e6b4db0b77972c9d699c7ca386ec6d03b323901940495d38f1192ec3225820ed9339c6d9e2d7804a9045d5f2127d0d81f2550aaa9333bf2dee26bd17d03a186f646967657374416c676f726974686d675348412d323536",
+  "landmarks": {
+    "value_digests_key_offset": 178,
+    "namespace_key_offset": 192,
+    "region_start": 210,
+    "region_len": 948,
+    "device_key_info_offset": 2219,
+    "device_key_x_offset": 2252,
+    "doc_type_offset": 26,
+    "num_namespaces": 3,
+    "num_entries": 27
+  },
+  "target_element": "birth_date",
+  "claims": [
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "family_name",
+      "digest_id": 0,
+      "digest_offset": 213,
+      "issuer_signed_item_bytes_len": 89,
+      "issuer_signed_item_bytes_hex": "d8185855a46672616e646f6d501338119122590b5ff8750cd6a097ec80686469676573744944006c656c656d656e7456616c7565664d697272656e71656c656d656e744964656e7469666965726b66616d696c795f6e616d65"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "family_name_viz",
+      "digest_id": 1,
+      "digest_offset": 248,
+      "issuer_signed_item_bytes_len": 93,
+      "issuer_signed_item_bytes_hex": "d8185859a46672616e646f6d5096b0e9c232c5f590c0adaa4b83b76f98686469676573744944016c656c656d656e7456616c7565664d495252454e71656c656d656e744964656e7469666965726f66616d696c795f6e616d655f76697a"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "given_name",
+      "digest_id": 2,
+      "digest_offset": 283,
+      "issuer_signed_item_bytes_len": 87,
+      "issuer_signed_item_bytes_hex": "d8185853a46672616e646f6d506747f4aa1780ce7320570001fbd136d7686469676573744944026c656c656d656e7456616c75656548656c656e71656c656d656e744964656e7469666965726a676976656e5f6e616d65"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "given_name_viz",
+      "digest_id": 3,
+      "digest_offset": 318,
+      "issuer_signed_item_bytes_len": 91,
+      "issuer_signed_item_bytes_hex": "d8185857a46672616e646f6d50a6067a74d583a3d6f6a5e0eb80bffc82686469676573744944036c656c656d656e7456616c75656548454c454e71656c656d656e744964656e7469666965726e676976656e5f6e616d655f76697a"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "birth_date",
+      "digest_id": 4,
+      "digest_offset": 353,
+      "issuer_signed_item_bytes_len": 107,
+      "issuer_signed_item_bytes_hex": "d8185867a46672616e646f6d502bd7b8ad07c78a52c5476f395e7f1558686469676573744944046c656c656d656e7456616c7565a16a62697274685f64617465d903ec6a313939362d30312d333071656c656d656e744964656e7469666965726a62697274685f64617465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "portrait",
+      "digest_id": 5,
+      "digest_offset": 388,
+      "issuer_signed_item_bytes_len": 2131,
+      "issuer_signed_item_bytes_hex": "d81859084ea46672616e646f6d508864cc91bad8c798fb379140083db30d686469676573744944056c656c656d656e7456616c7565590800ffd8ff31866a02695ccd9b8ba93e6ea30078e0d58bf886a1d039133cfbceeea3ddbfe7a333fc2a8584f53dce621ffe0cc471bd5f1aeee4048dc6dca68908df006151317ddf99d51942ed674b4fdf4869d8fa75b368ea16d7abd6f7555a4988d8e925347a7256e7b4392ac58fffbb694b4728ae2f302ded7d8777c32655ae4f7954f5d0d94aeed152ec97fb8cf10d1320a1ce6424d6af7446840e0ecb6275f1ba77ecc066d4e7cb2f63d50d27b8898a6af1369b5c539bba25a50bee35fabdb7f7c29bb2a0ec603704247fe01068b0fb212bb3477cfccee31e3839d532ae8ff42e77ff36555225d9549cdc778065744caf5edbe56e8de6f394e59f484a14da3c621f8108ef795043c227a4ca728374da0dad93f04720f64f6b627e84309e8026913d0e335fcdc4cf0766d6f0201f4bcaa2d3aed2c064a2db19ae42fd0c83b9d449453aff3316c1d50014d1574406acfb48e5f8ba15419e5d8a6cff0ab6a006fff156652ec5bde935e715f285926c1ee2fcaad316a90dfe76a0655b156cc65ddf2e3acafdc28096d4815a5b3722cbcced4dfd1813cc7ca74f92ca9baada8ba498502075beb7872893519a6b36e706355e765cce3b616486545c6037c649a2d12e443014d71215c95dd2d5f3cada267e4b9637091a71e636b9f4e3e17563c9da94c4ce5d0e4eedfae7f3f9ddb5cf1636c198f7c79ed47bac79dad471a5bad8def1e45409e51bbe331fea008b34db97d0c273194011dcd4ec12e2acd62351a207c2c9f4778778aea18df19270e86a611b24b1bf85454772816a2bfc70c544a9ee2cf12687bf26f976d05812206319cb863543ee0c90d2f57e75bda02dec2cf02983e3de023d0ff0b6f53f429f157a088076a46a7e618a6c5c784594f1499723ab9cb698c29ad573648f590bfdab84bdac695fb8137cc18912404fd7109928583633bfeb7a22ea52c28e9285ca53a3605510a856ef66b2a3dbb1766e01c348cf877d5ac9e50fc7a7c8ef9d32f16edf1dc8d1e9653c9965b7580d0125d1b7c8ed6af636d363ecef164d2f435061cf2640000b5546cb1872c949f786492d1251056d42a9aee026d971e8e50959895af9f424c8a9a855ec93d5786697d50a1a5a295e2d75ff0af34c09a93188f64695df39c5d1dbc2440fd10f4ccdd8c1d00d11a3617ec43d2a4ecb885a990a06e2733dd336e9bfc7e15bf0c4540469dfeb502e2cc7cc9a53084e9f5a1fbae394752938e8b1a35875465b273e35da9aaa745ffdec040958d7e8fa26eff4e95d879ac015e43ef8bc5639fcad0ecd8eb649088c9970710ee3ffe1ca978bb34ae3f20133e0367958035a01030bfc7cf04c092d87538b054acd98ac01b32e1ae7e9e79e8b5722fe76975b40bc9e7e41f41f8c037a10a2ab3b9fd353cb896fbd9b0ac94620616acd75c02cce18265bf1fb39ff2d4de8e2c4811ffad256ed43fff4e3f7e90797a5330f2a200db799e6a19780ca24adb9ec594affa9397b2d00dfe7cd7597ce709e82b6f8c89472a49ee3c87b9c4996e9a1934ecb84c9c1a479c0490d78452dda06bbda88e431483a4b7072b8df602acc03f9764f143096b7f3e70d606b8e6c4771179ac42657f10c2aabe8521940e929924ae7ea037ce8f9a195f564b174d29363a6a54dd6f375818c1cc9c1bbe68cfd143ee349434a37c4480da8f7233dd40f6e46cc2cb1a663c79155e86c48e2565b3f2771db4065d7ac15c5ebcc4efc1774df1363c2764167852323455caeea1c7da4f548d20ff79cc147210123f86e49ef247e6c803ebf046aeb882f3b395f531c916d3ae89bb041c6ac38d91b6224b1e5dd51a8c3f53bdf9999c19f62601ee5a30362f5ea21707909db1cca577b6d0a0bbb7ee4fd5969c1fdc3017d940b80028734d00612c171243942ce3f27a37631afa1df6bfc52066966fdca8c0c557fc298276f1117c0941e722c1e2ae642a1a7eb05fd313afb4819ca9cd48e962b1b3e1118c9d15fe8e267d97c95ac85b756e972f9d4528af3b3e511e96b98a66e28c90812c42c40a7b1482bc81a7b7daf62c3e84b52e5488e1bd69921dd17acee7b03fc2094fcece22a9c8d3fbb65658317760d7325d146939a0dcda9ed50f828bb34d08b1b2ba38f3cf7544af2e1e255470259d340472cc13eb4054dc0fc95f6896464e881123e0541d8dc7e0bef44f16b978c2db61a3857bdf38d84bc16556f3bf700517504a771cdb04db4006afa523a3fe422b4d7d1f6a9a76a90f2738f585a0c60fbf60979b7e3c5e23981122af6bab61eefd92693cdc3a51ff9d8ecc09dc7e1a6737a4a73d03a9c02ca7620c75e9e8577faa3f370d7f3656e3a33a901b02795bb14f3ef4e3b25f371a270b77772ab238c5edadcab82313318dcab081f68b523ce05cd26e1f3982faa7a9cf8354fcb54795e90523989e1629c09c626c8c6ca523186c0a68dfea19f37620b0cede79433a0a6324d89bebfec15e6e398d4467bb4cf136a43857b7426e4451e20b0df58e1d4f4b6aa825897c83444e32df5ecd4578a4d068f7ab79452b38aa9474e3044216ef48cddd498518d50c2c2eca5bc521f1032478091532ac84a886c6cd115bc1e8e44e05c0d5a0e36aa8b428901a1a6390566236afd4fde9ba008b5aad3f13457f9529a002887fc0a76905314e133885407da994e894814a80ab8032aae045b3e4e206d708e13cde1eced6ec4c96ffaaa059f7a25703e7e5fdbc7a136f41303c0260bf9a7b5b559283903d000a83d482d2eeff8b6dd305c5c79827097376e15a9a94bbd67f346602aca4803bfdca1ce6b3675cb6d20f17f950dc270f7d222566cf95c6bf04ec26de05b8add69023982781a03aaafe7b4e2871e246c8c80d4fa2a5f2593446b3dcbda7b9819e6300e9656d1f38a655571656c656d656e744964656e74696669657268706f727472616974"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "issue_date",
+      "digest_id": 6,
+      "digest_offset": 423,
+      "issuer_signed_item_bytes_len": 95,
+      "issuer_signed_item_bytes_hex": "d818585ba46672616e646f6d503d6b5dc1343e7694317180ac21757c7d686469676573744944066c656c656d656e7456616c7565d903ec6a323032362d30342d323871656c656d656e744964656e7469666965726a69737375655f64617465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "expiry_date",
+      "digest_id": 7,
+      "digest_offset": 458,
+      "issuer_signed_item_bytes_len": 96,
+      "issuer_signed_item_bytes_hex": "d818585ca46672616e646f6d504dd4c64d2da95f8ffd6b932779352b33686469676573744944076c656c656d656e7456616c7565d903ec6a323033312d30342d323871656c656d656e744964656e7469666965726b6578706972795f64617465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "issuing_authority_unicode",
+      "digest_id": 8,
+      "digest_offset": 493,
+      "issuer_signed_item_bytes_len": 114,
+      "issuer_signed_item_bytes_hex": "d818586ea46672616e646f6d50bb20fddeb31aa2f212a419f3d121b212686469676573744944086c656c656d656e7456616c756570506f6c69736d796e646967686574656e71656c656d656e744964656e746966696572781969737375696e675f617574686f726974795f756e69636f6465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "issuing_country",
+      "digest_id": 9,
+      "digest_offset": 528,
+      "issuer_signed_item_bytes_len": 89,
+      "issuer_signed_item_bytes_hex": "d8185855a46672616e646f6d50f661c140a002e720a08b38633f62f7db686469676573744944096c656c656d656e7456616c756562534571656c656d656e744964656e7469666965726f69737375696e675f636f756e747279"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "age_in_years",
+      "digest_id": 10,
+      "digest_offset": 563,
+      "issuer_signed_item_bytes_len": 85,
+      "issuer_signed_item_bytes_hex": "d8185851a46672616e646f6d50df103d755e783f9169b63f5d7a28b8636864696765737449440a6c656c656d656e7456616c7565181e71656c656d656e744964656e7469666965726c6167655f696e5f7965617273"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "age_over_18",
+      "digest_id": 11,
+      "digest_offset": 598,
+      "issuer_signed_item_bytes_len": 83,
+      "issuer_signed_item_bytes_hex": "d818584fa46672616e646f6d50ed394224be8c067c6b389e45e954f5836864696765737449440b6c656c656d656e7456616c7565f571656c656d656e744964656e7469666965726b6167655f6f7665725f3138"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "age_birth_year",
+      "digest_id": 12,
+      "digest_offset": 633,
+      "issuer_signed_item_bytes_len": 88,
+      "issuer_signed_item_bytes_hex": "d8185854a46672616e646f6d50641d92ea31b4862775d2ea4683b1a5ca6864696765737449440c6c656c656d656e7456616c75651907cc71656c656d656e744964656e7469666965726e6167655f62697274685f79656172"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "portrait_capture_date",
+      "digest_id": 13,
+      "digest_offset": 668,
+      "issuer_signed_item_bytes_len": 114,
+      "issuer_signed_item_bytes_hex": "d818586ea46672616e646f6d5053df535c768d715224346e054f17d5896864696765737449440d6c656c656d656e7456616c7565c074323032362d30342d32385431303a35313a35385a71656c656d656e744964656e74696669657275706f7274726169745f636170747572655f64617465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "birthplace",
+      "digest_id": 14,
+      "digest_offset": 703,
+      "issuer_signed_item_bytes_len": 95,
+      "issuer_signed_item_bytes_hex": "d818585ba46672616e646f6d501dab07cb2dd315d52aa6ab0780a3ab606864696765737449440e6c656c656d656e7456616c75656d53746f636b686f6c6d2c20534571656c656d656e744964656e7469666965726a6269727468706c616365"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "name_at_birth",
+      "digest_id": 15,
+      "digest_offset": 738,
+      "issuer_signed_item_bytes_len": 91,
+      "issuer_signed_item_bytes_hex": "d8185857a46672616e646f6d5035f0c22c3230419954c9ba561aff4ea96864696765737449440f6c656c656d656e7456616c7565664d697272656e71656c656d656e744964656e7469666965726d6e616d655f61745f6269727468"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "resident_address",
+      "digest_id": 16,
+      "digest_offset": 773,
+      "issuer_signed_item_bytes_len": 100,
+      "issuer_signed_item_bytes_hex": "d8185860a46672616e646f6d50104924eaecfbc5595e9262880de33fff686469676573744944106c656c656d656e7456616c75656c54756c65676174616e20313171656c656d656e744964656e746966696572707265736964656e745f61646472657373"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "resident_city",
+      "digest_id": 17,
+      "digest_offset": 808,
+      "issuer_signed_item_bytes_len": 94,
+      "issuer_signed_item_bytes_hex": "d818585aa46672616e646f6d50c6cc627b78eb9e0df0a1b91d9529a109686469676573744944116c656c656d656e7456616c75656953746f636b686f6c6d71656c656d656e744964656e7469666965726d7265736964656e745f63697479"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "resident_postal_code",
+      "digest_id": 18,
+      "digest_offset": 843,
+      "issuer_signed_item_bytes_len": 97,
+      "issuer_signed_item_bytes_hex": "d818585da46672616e646f6d50c0716e09612eed22b20bd6e5e1425769686469676573744944126c656c656d656e7456616c756565313133353371656c656d656e744964656e746966696572747265736964656e745f706f7374616c5f636f6465"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "resident_country",
+      "digest_id": 19,
+      "digest_offset": 878,
+      "issuer_signed_item_bytes_len": 90,
+      "issuer_signed_item_bytes_hex": "d8185856a46672616e646f6d50be7327a450615b5614abbcf3c045af11686469676573744944136c656c656d656e7456616c756562534571656c656d656e744964656e746966696572707265736964656e745f636f756e747279"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "resident_city_latin1",
+      "digest_id": 20,
+      "digest_offset": 913,
+      "issuer_signed_item_bytes_len": 101,
+      "issuer_signed_item_bytes_hex": "d8185861a46672616e646f6d50f9baab806687670fb0dbdde23745da3b686469676573744944146c656c656d656e7456616c75656953746f636b686f6c6d71656c656d656e744964656e746966696572747265736964656e745f636974795f6c6174696e31"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "sex",
+      "digest_id": 21,
+      "digest_offset": 948,
+      "issuer_signed_item_bytes_len": 75,
+      "issuer_signed_item_bytes_hex": "d8185847a46672616e646f6d50ee2586e1e83ee82ee6e750bbd650a0bb686469676573744944156c656c656d656e7456616c75650271656c656d656e744964656e74696669657263736578"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "nationality",
+      "digest_id": 22,
+      "digest_offset": 983,
+      "issuer_signed_item_bytes_len": 85,
+      "issuer_signed_item_bytes_hex": "d8185851a46672616e646f6d506792e70d82567e3c9ce2590cac311590686469676573744944166c656c656d656e7456616c756562534571656c656d656e744964656e7469666965726b6e6174696f6e616c697479"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "document_number",
+      "digest_id": 23,
+      "digest_offset": 1018,
+      "issuer_signed_item_bytes_len": 97,
+      "issuer_signed_item_bytes_hex": "d818585da46672616e646f6d50863dc5098f9d665cf2f8644338d515ac686469676573744944176c656c656d656e7456616c75656a53452d5049442d31303071656c656d656e744964656e7469666965726f646f63756d656e745f6e756d626572"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "issuing_subdivision",
+      "digest_id": 24,
+      "digest_offset": 1054,
+      "issuer_signed_item_bytes_len": 97,
+      "issuer_signed_item_bytes_hex": "d818585da46672616e646f6d508fc8ca6c59d73335581370c380ff1e1868646967657374494418186c656c656d656e7456616c75656553452d414271656c656d656e744964656e7469666965727369737375696e675f7375626469766973696f6e"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "family_name_latin1",
+      "digest_id": 25,
+      "digest_offset": 1090,
+      "issuer_signed_item_bytes_len": 97,
+      "issuer_signed_item_bytes_hex": "d818585da46672616e646f6d508e518e66f0ef50a6558b3b6be875b53f68646967657374494418196c656c656d656e7456616c7565664d697272656e71656c656d656e744964656e7469666965727266616d696c795f6e616d655f6c6174696e31"
+    },
+    {
+      "namespace": "org.iso.23220.1",
+      "element_identifier": "given_name_latin1",
+      "digest_id": 26,
+      "digest_offset": 1126,
+      "issuer_signed_item_bytes_len": 95,
+      "issuer_signed_item_bytes_hex": "d818585ba46672616e646f6d50ce0e714dd71615ae66c2b6a77d9455fc686469676573744944181a6c656c656d656e7456616c75656548656c656e71656c656d656e744964656e74696669657271676976656e5f6e616d655f6c6174696e31"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "person_id",
+      "digest_id": 0,
+      "digest_offset": 1837,
+      "issuer_signed_item_bytes_len": 88,
+      "issuer_signed_item_bytes_hex": "d8185854a46672616e646f6d5004527e8619e259ca05a907a571f3b3bd686469676573744944006c656c656d656e7456616c7565677069642d31303071656c656d656e744964656e74696669657269706572736f6e5f6964"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "birth_country",
+      "digest_id": 1,
+      "digest_offset": 1872,
+      "issuer_signed_item_bytes_len": 87,
+      "issuer_signed_item_bytes_hex": "d8185853a46672616e646f6d506b650a53a8790db2d085b4cdeb48ba79686469676573744944016c656c656d656e7456616c756562534571656c656d656e744964656e7469666965726d62697274685f636f756e747279"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "birth_state",
+      "digest_id": 2,
+      "digest_offset": 1907,
+      "issuer_signed_item_bytes_len": 92,
+      "issuer_signed_item_bytes_hex": "d8185858a46672616e646f6d5016098c16c080efa49cc0ea21799acab4686469676573744944026c656c656d656e7456616c75656953746f636b686f6c6d71656c656d656e744964656e7469666965726b62697274685f7374617465"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "birth_city",
+      "digest_id": 3,
+      "digest_offset": 1942,
+      "issuer_signed_item_bytes_len": 91,
+      "issuer_signed_item_bytes_hex": "d8185857a46672616e646f6d503b7755643eee65d7e534c3fd16a4c6be686469676573744944036c656c656d656e7456616c75656953746f636b686f6c6d71656c656d656e744964656e7469666965726a62697274685f63697479"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "administrative_number",
+      "digest_id": 4,
+      "digest_offset": 1977,
+      "issuer_signed_item_bytes_len": 100,
+      "issuer_signed_item_bytes_hex": "d8185860a46672616e646f6d50d85870a39e18ac0df127b8413f1aec02686469676573744944046c656c656d656e7456616c75656761646d2d31303071656c656d656e744964656e7469666965727561646d696e6973747261746976655f6e756d626572"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "resident_street",
+      "digest_id": 5,
+      "digest_offset": 2012,
+      "issuer_signed_item_bytes_len": 96,
+      "issuer_signed_item_bytes_hex": "d818585ca46672616e646f6d5058db38b137defba42a1140db5959f8da686469676573744944056c656c656d656e7456616c75656954756c65676174616e71656c656d656e744964656e7469666965726f7265736964656e745f737472656574"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "resident_house_number",
+      "digest_id": 6,
+      "digest_offset": 2047,
+      "issuer_signed_item_bytes_len": 95,
+      "issuer_signed_item_bytes_hex": "d818585ba46672616e646f6d50c3c5e08ebbad99c2673de1465e9a6125686469676573744944066c656c656d656e7456616c756562313171656c656d656e744964656e746966696572757265736964656e745f686f7573655f6e756d626572"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "travel_document_type",
+      "digest_id": 7,
+      "digest_offset": 2082,
+      "issuer_signed_item_bytes_len": 93,
+      "issuer_signed_item_bytes_hex": "d8185859a46672616e646f6d508b1faacbd26b06cf7cd23dc011c01716686469676573744944076c656c656d656e7456616c7565615071656c656d656e744964656e7469666965727474726176656c5f646f63756d656e745f74797065"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "travel_document_number",
+      "digest_id": 8,
+      "digest_offset": 2117,
+      "issuer_signed_item_bytes_len": 103,
+      "issuer_signed_item_bytes_hex": "d8185863a46672616e646f6d50ad42958192ee2dd8a926c07ad153b36a686469676573744944086c656c656d656e7456616c75656953453132333435363771656c656d656e744964656e7469666965727674726176656c5f646f63756d656e745f6e756d626572"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "travel_document_mrz",
+      "digest_id": 9,
+      "digest_offset": 2152,
+      "issuer_signed_item_bytes_len": 136,
+      "issuer_signed_item_bytes_hex": "d8185884a46672616e646f6d505a0b562fa92740f9535c45b81f390bdf686469676573744944096c656c656d656e7456616c7565782c503c5357454d495252454e3c3c48454c454e3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c71656c656d656e744964656e7469666965727374726176656c5f646f63756d656e745f6d727a"
+    },
+    {
+      "namespace": "org.iso.23220.photoid.1",
+      "element_identifier": "resident_state",
+      "digest_id": 10,
+      "digest_offset": 2187,
+      "issuer_signed_item_bytes_len": 95,
+      "issuer_signed_item_bytes_hex": "d818585ba46672616e646f6d50a9b2d556e5dd30de8058cf67486e3a326864696765737449440a6c656c656d656e7456616c75656953746f636b686f6c6d71656c656d656e744964656e7469666965726e7265736964656e745f7374617465"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "version",
+      "digest_id": 0,
+      "digest_offset": 1182,
+      "issuer_signed_item_bytes_len": 82,
+      "issuer_signed_item_bytes_hex": "d818584ea46672616e646f6d504580e37627377b795a499b4122c0a031686469676573744944006c656c656d656e7456616c756563312e3071656c656d656e744964656e7469666965726776657273696f6e"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "sod",
+      "digest_id": 1,
+      "digest_offset": 1217,
+      "issuer_signed_item_bytes_len": 79,
+      "issuer_signed_item_bytes_hex": "d818584ba46672616e646f6d50b96a2ea63358b476ed67d3e18e0139c2686469676573744944016c656c656d656e7456616c7565443082010071656c656d656e744964656e74696669657263736f64"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg1",
+      "digest_id": 2,
+      "digest_offset": 1252,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d50baac8705c8383813516db5ba1702a719686469676573744944026c656c656d656e7456616c756542615b71656c656d656e744964656e74696669657263646731"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg2",
+      "digest_id": 3,
+      "digest_offset": 1287,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d50db747c2b63009abcd9a0b54964265009686469676573744944036c656c656d656e7456616c756542758271656c656d656e744964656e74696669657263646732"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg3",
+      "digest_id": 4,
+      "digest_offset": 1322,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d50d9c1f79723d559cdbc1699798bb91c18686469676573744944046c656c656d656e7456616c756542631071656c656d656e744964656e74696669657263646733"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg4",
+      "digest_id": 5,
+      "digest_offset": 1357,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d5074e13a3b612112e9f048a376b2943acd686469676573744944056c656c656d656e7456616c756542761071656c656d656e744964656e74696669657263646734"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg5",
+      "digest_id": 6,
+      "digest_offset": 1392,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d5081400dea859eaf354436ec218ae7ebe2686469676573744944066c656c656d656e7456616c756542651071656c656d656e744964656e74696669657263646735"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg6",
+      "digest_id": 7,
+      "digest_offset": 1427,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d5012694710219de5f94c54861b685b5452686469676573744944076c656c656d656e7456616c756542661071656c656d656e744964656e74696669657263646736"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg7",
+      "digest_id": 8,
+      "digest_offset": 1462,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d5002299c9c0f3308848f260ff9cc9cad68686469676573744944086c656c656d656e7456616c756542671071656c656d656e744964656e74696669657263646737"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg8",
+      "digest_id": 9,
+      "digest_offset": 1497,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d5057f080f6c2b8dc2356fd8670fe8a498e686469676573744944096c656c656d656e7456616c756542681071656c656d656e744964656e74696669657263646738"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg9",
+      "digest_id": 10,
+      "digest_offset": 1532,
+      "issuer_signed_item_bytes_len": 77,
+      "issuer_signed_item_bytes_hex": "d8185849a46672616e646f6d50786ef81e36ccacdcbad561f89721c0066864696765737449440a6c656c656d656e7456616c756542691071656c656d656e744964656e74696669657263646739"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg10",
+      "digest_id": 11,
+      "digest_offset": 1567,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d5080a5c3c5cf01dfa6ec1cb1bde874b16a6864696765737449440b6c656c656d656e7456616c7565426a1071656c656d656e744964656e7469666965726464673130"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg11",
+      "digest_id": 12,
+      "digest_offset": 1602,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d50ecf42bd298765be9c4fdb0ff1cc47c176864696765737449440c6c656c656d656e7456616c7565426b1071656c656d656e744964656e7469666965726464673131"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg12",
+      "digest_id": 13,
+      "digest_offset": 1637,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d5006a684bdeef8e3a63ce1451f0d9be03d6864696765737449440d6c656c656d656e7456616c7565426c1071656c656d656e744964656e7469666965726464673132"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg13",
+      "digest_id": 14,
+      "digest_offset": 1672,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d500908d136e324be82ec30ca54121a00ed6864696765737449440e6c656c656d656e7456616c7565426d1071656c656d656e744964656e7469666965726464673133"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg14",
+      "digest_id": 15,
+      "digest_offset": 1707,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d50fbbc1b1d490ab8b3478574b485cc0b4b6864696765737449440f6c656c656d656e7456616c7565426e1071656c656d656e744964656e7469666965726464673134"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg15",
+      "digest_id": 16,
+      "digest_offset": 1742,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d50fef48ca7ccb52beb817098ba24546709686469676573744944106c656c656d656e7456616c7565426f1071656c656d656e744964656e7469666965726464673135"
+    },
+    {
+      "namespace": "org.iso.23220.dtc.1",
+      "element_identifier": "dg16",
+      "digest_id": 17,
+      "digest_offset": 1777,
+      "issuer_signed_item_bytes_len": 78,
+      "issuer_signed_item_bytes_hex": "d818584aa46672616e646f6d5077cd2479b8135a7d7baa993f81baf00d686469676573744944116c656c656d656e7456616c756542701071656c656d656e744964656e7469666965726464673136"
+    }
+  ],
+  "ecdsa_witness": {
+    "qx_hex": "b4a4a882d18c982b8e9d7618b73130fd7ebb1e5120686273f3e88f12dd71c719",
+    "qy_hex": "5e8268d3888dd9066a6829ecfb9a0b10313ebf76860ea6122006134a76202c47",
+    "r_hex": "9b47c1aa4a2bc0bd158366cf98f208b361360eac48b48c3991f076033b0b39bc",
+    "s_hex": "914349296d34201c1a5c1be4366335d8cb5f52b48661ac42e517ed2cb41c2df8",
+    "s_inv_hex": "5cefc2a54598636031485b296ba10a00dbbbcfd8641d13cc9fd63a4f3df1edb3"
+  }
+}
