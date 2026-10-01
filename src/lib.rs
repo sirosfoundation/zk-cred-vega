@@ -28,7 +28,7 @@ pub mod nonnative;
 pub mod offset_bind;
 pub mod onehot_cursor;
 pub mod p256_ecc;
-pub mod pid_age;
+pub mod mdoc_age;
 pub mod sha256_var;
 
 #[cfg(feature = "uniffi")]
