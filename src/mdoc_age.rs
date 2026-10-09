@@ -205,7 +205,7 @@ impl DateEncoding {
       DateEncoding::PhotoIdMap => b"\xa1\x6abirth_date\xd9\x03\xec\x6a",
     }
   }
-  fn date_rel(self) -> usize {
+  pub fn date_rel(self) -> usize {
     VALUE_KEY_LEN + self.prefix().len()
   }
   fn identifier_rel(self) -> usize {
@@ -506,13 +506,42 @@ where
 /// a circuit variable and returned in [`MdocAgeOutputs`] for the caller to
 /// `inputize`; see that type's docs for why every returned field has to
 /// be made public.
-pub fn synthesize<Scalar, CS>(
+impl MdocAgeWitness {
+  /// The ten ASCII date characters the circuit will compare, read from
+  /// the item the same way the circuit reads them. Returns `None` if the
+  /// witness is malformed; `synthesize` rejects those separately.
+  pub fn birth_date_bytes(&self) -> Option<[u8; 10]> {
+    let at = self.element_value_key_offset + self.date_encoding.date_rel();
+    self.item_bytes.get(at..at + 10)?.try_into().ok()
+  }
+}
+
+/// What the credential half of the circuit establishes, handed to the
+/// session half.
+///
+/// The split is not cosmetic: everything here depends only on the
+/// credential, so `vega_sc_zkp` can commit to it once in `precommitted`
+/// and reuse it across presentations, while the session half re-runs per
+/// verifier. Putting the device-auth digest or the cutoff on this side
+/// would invalidate that cache on every request.
+pub struct CredentialBinding<Scalar: ff::PrimeField> {
+  pub issuer_qx: AllocatedNum<Scalar>,
+  pub issuer_qy: AllocatedNum<Scalar>,
+  pub doc_type: Vec<AllocatedNum<Scalar>>,
+  pub namespace: Vec<AllocatedNum<Scalar>>,
+  /// The holder's device key. Private — see [`MdocAgeOutputs`].
+  pub device_key: (AllocatedNum<Scalar>, AllocatedNum<Scalar>),
+  /// The ten ASCII characters of the issuer-signed birthdate. Private.
+  pub birth_date: Vec<AllocatedNum<Scalar>>,
+}
+
+/// The credential-bound half: everything provable without knowing which
+/// verifier is asking or what threshold they want.
+pub fn synthesize_credential<Scalar, CS>(
   cs: &mut CS,
   witness: &MdocAgeWitness,
   ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
-  cutoff: &[u8; 10],
-  device_auth_digest: &[u8; 32],
-) -> Result<MdocAgeOutputs<Scalar>, SynthesisError>
+) -> Result<CredentialBinding<Scalar>, SynthesisError>
 where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
@@ -635,6 +664,55 @@ where
     witness.date_encoding,
   )?;
 
+
+  if witness.namespace.len() > NAMESPACE_OUT_BYTES {
+    return Err(offset_bind::reject(format!(
+      "namespace is {} bytes, over the {NAMESPACE_OUT_BYTES}-byte published width",
+      witness.namespace.len()
+    )));
+  }
+  let mut namespace_padded = witness.namespace.as_bytes().to_vec();
+  namespace_padded.resize(NAMESPACE_OUT_BYTES, 0);
+  let namespace_vars = namespace_padded
+    .iter()
+    .enumerate()
+    .map(|(i, &b)| {
+      let v = AllocatedNum::alloc(cs.namespace(|| format!("namespace byte {i}")), || Ok(Scalar::from(b as u64)))?;
+      cs.enforce(
+        || format!("namespace byte {i} matches the anchored literal"),
+        |lc| lc + v.get_variable() - (Scalar::from(b as u64), one),
+        |lc| lc + CS::one(),
+        |lc| lc,
+      );
+      Ok(v)
+    })
+    .collect::<Result<Vec<_>, SynthesisError>>()?;
+
+  Ok(CredentialBinding {
+    issuer_qx,
+    issuer_qy,
+    doc_type: binding.doc_type,
+    namespace: namespace_vars,
+    device_key: binding.device_key,
+    birth_date: date,
+  })
+}
+
+/// The session-bound half: the holder signs *this* verifier's digest, and
+/// the predicate is evaluated against *this* verifier's threshold.
+pub fn synthesize_session<Scalar, CS>(
+  cs: &mut CS,
+  device_key: &(AllocatedNum<Scalar>, AllocatedNum<Scalar>),
+  birth_date: &[AllocatedNum<Scalar>],
+  device_auth: &DeviceAuthWitness,
+  cutoff: &[u8; 10],
+  device_auth_digest: &[u8; 32],
+) -> Result<SessionOutputs<Scalar>, SynthesisError>
+where
+  Scalar: PrimeFieldBits,
+  CS: ConstraintSystem<Scalar>,
+{
+  let one = CS::one();
   // 6b. Holder binding: the device key the *issuer* bound into this
   //     credential has signed the verifier's own `DeviceAuthentication`
   //     digest.
@@ -651,14 +729,14 @@ where
   //     unlinkability this architecture exists to provide.
   let device_auth_bits = alloc_bits(cs, device_auth_digest, "device_auth")?;
   let device_auth_bn = crate::mdoc_core::bits_be_to_bignat::<Scalar, CS>(&device_auth_bits)?;
-  let (device_qx, device_qy) = binding.device_key.clone();
+  let (device_qx, device_qy) = device_key.clone();
   crate::ecdsa::verify_ecdsa_p256_with_digest(
     cs.namespace(|| "device auth"),
     &device_qx,
     &device_qy,
-    &witness.device_auth.r,
-    &witness.device_auth.s,
-    &witness.device_auth.s_inv,
+    &device_auth.r,
+    &device_auth.s,
+    &device_auth.s_inv,
     &device_auth_bn,
   )?;
   // Packed for the caller to inputize; the verifier checks it equals the
@@ -691,47 +769,47 @@ where
     .enumerate()
     .map(|(i, &b)| AllocatedNum::alloc(cs.namespace(|| format!("cutoff byte {i}")), || Ok(Scalar::from(b as u64))))
     .collect::<Result<Vec<_>, _>>()?;
-  let old_enough = date_not_after(cs.namespace(|| "age"), &date, &cutoff_vars)?;
+  let old_enough = date_not_after(cs.namespace(|| "age"), birth_date, &cutoff_vars)?;
 
-  // CIRCUIT-03. The namespace is already bound to the credential by the
-  // anchor literal that `bind_digest_region` pins; allocating it here is
-  // what carries it out to the verifier, so the accepted statement names
-  // the namespace rather than leaving it implicit. Allocated from the
-  // same string the literal was built from, and constrained to it, so
-  // the two cannot drift.
-  if witness.namespace.len() > NAMESPACE_OUT_BYTES {
-    return Err(offset_bind::reject(format!(
-      "namespace is {} bytes, over the {NAMESPACE_OUT_BYTES}-byte published width",
-      witness.namespace.len()
-    )));
-  }
-  let mut namespace_padded = witness.namespace.as_bytes().to_vec();
-  namespace_padded.resize(NAMESPACE_OUT_BYTES, 0);
-  let namespace_vars = namespace_padded
-    .iter()
-    .enumerate()
-    .map(|(i, &b)| {
-      let v = AllocatedNum::alloc(cs.namespace(|| format!("namespace byte {i}")), || Ok(Scalar::from(b as u64)))?;
-      cs.enforce(
-        || format!("namespace byte {i} matches the anchored literal"),
-        |lc| lc + v.get_variable() - (Scalar::from(b as u64), one),
-        |lc| lc + CS::one(),
-        |lc| lc,
-      );
-      Ok(v)
-    })
-    .collect::<Result<Vec<_>, SynthesisError>>()?;
 
+
+
+  Ok(SessionOutputs { cutoff: cutoff_vars, old_enough, device_auth_digest: device_auth_packed })
+}
+
+/// The session half's results.
+pub struct SessionOutputs<Scalar: ff::PrimeField> {
+  pub cutoff: Vec<AllocatedNum<Scalar>>,
+  pub old_enough: Boolean,
+  pub device_auth_digest: Vec<AllocatedNum<Scalar>>,
+}
+
+/// Both halves in one call. The circuit wrapper splits them; everything
+/// else (tests, the cost example) wants the whole statement at once.
+pub fn synthesize<Scalar, CS>(
+  cs: &mut CS,
+  witness: &MdocAgeWitness,
+  ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
+  cutoff: &[u8; 10],
+  device_auth_digest: &[u8; 32],
+) -> Result<MdocAgeOutputs<Scalar>, SynthesisError>
+where
+  Scalar: PrimeFieldBits,
+  CS: ConstraintSystem<Scalar>,
+{
+  let cred = synthesize_credential(cs, witness, ecdsa)?;
+  let sess = synthesize_session(cs, &cred.device_key, &cred.birth_date, &witness.device_auth, cutoff, device_auth_digest)?;
   Ok(MdocAgeOutputs {
-    doc_type: binding.doc_type,
-    issuer_qx,
-    issuer_qy,
-    cutoff: cutoff_vars,
-    namespace: namespace_vars,
-    old_enough,
-    device_auth_digest: device_auth_packed,
+    doc_type: cred.doc_type,
+    issuer_qx: cred.issuer_qx,
+    issuer_qy: cred.issuer_qy,
+    cutoff: sess.cutoff,
+    namespace: cred.namespace,
+    old_enough: sess.old_enough,
+    device_auth_digest: sess.device_auth_digest,
   })
 }
+
 
 #[cfg(test)]
 mod tests {
