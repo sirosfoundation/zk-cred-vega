@@ -385,6 +385,10 @@ struct Fixture {
   namespace: String,
   salt_bytes: usize,
   date_encoding: String,
+  /// The holder's device private key, so tests can sign any verifier
+  /// digest. A real wallet keeps this in secure hardware.
+  device_private_key_hex: String,
+  device_key_usable: bool,
   element_value_key_offset: usize,
   sig_structure_len: usize,
   sig_structure_hex: String,
@@ -457,10 +461,15 @@ fn gen_doc(spec: DocSpec) {
   ns_order.sort_by_key(|&i| (ns_regions[i].name.len(), ns_regions[i].name));
 
   let signed_ts = "2026-10-01T00:00:00Z";
-  let mut device_x = [0u8; 32];
-  let mut device_y = [0u8; 32];
-  rng.fill_bytes(&mut device_x);
-  rng.fill_bytes(&mut device_y);
+  // A real device keypair. The holder proves possession of its private
+  // half over the verifier's DeviceAuthentication digest, so the fixture
+  // has to carry a key that actually works rather than random bytes.
+  let mut device_key_bytes = [0u8; 32];
+  rng.fill_bytes(&mut device_key_bytes);
+  let device_sk = SigningKey::from_bytes(&device_key_bytes.into()).expect("valid scalar");
+  let device_point = VerifyingKey::from(&device_sk).to_encoded_point(false);
+  let mut device_x: [u8; 32] = device_point.x().unwrap().as_slice().try_into().unwrap();
+  let device_y: [u8; 32] = device_point.y().unwrap().as_slice().try_into().unwrap();
 
   let forged = if spec.plant_forged_digest_in_device_key {
     let mut salt = vec![0u8; spec.salt_bytes];
@@ -602,6 +611,8 @@ fn gen_doc(spec: DocSpec) {
     doc_type: spec.doc_type.to_string(),
     namespace: spec.target_ns.to_string(),
     salt_bytes: spec.salt_bytes,
+    device_private_key_hex: hex::encode(device_key_bytes),
+    device_key_usable: !spec.plant_forged_digest_in_device_key,
     date_encoding: if spec.photo_id_date_map { "PhotoIdMap".into() } else { "Bare".into() },
     element_value_key_offset: value_key_offset,
     sig_structure_len: sig.len(),

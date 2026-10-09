@@ -14,7 +14,7 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
-use zk_cred_vega::mdoc_age::{synthesize, DateEncoding, MdocAgeWitness};
+use zk_cred_vega::mdoc_age::{synthesize, DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 use zk_cred_vega::offset_bind::Landmarks;
 use zk_cred_vega::Engine_;
 
@@ -28,7 +28,30 @@ type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 const CUTOFF: &[u8; 10] = b"2008-10-01";
 
 /// Every document type the circuit is meant to serve.
+/// A stand-in for the digest a verifier computes over
+/// `DeviceAuthentication = ["DeviceAuthentication", SessionTranscript,
+/// DocType, DeviceNameSpacesBytes]` (ISO 18013-5 §9.1.3.4). Its content
+/// does not matter to the circuit; that it is the *verifier's* choice
+/// is the whole point.
+const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
+
 const ALL_DOCS: [&str; 4] = ["mdl_iso18013", "pid_arf18", "photo_id_23220", "photo_id_23220_bare_date"];
+
+/// Signs a verifier digest with the holder's device key, the way a
+/// wallet's secure element would.
+fn sign_device_auth(private_key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
+  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+  let bytes: [u8; 32] = hex::decode(private_key_hex).unwrap().try_into().unwrap();
+  let sk = SigningKey::from_bytes(&bytes.into()).unwrap();
+  let sig: Signature = sk.sign_prehash(digest).unwrap();
+  let n = zk_cred_vega::p256_ecc::p256_order();
+  let s_val = BigInt::from_bytes_be(Sign::Plus, &sig.s().to_bytes());
+  DeviceAuthWitness {
+    r: BigInt::from_bytes_be(Sign::Plus, &sig.r().to_bytes()),
+    s: s_val.clone(),
+    s_inv: s_val.modpow(&(n.clone() - BigInt::from(2)), &n),
+  }
+}
 
 struct Loaded {
   witness: MdocAgeWitness,
@@ -63,6 +86,8 @@ fn load(name: &str) -> Loaded {
     z: BigInt::from_bytes_be(Sign::Plus, &z),
   };
 
+  let device_auth = sign_device_auth(json["device_private_key_hex"].as_str().unwrap(), SESSION);
+
   Loaded {
     witness: MdocAgeWitness {
       sig_structure: sig,
@@ -84,6 +109,7 @@ fn load(name: &str) -> Loaded {
         "PhotoIdMap" => DateEncoding::PhotoIdMap,
         _ => DateEncoding::Bare,
       },
+      device_auth,
     },
     ecdsa,
     json,
@@ -103,7 +129,7 @@ fn every_document_type_proves_age_through_the_same_circuit() {
   for name in ALL_DOCS {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).unwrap_or_else(|e| panic!("{name}: {e:?}"));
     assert!(cs.is_satisfied(), "{name}: unsatisfied at {:?}", cs.which_is_unsatisfied());
     assert!(out.old_enough.get_value().unwrap(), "{name}: born 1996-01-30, cutoff 2008-10-01");
   }
@@ -122,7 +148,7 @@ fn all_document_types_produce_an_identical_circuit_shape() {
   for name in ALL_DOCS {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF).expect("synthesis");
+    synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "{name}: unsatisfied");
     shapes.push((name, cs.num_constraints(), cs.num_inputs()));
   }
@@ -150,7 +176,7 @@ fn the_circuit_shape_does_not_depend_on_the_cutoff() {
   let mut shapes = Vec::new();
   for (cutoff, expected) in [(b"2008-10-01", true), (b"1990-01-01", false)] {
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff).expect("synthesis");
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, SESSION).expect("synthesis");
     assert!(cs.is_satisfied());
     assert_eq!(out.old_enough.get_value().unwrap(), expected);
     shapes.push((cs.num_constraints(), cs.num_inputs()));
@@ -187,7 +213,7 @@ fn a_digest_planted_in_the_device_key_is_rejected() {
   attack.digest_offset = planted;
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let out = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF).expect("synthesis succeeds — this is a soundness check");
+  let out = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis succeeds — this is a soundness check");
   assert!(!out.old_enough.get_value().unwrap(), "2015-01-01 is after the cutoff");
   let failed = cs.which_is_unsatisfied().expect("the planted digest must not satisfy the circuit");
   assert!(failed.contains("inside the region"), "expected the region range-bind to reject this, got {failed}");
@@ -200,7 +226,7 @@ fn the_binding_rejects_by_location_not_by_hash() {
   let mut attack = l.witness.clone();
   attack.digest_offset = l.witness.landmarks.device_key_info - 31;
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF).expect("synthesis");
+  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
   assert!(cs.which_is_unsatisfied().is_some(), "a window overrunning the region end must be rejected");
 }
 
@@ -217,7 +243,7 @@ fn a_digest_before_the_namespace_sub_map_is_rejected() {
   let mut attack = l.witness.clone();
   attack.digest_offset = l.witness.landmarks.region_start - 8;
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF).expect("synthesis");
+  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
   assert!(cs.which_is_unsatisfied().is_some(), "a digest before the namespace's entries must be rejected");
 }
 
@@ -236,7 +262,7 @@ fn a_proof_is_bound_to_its_namespace_and_entry_count() {
     // Either outcome is a rejection: an anchor literal that cannot
     // match leaves the system unsatisfied, and a shape the binding
     // refuses outright comes back as an error.
-    if synthesize(&mut cs, &w, &l.ecdsa, CUTOFF).is_ok() {
+    if synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, SESSION).is_ok() {
       assert!(cs.which_is_unsatisfied().is_some(), "a mismatched {label} must not be provable");
     }
   }
@@ -249,7 +275,7 @@ fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
   let mut wrong = l.witness.clone();
   wrong.doc_type = "org.iso.18013.5.1.mDL".to_string();
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  match synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF) {
+  match synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, SESSION) {
     Ok(_) => panic!("a docType the issuer did not sign must be rejected"),
     Err(e) => assert!(matches!(e, bellpepper_core::SynthesisError::Unsatisfiable), "got {e:?}"),
   }
@@ -264,7 +290,7 @@ fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
 fn the_issuer_key_and_cutoff_reach_the_caller() {
   let l = load("mdl_iso18013");
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF).expect("synthesis");
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
   assert!(cs.is_satisfied());
   assert_eq!(out.issuer_qx.get_value().unwrap(), l.ecdsa.qx);
   assert_eq!(out.issuer_qy.get_value().unwrap(), l.ecdsa.qy);
@@ -286,7 +312,7 @@ fn an_item_read_at_the_wrong_salt_offset_is_rejected() {
   let mut wrong = l.witness.clone();
   wrong.element_value_key_offset = 56; // where a 32-byte salt would put it
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  if synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF).is_ok() {
+  if synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, SESSION).is_ok() {
     assert!(cs.which_is_unsatisfied().is_some(), "the wrong salt offset must not be provable");
   }
 }
@@ -312,11 +338,106 @@ fn malformed_witnesses_return_errors_rather_than_panicking() {
     let mut w = l.witness.clone();
     mutate(&mut w);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synthesize(&mut cs, &w, &l.ecdsa, CUTOFF).map(|_| ())));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, SESSION).map(|_| ())));
     match result {
       Err(_) => panic!("{name}: panicked instead of returning an error"),
       Ok(Ok(())) => panic!("{name}: was accepted, but the witness is malformed"),
       Ok(Err(e)) => assert!(matches!(e, bellpepper_core::SynthesisError::Unsatisfiable), "{name}: got {e:?}"),
     }
   }
+}
+
+// ---- Holder binding, session binding, unlinkability -----------------
+//
+// The three gaps an external review raised against the r12 circuit. r12
+// proved "this issuer signed these claims" and nothing more: it never
+// exercised the device key, took no verifier input, and published the
+// device key, the validity timestamps and every digestID as public
+// values. These tests are what stop any of that recurring here.
+
+/// Possessing the credential's bytes is not enough: you must hold the
+/// device private key the issuer bound into it.
+///
+/// This is the one that matters most. Without it, anyone with a copy of
+/// the signed bytes can mint presentations — including a verifier who
+/// received an earlier disclosure, who could then impersonate the holder
+/// to every other verifier.
+#[test]
+fn a_presentation_signed_by_the_wrong_device_key_is_rejected() {
+  let l = load("mdl_iso18013");
+  let attacker_key = "11".repeat(32); // a key the attacker controls, not the holder's
+
+  let mut impersonation = l.witness.clone();
+  impersonation.device_auth = sign_device_auth(&attacker_key, SESSION);
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &impersonation, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  assert!(
+    cs.which_is_unsatisfied().is_some(),
+    "holding the credential's bytes must not be enough to present it"
+  );
+}
+
+/// A proof is bound to one verifier's session and does not replay.
+///
+/// The holder signs the verifier's own `DeviceAuthentication` digest, so
+/// a proof made for one session fails against any other. r12 took no
+/// verifier input at all, which made its proofs replayable verbatim.
+#[test]
+fn a_proof_does_not_replay_to_a_different_session() {
+  let l = load("mdl_iso18013"); // device_auth signed over SESSION
+  const OTHER: &[u8; 32] = b"a-different-verifier-session-002";
+  assert_ne!(SESSION, OTHER);
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, OTHER).expect("synthesis");
+  assert!(
+    cs.which_is_unsatisfied().is_some(),
+    "a proof made for one session must not satisfy another"
+  );
+}
+
+/// The device key never becomes a public value.
+///
+/// It is the holder binding's *input*, not its output. Publishing it is a
+/// stable per-credential identifier that lets any two verifiers link
+/// every presentation of that credential — which is exactly what r12 did,
+/// alongside the validity timestamps and every digestID.
+#[test]
+fn the_device_key_is_never_exposed_to_the_verifier() {
+  use ff::Field;
+  let l = load("mdl_iso18013");
+  let json = &l.json;
+  let sig = &l.witness.sig_structure;
+  let x_at = json["landmarks"]["device_key_x_offset"].as_u64().unwrap() as usize;
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  assert!(cs.is_satisfied());
+
+  // Everything the caller is told to make public.
+  let mut exposed: Vec<Scalar> = Vec::new();
+  exposed.extend(out.doc_type.iter().map(|n| n.get_value().unwrap()));
+  exposed.extend(out.cutoff.iter().map(|n| n.get_value().unwrap()));
+  exposed.extend(out.device_auth_digest.iter().map(|n| n.get_value().unwrap()));
+  exposed.push(out.issuer_qx.get_value().unwrap());
+  exposed.push(out.issuer_qy.get_value().unwrap());
+
+  // The device key's two coordinates, and each 16-byte half of them, must
+  // appear nowhere in that set.
+  for half in 0..4 {
+    let bytes = &sig[x_at + half * 16..x_at + half * 16 + 16];
+    let mut v = Scalar::ZERO;
+    for &b in bytes {
+      v = v * Scalar::from(256u64) + Scalar::from(b as u64);
+    }
+    assert!(!exposed.contains(&v), "a 16-byte half of the device key leaked into the public outputs");
+  }
+
+  // And the outputs are only what we intend: docType (2 packs), cutoff
+  // (10 bytes), device-auth digest (2 packs), issuer key (2).
+  assert_eq!(out.doc_type.len(), 2);
+  assert_eq!(out.cutoff.len(), 10);
+  assert_eq!(out.device_auth_digest.len(), 2);
+  assert_eq!(exposed.len(), 2 + 10 + 2 + 2, "the public surface grew — check it is intended");
 }

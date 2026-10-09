@@ -204,6 +204,17 @@ impl DateEncoding {
   const ALL: [DateEncoding; 2] = [DateEncoding::Bare, DateEncoding::PhotoIdMap];
 }
 
+/// The holder's signature over the verifier's `DeviceAuthentication`
+/// structure. Its public key is *not* here: it is read out of the
+/// issuer-signed bytes, so a prover cannot substitute a key of their own.
+#[derive(Clone, Debug)]
+pub struct DeviceAuthWitness {
+  pub r: num_bigint::BigInt,
+  pub s: num_bigint::BigInt,
+  /// `s^-1 mod n`, a hint the circuit checks rather than trusts.
+  pub s_inv: num_bigint::BigInt,
+}
+
 /// Everything the prover holds.
 #[derive(Clone, Debug)]
 pub struct MdocAgeWitness {
@@ -238,6 +249,10 @@ pub struct MdocAgeWitness {
   /// How the issuer encoded the date -- bare `full-date`, or the map
   /// form ISO/IEC 23220-2 allows for Photo ID.
   pub date_encoding: DateEncoding,
+  /// The holder's signature over the verifier's `DeviceAuthentication`
+  /// digest. This is what makes the presentation unforgeable by anyone
+  /// who merely *possesses* the credential's bytes.
+  pub device_auth: DeviceAuthWitness,
 }
 
 /// What the circuit establishes.
@@ -254,7 +269,15 @@ pub struct MdocAgeWitness {
 /// * without `cutoff` the verifier cannot tell which threshold was
 ///   actually compared against;
 /// * without `doc_type` it cannot tell an mDL from a PID;
-/// * without `old_enough` it learns nothing at all.
+/// * without `old_enough` it learns nothing at all;
+/// * without `device_auth_digest` the verifier cannot tell the proof was
+///   made for *their* session rather than replayed from another.
+///
+/// Note what is **not** here, deliberately: the holder's device key, the
+/// credential's validity timestamps, and the `digestID`s. Each is a
+/// stable per-credential identifier, and publishing any of them lets two
+/// verifiers link every presentation of that credential. An earlier
+/// circuit revision published all three.
 pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// The credential's `docType` key and value, packed 16 bytes at a time.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
@@ -267,6 +290,11 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   pub cutoff: Vec<AllocatedNum<Scalar>>,
   /// True iff the holder's birthdate is at or before `cutoff`.
   pub old_enough: Boolean,
+  /// The `DeviceAuthentication` digest the holder signed, packed 16 bytes
+  /// at a time. The verifier computes this themselves and must check the
+  /// proof used the same one -- that is what makes the proof fresh and
+  /// audience-bound rather than replayable.
+  pub device_auth_digest: Vec<AllocatedNum<Scalar>>,
 }
 
 fn alloc_bits<CS: ConstraintSystem<Scalar>, Scalar: ff::PrimeField>(
@@ -427,6 +455,7 @@ pub fn synthesize<Scalar, CS>(
   witness: &MdocAgeWitness,
   ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
   cutoff: &[u8; 10],
+  device_auth_digest: &[u8; 32],
 ) -> Result<MdocAgeOutputs<Scalar>, SynthesisError>
 where
   Scalar: PrimeFieldBits,
@@ -549,6 +578,56 @@ where
     witness.date_encoding,
   )?;
 
+  // 6b. Holder binding: the device key the *issuer* bound into this
+  //     credential has signed the verifier's own `DeviceAuthentication`
+  //     digest.
+  //
+  //     This is what separates "someone holds a copy of this credential"
+  //     from "I am its holder". Without it, anyone with the signed bytes
+  //     -- including a verifier who received an earlier disclosure --
+  //     can mint presentations indistinguishable from the real holder's.
+  //     And because the digest is the verifier's, the proof is bound to
+  //     one session and one audience instead of replaying anywhere.
+  //
+  //     The device key stays a private witness throughout. Publishing it
+  //     would be a stable per-credential identifier and would undo the
+  //     unlinkability this architecture exists to provide.
+  let device_auth_bits = alloc_bits(cs, device_auth_digest, "device_auth")?;
+  let device_auth_bn = crate::mdoc_core::bits_be_to_bignat::<Scalar, CS>(&device_auth_bits)?;
+  let (device_qx, device_qy) = binding.device_key.clone();
+  crate::ecdsa::verify_ecdsa_p256_with_digest(
+    cs.namespace(|| "device auth"),
+    &device_qx,
+    &device_qy,
+    &witness.device_auth.r,
+    &witness.device_auth.s,
+    &witness.device_auth.s_inv,
+    &device_auth_bn,
+  )?;
+  // Packed for the caller to inputize; the verifier checks it equals the
+  // digest they issued.
+  let mut device_auth_packed = Vec::with_capacity(2);
+  for p in 0..2 {
+    let mut lc = LinearCombination::<Scalar>::zero();
+    for i in 0..offset_bind::BYTES_PER_PACK {
+      let mut coeff = Scalar::ONE;
+      for _ in 0..(offset_bind::BYTES_PER_PACK - 1 - i) {
+        coeff *= Scalar::from(256u64);
+      }
+      lc = lc + &offset_bind::byte_lc::<Scalar>(&device_auth_bits, one, p * offset_bind::BYTES_PER_PACK + i, coeff);
+    }
+    let value = {
+      let mut acc = Scalar::ZERO;
+      for i in 0..offset_bind::BYTES_PER_PACK {
+        acc = acc * Scalar::from(256u64) + Scalar::from(device_auth_digest[p * offset_bind::BYTES_PER_PACK + i] as u64);
+      }
+      acc
+    };
+    let out = AllocatedNum::alloc(cs.namespace(|| format!("device auth pack {p}")), || Ok(value))?;
+    cs.enforce(|| format!("device auth pack {p} recombines"), |l| l + &lc, |l| l + one, |l| l + out.get_variable());
+    device_auth_packed.push(out);
+  }
+
   // 7. The predicate, against a cutoff the verifier chose.
   let cutoff_vars = cutoff
     .iter()
@@ -563,5 +642,6 @@ where
     issuer_qy,
     cutoff: cutoff_vars,
     old_enough,
+    device_auth_digest: device_auth_packed,
   })
 }

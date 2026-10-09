@@ -9,7 +9,7 @@
 use bellpepper_core::test_cs::TestConstraintSystem;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
-use zk_cred_vega::mdoc_age::{self, DateEncoding, MdocAgeWitness};
+use zk_cred_vega::mdoc_age::{self, DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 use zk_cred_vega::offset_bind::Landmarks;
 use zk_cred_vega::Engine_;
 
@@ -17,6 +17,8 @@ type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
 const COMP: usize = 25_840; // one SHA-256 compression, from constraint_census
 const STEP: usize = 112_605; // one ClaimDigestStepCircuit, likewise
+/// A stand-in for the verifier's DeviceAuthentication digest.
+const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
 
 fn main() {
   let docs = ["mdl_iso18013", "pid_arf18", "photo_id_23220", "photo_id_23220_bare_date"];
@@ -57,6 +59,19 @@ fn main() {
         "PhotoIdMap" => DateEncoding::PhotoIdMap,
         _ => DateEncoding::Bare,
       },
+      device_auth: {
+        use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+        let kb: [u8; 32] = hex::decode(json["device_private_key_hex"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let sk = SigningKey::from_bytes(&kb.into()).unwrap();
+        let sig: Signature = sk.sign_prehash(SESSION).unwrap();
+        let n = zk_cred_vega::p256_ecc::p256_order();
+        let sv = BigInt::from_bytes_be(Sign::Plus, &sig.s().to_bytes());
+        DeviceAuthWitness {
+          r: BigInt::from_bytes_be(Sign::Plus, &sig.r().to_bytes()),
+          s: sv.clone(),
+          s_inv: sv.modpow(&(n.clone() - BigInt::from(2)), &n),
+        }
+      },
     };
 
     let w = &json["ecdsa_witness"];
@@ -72,7 +87,7 @@ fn main() {
     };
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = mdoc_age::synthesize(&mut cs, &witness, &ecdsa, b"2008-10-01").expect("synthesis");
+    let out = mdoc_age::synthesize(&mut cs, &witness, &ecdsa, b"2008-10-01", SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "{name}: unsatisfied at {:?}", cs.which_is_unsatisfied());
     assert!(out.old_enough.get_value().unwrap());
 

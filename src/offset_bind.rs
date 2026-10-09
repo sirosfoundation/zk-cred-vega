@@ -158,8 +158,24 @@ fn map_header(n: usize) -> Vec<u8> {
   }
 }
 
-/// The literal that closes it: `6D "deviceKeyInfo"`.
-const DEVICE_KEY_INFO: &[u8] = b"\x6ddeviceKeyInfo";
+/// The literal that closes the table, extended through the holder's
+/// COSE_Key header: `6D "deviceKeyInfo" A1 69 "deviceKey" A4 01 02 20 01
+/// 21 58 20`.
+///
+/// Carrying the COSE header in the anchor does three jobs at once. It
+/// closes the digest table, it proves the key is an EC2 P-256 key
+/// (`kty: 2`, `crv: 1`) rather than something whose coordinates sit
+/// elsewhere, and it fixes the byte positions of `x` and `y` at constant
+/// deltas so the holder-binding gadget can read them without a second
+/// search. COSE's canonical integer-key order puts the labels at
+/// `01 < 20 < 21 < 22`, so this layout is the only one a conformant
+/// encoder produces for a P-256 key.
+const DEVICE_KEY_INFO: &[u8] = b"\x6ddeviceKeyInfo\xa1\x69deviceKey\xa4\x01\x02\x20\x01\x21\x58\x20";
+
+/// `x` starts immediately after [`DEVICE_KEY_INFO`].
+const DEVICE_KEY_X_DELTA: usize = DEVICE_KEY_INFO.len();
+/// `y` follows `x`'s 32 bytes plus its own `22 58 20` label and header.
+const DEVICE_KEY_Y_DELTA: usize = DEVICE_KEY_X_DELTA + 32 + 3;
 
 /// `67 "docType"`.
 const DOC_TYPE_KEY: &[u8] = b"\x67docType";
@@ -469,6 +485,14 @@ pub struct RegionBinding<Scalar: PrimeField> {
   /// The credential's `docType`, read from the signed bytes so a verifier
   /// learns which document type the proof is about.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
+  /// The holder's device public key, read out of the issuer-signed bytes.
+  ///
+  /// **Keep these private.** They are the holder binding's input, not its
+  /// output: proving possession of the matching private key is what makes
+  /// a presentation unforgeable, while publishing the key itself is a
+  /// stable per-credential identifier and destroys unlinkability. An
+  /// earlier circuit revision inputized exactly these two values.
+  pub device_key: (AllocatedNum<Scalar>, AllocatedNum<Scalar>),
 }
 
 /// What the prover claims the credential *is*, as opposed to where its
@@ -602,7 +626,7 @@ where
     native,
     landmarks.device_key_info,
     DEVICE_KEY_INFO,
-    1,
+    3,
     "deviceKeyInfo",
   )?;
   let region_end = end_window.offset.clone();
@@ -623,6 +647,53 @@ where
     landmarks.device_key_info - landmarks.region_start,
     16,
   )?;
+
+  // ---- The holder's device key, read but NOT revealed ---------------
+  // Both coordinates sit at constant deltas from the anchor, so their
+  // windows are selected and then *pinned* to those deltas rather than
+  // trusted: a free offset would let a prover read 32 bytes of their
+  // choosing and call them the device key.
+  let mut coords = Vec::with_capacity(2);
+  for (label, delta) in [("device key x", DEVICE_KEY_X_DELTA), ("device key y", DEVICE_KEY_Y_DELTA)] {
+    let at = landmarks.device_key_info + delta;
+    if at + 32 > native.len() {
+      return Err(reject(format!("{label} at {at} runs past the {}-byte buffer", native.len())));
+    }
+    let w = select_window::<Scalar, _>(
+      cs.namespace(|| label),
+      bits,
+      native,
+      &anchor_offsets(native.len()),
+      at,
+      32,
+    )?;
+    cs.enforce(
+      || format!("{label} sits at +{delta} from deviceKeyInfo"),
+      |lc| lc + &w.offset - &end_window.offset - (Scalar::from(delta as u64), CS::one()),
+      |lc| lc + CS::one(),
+      |lc| lc,
+    );
+    // Two 16-byte packs recombine into one 256-bit coordinate. A valid
+    // P-256 x or y is below the base field's modulus, so this cannot
+    // wrap for a well-formed credential -- and `check_on_curve` in the
+    // signature gadget rejects anything that is not a curve point.
+    let mut shift = Scalar::ONE;
+    for _ in 0..16 {
+      shift *= Scalar::from(256u64);
+    }
+    let value = w.packs[0].get_value().and_then(|hi| w.packs[1].get_value().map(|lo| hi * shift + lo));
+    let coord = AllocatedNum::alloc(cs.namespace(|| format!("{label} value")), || {
+      value.ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+      || format!("{label} recombines its packs"),
+      |lc| lc + (shift, w.packs[0].get_variable()) + w.packs[1].get_variable(),
+      |lc| lc + CS::one(),
+      |lc| lc + coord.get_variable(),
+    );
+    coords.push(coord);
+  }
+  let device_key = (coords[0].clone(), coords[1].clone());
 
   // ---- docType, read out for the verifier --------------------------
   let doc_type_header = tstr_header(shape.doc_type.len())?;
@@ -661,7 +732,7 @@ where
     "docType",
   )?;
 
-  Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs })
+  Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs, device_key })
 }
 
 #[cfg(test)]
