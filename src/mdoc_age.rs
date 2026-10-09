@@ -156,6 +156,21 @@ pub fn candidate_value_key_offsets() -> Vec<usize> {
 /// the end of it that depends on how the date is encoded.
 const VALUE_KEY_LEN: usize = 13;
 
+/// Fixed width of the exposed namespace, NUL-padded.
+///
+/// The namespace must be published at a constant length or the circuit's
+/// shape would depend on it: an mDL's `org.iso.18013.5.1` is 17
+/// characters and an EU PID's is 23, and allocating one variable per
+/// character made those two circuits differ by exactly 6 constraints --
+/// caught by `all_document_types_produce_an_identical_circuit_shape`
+/// while fixing CIRCUIT-03. 32 covers every namespace the anchor's own
+/// two-pack bound already admits.
+pub const NAMESPACE_OUT_BYTES: usize = 32;
+
+/// `71 "elementIdentifier" 6a "birth_date"` -- the trailing literal that
+/// proves the item is the attribute this circuit claims it is.
+const IDENTIFIER_LITERAL: &[u8] = b"\x71elementIdentifier\x6abirth_date";
+
 /// How an issuer encodes a `birth_date` `elementValue`.
 ///
 /// mDL and EU PID use a bare `full-date`. ISO/IEC 23220-2 §6.3.1.1.3
@@ -269,6 +284,8 @@ pub struct MdocAgeWitness {
 /// * without `cutoff` the verifier cannot tell which threshold was
 ///   actually compared against;
 /// * without `doc_type` it cannot tell an mDL from a PID;
+/// * without `namespace` it does not know which namespace the attribute
+///   came from, only which document type;
 /// * without `old_enough` it learns nothing at all;
 /// * without `device_auth_digest` the verifier cannot tell the proof was
 ///   made for *their* session rather than replayed from another.
@@ -288,7 +305,24 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   pub issuer_qy: AllocatedNum<Scalar>,
   /// The ten ASCII bytes of the threshold date the comparison used.
   pub cutoff: Vec<AllocatedNum<Scalar>>,
+  /// The namespace the attribute was read from, NUL-padded to
+  /// [`NAMESPACE_OUT_BYTES`] so the circuit's shape does not depend on
+  /// its length.
+  ///
+  /// Without this the accepted statement does not say *which* namespace
+  /// the `birth_date` came from. A Photo ID carries three, and the
+  /// region binding only rules out namespaces sorting before the claimed
+  /// one -- so a verifier that does not pin this is accepting a weaker
+  /// statement than it thinks.
+  pub namespace: Vec<AllocatedNum<Scalar>>,
   /// True iff the holder's birthdate is at or before `cutoff`.
+  ///
+  /// **Publishing this is not enough: the verifier must require the value
+  /// to be 1.** A circuit proving that a hidden age flag *exists* does
+  /// not prove that the flag is *true*. A caller that inputizes this bit
+  /// and never checks it accepts every holder, including those the
+  /// predicate rejected -- the proof is equally valid either way, because
+  /// computing the answer honestly is exactly what the circuit does.
   pub old_enough: Boolean,
   /// The `DeviceAuthentication` digest the holder signed, packed 16 bytes
   /// at a time. The verifier computes this themselves and must check the
@@ -323,10 +357,21 @@ fn alloc_bits<CS: ConstraintSystem<Scalar>, Scalar: ff::PrimeField>(
 /// [`element_value_key_offset`]). A prover who claims the wrong one has
 /// to make 56 bytes of `elementValue`/`full-date`/`elementIdentifier`
 /// literal appear at that position instead, which is a preimage problem.
-fn extract_birth_date<Scalar, CS>(
+///
+/// `item_active` is [`crate::sha256_var::sha256_var`]'s own view of which
+/// bytes it hashed. Every byte this function reads must be one of them,
+/// or the date compared would be padding the prover chose freely rather
+/// than issuer-signed content bound by the digest. A red-team pass found
+/// that unenforced: it was unreachable only because the smallest item a
+/// conformant issuer can emit is 73 bytes while the attack needs one of
+/// 60 or fewer -- a 13-byte margin resting on an arithmetic coincidence
+/// between the salt range and CBOR framing, which nothing asserted and
+/// which a wider `MAX_SALT_BYTES` or a new date encoding would erase.
+pub(crate) fn extract_birth_date<Scalar, CS>(
   mut cs: CS,
   item_bits: &[Boolean],
   item_bytes: &[u8],
+  item_active: &[Boolean],
   value_key_offset: usize,
   encoding: DateEncoding,
 ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
@@ -355,6 +400,17 @@ where
   )?;
 
   for (k, &(base, enc)) in candidates.iter().enumerate() {
+    // CIRCUIT-01: the last byte this candidate reads must be inside the
+    // hashed prefix. `msg_active` is a prefix mask, so pinning the last
+    // index pins every earlier one.
+    let last = base + enc.identifier_rel() + IDENTIFIER_LITERAL.len() - 1;
+    cs.enforce(
+      || format!("cand {k} is covered by the hashed prefix"),
+      |lc| lc + &sel[k].lc(one, Scalar::ONE),
+      |lc| lc + CS::one() - &item_active[last].lc(one, Scalar::ONE),
+      |lc| lc,
+    );
+
     let mut literals: Vec<(usize, u8)> = Vec::new();
     for (i, &b) in b"\x6celementValue".iter().enumerate() {
       literals.push((i, b));
@@ -362,7 +418,7 @@ where
     for (i, &b) in enc.prefix().iter().enumerate() {
       literals.push((VALUE_KEY_LEN + i, b));
     }
-    for (i, &b) in b"\x71elementIdentifier\x6abirth_date".iter().enumerate() {
+    for (i, &b) in IDENTIFIER_LITERAL.iter().enumerate() {
       literals.push((enc.identifier_rel() + i, b));
     }
     for (rel, expect) in literals {
@@ -555,7 +611,7 @@ where
   let mut item_padded = witness.item_bytes.clone();
   item_padded.resize(crate::MAX_CLAIM_BYTES_V1, 0);
   let item_bits = alloc_bits(cs, &item_padded, "item")?;
-  let (item_digest_bits, _) =
+  let (item_digest_bits, item_active) =
     crate::sha256_var::sha256_var(cs.namespace(|| "item hash"), &item_bits, witness.item_bytes.len())?;
   for (p, pack) in located.packs.iter().enumerate() {
     let mut lc = LinearCombination::<Scalar>::zero();
@@ -574,6 +630,7 @@ where
     cs.namespace(|| "extract"),
     &item_bits,
     &item_padded,
+    &item_active,
     witness.element_value_key_offset,
     witness.date_encoding,
   )?;
@@ -636,12 +693,121 @@ where
     .collect::<Result<Vec<_>, _>>()?;
   let old_enough = date_not_after(cs.namespace(|| "age"), &date, &cutoff_vars)?;
 
+  // CIRCUIT-03. The namespace is already bound to the credential by the
+  // anchor literal that `bind_digest_region` pins; allocating it here is
+  // what carries it out to the verifier, so the accepted statement names
+  // the namespace rather than leaving it implicit. Allocated from the
+  // same string the literal was built from, and constrained to it, so
+  // the two cannot drift.
+  if witness.namespace.len() > NAMESPACE_OUT_BYTES {
+    return Err(offset_bind::reject(format!(
+      "namespace is {} bytes, over the {NAMESPACE_OUT_BYTES}-byte published width",
+      witness.namespace.len()
+    )));
+  }
+  let mut namespace_padded = witness.namespace.as_bytes().to_vec();
+  namespace_padded.resize(NAMESPACE_OUT_BYTES, 0);
+  let namespace_vars = namespace_padded
+    .iter()
+    .enumerate()
+    .map(|(i, &b)| {
+      let v = AllocatedNum::alloc(cs.namespace(|| format!("namespace byte {i}")), || Ok(Scalar::from(b as u64)))?;
+      cs.enforce(
+        || format!("namespace byte {i} matches the anchored literal"),
+        |lc| lc + v.get_variable() - (Scalar::from(b as u64), one),
+        |lc| lc + CS::one(),
+        |lc| lc,
+      );
+      Ok(v)
+    })
+    .collect::<Result<Vec<_>, SynthesisError>>()?;
+
   Ok(MdocAgeOutputs {
     doc_type: binding.doc_type,
     issuer_qx,
     issuer_qy,
     cutoff: cutoff_vars,
+    namespace: namespace_vars,
     old_enough,
     device_auth_digest: device_auth_packed,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use bellpepper_core::{boolean::AllocatedBit, test_cs::TestConstraintSystem};
+  use ff::PrimeField;
+
+  type S = <crate::Engine_ as vega_prover::traits::Engine>::Scalar;
+
+  fn bits<CS: ConstraintSystem<S>>(cs: &mut CS, bytes: &[u8], tag: &str) -> Vec<Boolean> {
+    bytes
+      .iter()
+      .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1 == 1))
+      .enumerate()
+      .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("{tag} {i}")), Some(b)).map(Boolean::from).unwrap())
+      .collect()
+  }
+
+  /// Builds an item whose `birth_date` fields sit at `base`, padded to the
+  /// claim budget. Nothing else about it is well-formed; the point is to
+  /// exercise the extraction in isolation.
+  fn item_with_date_at(base: usize, enc: DateEncoding, date: &[u8; 10]) -> Vec<u8> {
+    let mut v = vec![0u8; crate::MAX_CLAIM_BYTES_V1];
+    v[base..base + VALUE_KEY_LEN].copy_from_slice(b"\x6celementValue");
+    let p = enc.prefix();
+    v[base + VALUE_KEY_LEN..base + VALUE_KEY_LEN + p.len()].copy_from_slice(p);
+    v[base + enc.date_rel()..base + enc.date_rel() + 10].copy_from_slice(date);
+    v[base + enc.identifier_rel()..base + enc.identifier_rel() + IDENTIFIER_LITERAL.len()]
+      .copy_from_slice(IDENTIFIER_LITERAL);
+    v
+  }
+
+  /// Honest positive control for the CIRCUIT-01 regression below: with a
+  /// `real_len` that covers the whole item, extraction succeeds.
+  #[test]
+  fn extraction_accepts_fields_inside_the_hashed_prefix() {
+    let base = element_value_key_offset(16, 1);
+    let enc = DateEncoding::Bare;
+    let item = item_with_date_at(base, enc, b"1996-01-30");
+    let real_len = enc.item_len(base);
+
+    let mut cs = TestConstraintSystem::<S>::new();
+    let ib = bits(&mut cs, &item, "item");
+    let (_, active) = crate::sha256_var::sha256_var(cs.namespace(|| "h"), &ib, real_len).unwrap();
+    let date = extract_birth_date(cs.namespace(|| "x"), &ib, &item, &active, base, enc).unwrap();
+    assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+    let got: Vec<u8> = date.iter().map(|d| d.get_value().unwrap().to_repr().as_ref()[0]).collect();
+    assert_eq!(&got[..], b"1996-01-30");
+  }
+
+  /// CIRCUIT-01: a date read from bytes the hash never covered must be
+  /// rejected.
+  ///
+  /// Every literal matches here — the item really does carry a
+  /// `birth_date` `full-date` at `base`. The only defect is that
+  /// `real_len` stops short, so those bytes are prover-chosen padding
+  /// rather than issuer-signed content bound by the digest. Before the
+  /// fix this was accepted.
+  #[test]
+  fn extraction_rejects_a_date_outside_the_hashed_prefix() {
+    let base = element_value_key_offset(16, 1);
+    let enc = DateEncoding::Bare;
+    let item = item_with_date_at(base, enc, b"1900-01-01");
+    // Hash only up to just before the date — everything the extraction
+    // reads from there on is free padding.
+    let real_len = base + enc.date_rel();
+
+    let mut cs = TestConstraintSystem::<S>::new();
+    let ib = bits(&mut cs, &item, "item");
+    let (_, active) = crate::sha256_var::sha256_var(cs.namespace(|| "h"), &ib, real_len).unwrap();
+    let _ = extract_birth_date(cs.namespace(|| "x"), &ib, &item, &active, base, enc).unwrap();
+
+    let failed = cs.which_is_unsatisfied().expect("a date outside the hashed prefix must be rejected");
+    assert!(
+      failed.contains("covered by the hashed prefix"),
+      "expected the coverage constraint to reject this, got {failed}"
+    );
+  }
 }

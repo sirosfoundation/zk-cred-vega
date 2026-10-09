@@ -177,6 +177,30 @@ const DEVICE_KEY_X_DELTA: usize = DEVICE_KEY_INFO.len();
 /// `y` follows `x`'s 32 bytes plus its own `22 58 20` label and header.
 const DEVICE_KEY_Y_DELTA: usize = DEVICE_KEY_X_DELTA + 32 + 3;
 
+/// Smallest number of bytes that can follow the `deviceKeyInfo` key in a
+/// conformant MSO: the key's own value (`A1 69 "deviceKey"` + a 75-byte
+/// P-256 COSE_Key) plus `digestAlgorithm` and its value. Measured against
+/// real fixtures, which put `deviceKeyInfo` exactly 124 bytes from the
+/// end of the `Sig_structure`.
+const MIN_BYTES_AFTER_DEVICE_KEY_INFO: usize = 124;
+
+// CIRCUIT-02. The device-key windows are read at a constant delta from
+// the `deviceKeyInfo` anchor, but anchors may only be searched over
+// `0..=len - MAX_ANCHOR_WINDOW`. If a credential pushes `deviceKeyInfo`
+// late enough, `y` lands past the last candidate and an *honest*
+// credential is rejected -- a completeness failure no honest-path test
+// would catch, because it only appears near the size budget.
+//
+// These two constants were chosen independently and the margin between
+// them was 8 bytes. Assert it, so raising `MAX_ANCHOR_WINDOW` or moving
+// the COSE layout fails the build instead of silently shrinking the
+// usable credential size.
+const _: () = assert!(
+  MAX_ANCHOR_WINDOW + DEVICE_KEY_Y_DELTA + 32 <= MIN_BYTES_AFTER_DEVICE_KEY_INFO + 32,
+  "a credential near the byte budget would push the deviceKey y window past the last \
+   anchor candidate, rejecting an honest credential"
+);
+
 /// `67 "docType"`.
 const DOC_TYPE_KEY: &[u8] = b"\x67docType";
 

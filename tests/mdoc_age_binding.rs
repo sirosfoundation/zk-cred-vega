@@ -419,6 +419,7 @@ fn the_device_key_is_never_exposed_to_the_verifier() {
   let mut exposed: Vec<Scalar> = Vec::new();
   exposed.extend(out.doc_type.iter().map(|n| n.get_value().unwrap()));
   exposed.extend(out.cutoff.iter().map(|n| n.get_value().unwrap()));
+  exposed.extend(out.namespace.iter().map(|n| n.get_value().unwrap()));
   exposed.extend(out.device_auth_digest.iter().map(|n| n.get_value().unwrap()));
   exposed.push(out.issuer_qx.get_value().unwrap());
   exposed.push(out.issuer_qy.get_value().unwrap());
@@ -439,5 +440,61 @@ fn the_device_key_is_never_exposed_to_the_verifier() {
   assert_eq!(out.doc_type.len(), 2);
   assert_eq!(out.cutoff.len(), 10);
   assert_eq!(out.device_auth_digest.len(), 2);
-  assert_eq!(exposed.len(), 2 + 10 + 2 + 2, "the public surface grew — check it is intended");
+  assert_eq!(out.namespace.len(), zk_cred_vega::mdoc_age::NAMESPACE_OUT_BYTES);
+  assert_eq!(
+    exposed.len(),
+    2 + 10 + zk_cred_vega::mdoc_age::NAMESPACE_OUT_BYTES + 2 + 2,
+    "the public surface grew — check it is intended"
+  );
+}
+
+/// CIRCUIT-03: the namespace is part of the accepted statement.
+///
+/// Without it the verifier learns the document type but not which
+/// namespace the `birth_date` came from. A Photo ID carries three, and
+/// the region binding only rules out namespaces sorting *before* the
+/// claimed one — so a verifier that cannot see this is accepting a
+/// weaker statement than it believes.
+#[test]
+fn the_namespace_is_part_of_the_accepted_statement() {
+  use ff::PrimeField;
+  for name in ALL_DOCS {
+    let l = load(name);
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+    assert!(cs.is_satisfied(), "{name}: unsatisfied");
+    let got: Vec<u8> = out.namespace.iter().map(|n| n.get_value().unwrap().to_repr().as_ref()[0]).collect();
+    let got = String::from_utf8(got.iter().copied().take_while(|&b| b != 0).collect()).unwrap();
+    assert_eq!(
+      got, l.witness.namespace,
+      "{name}: the exposed namespace must be the one the attribute was read from"
+    );
+  }
+  // And it really does distinguish: a Photo ID's birth_date namespace is
+  // not its docType, which is exactly the case the omission hid.
+  let photo = load("photo_id_23220");
+  assert_eq!(photo.witness.namespace, "org.iso.23220.1");
+  assert_ne!(photo.witness.namespace, photo.witness.doc_type);
+}
+
+/// CIRCUIT-04's behavioural half: the predicate is computed, not assumed.
+///
+/// The documentation now states that publishing `old_enough` is not
+/// enough and the verifier must require it to be 1. This pins the other
+/// side of that contract — that the bit really is the comparison's
+/// result, so a verifier who does check it learns something true.
+#[test]
+fn the_age_bit_is_computed_not_assumed() {
+  let l = load("mdl_iso18013"); // holder born 1996-01-30
+  for (cutoff, expected) in [(b"2008-10-01", true), (b"1990-01-01", false)] {
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, SESSION).expect("synthesis");
+    assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+    assert_eq!(
+      out.old_enough.get_value().unwrap(),
+      expected,
+      "cutoff {:?} should give {expected}",
+      std::str::from_utf8(cutoff).unwrap()
+    );
+  }
 }
