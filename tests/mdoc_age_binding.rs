@@ -27,6 +27,10 @@ type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 /// fixtures aged and start passing or failing for the wrong reason.
 const CUTOFF: &[u8; 10] = b"2008-10-01";
 
+/// The verifier's clock. Fixed, like `CUTOFF`, so these tests assert the
+/// same thing whenever they run; a real verifier uses its own.
+const NOW: &[u8; 20] = b"2026-10-10T12:00:00Z";
+
 /// Every document type the circuit is meant to serve.
 /// A stand-in for the digest a verifier computes over
 /// `DeviceAuthentication = ["DeviceAuthentication", SessionTranscript,
@@ -93,6 +97,7 @@ fn load(name: &str) -> Loaded {
       sig_structure: sig,
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
+      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -129,7 +134,7 @@ fn every_document_type_proves_age_through_the_same_circuit() {
   for name in ALL_DOCS {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).unwrap_or_else(|e| panic!("{name}: {e:?}"));
     assert!(cs.is_satisfied(), "{name}: unsatisfied at {:?}", cs.which_is_unsatisfied());
     assert!(out.old_enough.get_value().unwrap(), "{name}: born 1996-01-30, cutoff 2008-10-01");
   }
@@ -148,7 +153,7 @@ fn all_document_types_produce_an_identical_circuit_shape() {
   for name in ALL_DOCS {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+    synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "{name}: unsatisfied");
     shapes.push((name, cs.num_constraints(), cs.num_inputs()));
   }
@@ -176,7 +181,7 @@ fn the_circuit_shape_does_not_depend_on_the_cutoff() {
   let mut shapes = Vec::new();
   for (cutoff, expected) in [(b"2008-10-01", true), (b"1990-01-01", false)] {
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, SESSION).expect("synthesis");
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, NOW, SESSION).expect("synthesis");
     assert!(cs.is_satisfied());
     assert_eq!(out.old_enough.get_value().unwrap(), expected);
     shapes.push((cs.num_constraints(), cs.num_inputs()));
@@ -213,7 +218,7 @@ fn a_digest_planted_in_the_device_key_is_rejected() {
   attack.digest_offset = planted;
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let out = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis succeeds — this is a soundness check");
+  let out = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis succeeds — this is a soundness check");
   assert!(!out.old_enough.get_value().unwrap(), "2015-01-01 is after the cutoff");
   let failed = cs.which_is_unsatisfied().expect("the planted digest must not satisfy the circuit");
   assert!(failed.contains("inside the region"), "expected the region range-bind to reject this, got {failed}");
@@ -226,7 +231,7 @@ fn the_binding_rejects_by_location_not_by_hash() {
   let mut attack = l.witness.clone();
   attack.digest_offset = l.witness.landmarks.device_key_info - 31;
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
   assert!(cs.which_is_unsatisfied().is_some(), "a window overrunning the region end must be rejected");
 }
 
@@ -243,7 +248,7 @@ fn a_digest_before_the_namespace_sub_map_is_rejected() {
   let mut attack = l.witness.clone();
   attack.digest_offset = l.witness.landmarks.region_start - 8;
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  let _ = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
   assert!(cs.which_is_unsatisfied().is_some(), "a digest before the namespace's entries must be rejected");
 }
 
@@ -262,7 +267,7 @@ fn a_proof_is_bound_to_its_namespace_and_entry_count() {
     // Either outcome is a rejection: an anchor literal that cannot
     // match leaves the system unsatisfied, and a shape the binding
     // refuses outright comes back as an error.
-    if synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, SESSION).is_ok() {
+    if synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, NOW, SESSION).is_ok() {
       assert!(cs.which_is_unsatisfied().is_some(), "a mismatched {label} must not be provable");
     }
   }
@@ -275,7 +280,7 @@ fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
   let mut wrong = l.witness.clone();
   wrong.doc_type = "org.iso.18013.5.1.mDL".to_string();
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  match synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, SESSION) {
+  match synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, NOW, SESSION) {
     Ok(_) => panic!("a docType the issuer did not sign must be rejected"),
     Err(e) => assert!(matches!(e, bellpepper_core::SynthesisError::Unsatisfiable), "got {e:?}"),
   }
@@ -290,7 +295,7 @@ fn a_proof_cannot_name_a_doc_type_the_issuer_did_not_sign() {
 fn the_issuer_key_and_cutoff_reach_the_caller() {
   let l = load("mdl_iso18013");
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
   assert!(cs.is_satisfied());
   assert_eq!(out.issuer_qx.get_value().unwrap(), l.ecdsa.qx);
   assert_eq!(out.issuer_qy.get_value().unwrap(), l.ecdsa.qy);
@@ -312,7 +317,7 @@ fn an_item_read_at_the_wrong_salt_offset_is_rejected() {
   let mut wrong = l.witness.clone();
   wrong.element_value_key_offset = 56; // where a 32-byte salt would put it
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  if synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, SESSION).is_ok() {
+  if synthesize(&mut cs, &wrong, &l.ecdsa, CUTOFF, NOW, SESSION).is_ok() {
     assert!(cs.which_is_unsatisfied().is_some(), "the wrong salt offset must not be provable");
   }
 }
@@ -338,7 +343,7 @@ fn malformed_witnesses_return_errors_rather_than_panicking() {
     let mut w = l.witness.clone();
     mutate(&mut w);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, SESSION).map(|_| ())));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, NOW, SESSION).map(|_| ())));
     match result {
       Err(_) => panic!("{name}: panicked instead of returning an error"),
       Ok(Ok(())) => panic!("{name}: was accepted, but the witness is malformed"),
@@ -371,7 +376,7 @@ fn a_presentation_signed_by_the_wrong_device_key_is_rejected() {
   impersonation.device_auth = sign_device_auth(&attacker_key, SESSION);
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &impersonation, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  let _ = synthesize(&mut cs, &impersonation, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
   assert!(
     cs.which_is_unsatisfied().is_some(),
     "holding the credential's bytes must not be enough to present it"
@@ -390,7 +395,7 @@ fn a_proof_does_not_replay_to_a_different_session() {
   assert_ne!(SESSION, OTHER);
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, OTHER).expect("synthesis");
+  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, OTHER).expect("synthesis");
   assert!(
     cs.which_is_unsatisfied().is_some(),
     "a proof made for one session must not satisfy another"
@@ -412,7 +417,7 @@ fn the_device_key_is_never_exposed_to_the_verifier() {
   let x_at = json["landmarks"]["device_key_x_offset"].as_u64().unwrap() as usize;
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
   assert!(cs.is_satisfied());
 
   // Everything the caller is told to make public.
@@ -461,7 +466,7 @@ fn the_namespace_is_part_of_the_accepted_statement() {
   for name in ALL_DOCS {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, SESSION).expect("synthesis");
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "{name}: unsatisfied");
     let got: Vec<u8> = out.namespace.iter().map(|n| n.get_value().unwrap().to_repr().as_ref()[0]).collect();
     let got = String::from_utf8(got.iter().copied().take_while(|&b| b != 0).collect()).unwrap();
@@ -488,7 +493,7 @@ fn the_age_bit_is_computed_not_assumed() {
   let l = load("mdl_iso18013"); // holder born 1996-01-30
   for (cutoff, expected) in [(b"2008-10-01", true), (b"1990-01-01", false)] {
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, SESSION).expect("synthesis");
+    let out = synthesize(&mut cs, &l.witness, &l.ecdsa, cutoff, NOW, SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
     assert_eq!(
       out.old_enough.get_value().unwrap(),
@@ -497,4 +502,73 @@ fn the_age_bit_is_computed_not_assumed() {
       std::str::from_utf8(cutoff).unwrap()
     );
   }
+}
+
+// ---- Validity window -------------------------------------------------
+
+/// An expired credential cannot prove age, however well-formed it is.
+///
+/// The fixture is correctly issued and correctly signed; every binding in
+/// this file still holds for it. Only the validity window has passed.
+///
+/// This is *enforced*, not reported: an expired credential simply has no
+/// satisfying witness. Exposing a validity bit instead would have been a
+/// second instance of CIRCUIT-04 — a flag the verifier might publish and
+/// forget to require.
+#[test]
+fn an_expired_credential_cannot_prove_age() {
+  let l = load("mdl_expired"); // valid 2020-01-01 .. 2021-01-01
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
+  let failed = cs.which_is_unsatisfied().expect("an expired credential must not satisfy the circuit");
+  assert!(
+    failed.contains("has not expired") || failed.contains("validUntil"),
+    "expected the expiry check to reject this, got {failed}"
+  );
+}
+
+/// Nor can one whose validity has not begun.
+#[test]
+fn a_credential_not_yet_valid_cannot_prove_age() {
+  let l = load("mdl_not_yet_valid"); // valid 2040-01-01 .. 2045-01-01
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
+  let failed = cs.which_is_unsatisfied().expect("a credential that is not yet valid must be rejected");
+  assert!(
+    failed.contains("has started") || failed.contains("validFrom"),
+    "expected the validFrom check to reject this, got {failed}"
+  );
+}
+
+/// The same credential is provable while it is live and not afterwards,
+/// which shows the check follows the verifier's clock rather than
+/// something baked in.
+#[test]
+fn the_validity_check_follows_the_verifier_clock() {
+  let l = load("mdl_expired"); // valid 2020-01-01 .. 2021-01-01
+  // A clock inside the window: provable.
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, b"2020-06-01T00:00:00Z", SESSION).expect("synthesis");
+  assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+  assert!(out.old_enough.get_value().unwrap());
+
+  // The same credential, a clock after it: not provable.
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, b"2022-01-01T00:00:00Z", SESSION).expect("synthesis");
+  assert!(cs.which_is_unsatisfied().is_some(), "past validUntil must not be provable");
+}
+
+/// The verifier's clock is part of the accepted statement.
+///
+/// Without it a prover would choose the instant their credential was
+/// checked against, which is the same as not checking expiry at all.
+#[test]
+fn the_verifier_clock_is_part_of_the_accepted_statement() {
+  use ff::PrimeField;
+  let l = load("mdl_iso18013");
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  let out = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
+  assert!(cs.is_satisfied());
+  let got: Vec<u8> = out.now.iter().map(|n| n.get_value().unwrap().to_repr().as_ref()[0]).collect();
+  assert_eq!(&got[..], NOW.as_slice());
 }

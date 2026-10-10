@@ -30,6 +30,10 @@ const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
 const OTHER_SESSION: &[u8; 32] = b"a-different-verifier-session-002";
 const CUTOFF: &[u8; 10] = b"2008-10-01";
 
+/// The verifier's clock. Fixed, like `CUTOFF`, so these tests assert the
+/// same thing whenever they run; a real verifier uses its own.
+const NOW: &[u8; 20] = b"2026-10-10T12:00:00Z";
+
 fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
   let b: [u8; 32] = hex::decode(key_hex).unwrap().try_into().unwrap();
@@ -63,6 +67,7 @@ fn circuit(name: &str, cutoff: &[u8; 10], session: &[u8; 32], device_key: Option
       sig_structure: sig,
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
+      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -90,6 +95,7 @@ fn circuit(name: &str, cutoff: &[u8; 10], session: &[u8; 32], device_key: Option
       z: BigInt::from_bytes_be(Sign::Plus, &z),
     },
     cutoff: *cutoff,
+    now: *NOW,
     device_auth_digest: *session,
   }
 }
@@ -103,7 +109,7 @@ fn real_proofs_under_real_keys() {
   let keys = mdoc_age_circuit::setup(circuit("mdl_iso18013", CUTOFF, SESSION, None)).expect("setup");
   println!("setup: {:?}", t.elapsed());
 
-  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF };
+  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
 
   // --- honest positive control -------------------------------------
   let t = Instant::now();
@@ -115,14 +121,14 @@ fn real_proofs_under_real_keys() {
   println!("honest proof accepted: docType={} ns={}", ok.doc_type, ok.namespace);
 
   // --- replay to another verifier's session -------------------------
-  let replayed = ExpectedContext { device_auth_digest: *OTHER_SESSION, cutoff: *CUTOFF };
+  let replayed = ExpectedContext { device_auth_digest: *OTHER_SESSION, cutoff: *CUTOFF, now: *NOW };
   assert!(
     mdoc_age_circuit::verify_age(&proof, &keys.vk, &replayed).is_err(),
     "a proof made for one session must not be accepted by another"
   );
 
   // --- a different question than the one asked ----------------------
-  let other_q = ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01" };
+  let other_q = ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01", now: *NOW };
   assert!(
     mdoc_age_circuit::verify_age(&proof, &keys.vk, &other_q).is_err(),
     "a proof about one threshold must not answer another"
@@ -137,7 +143,7 @@ fn real_proofs_under_real_keys() {
     mdoc_age_circuit::verify_age(
       &under_proof,
       &keys.vk,
-      &ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01" }
+      &ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01", now: *NOW }
     )
     .is_err(),
     "a proof whose predicate is false must not be accepted"
@@ -157,13 +163,13 @@ fn impersonation_cannot_produce_a_proof() {
   // Confirm first that this witness genuinely fails the relation, so a
   // proving failure below is the defect we mean and not an accident.
   let mut cs = TestConstraintSystem::<Scalar>::new();
-  let _ = zk_cred_vega::mdoc_age::synthesize(&mut cs, &attacker.witness, &attacker.ecdsa, CUTOFF, SESSION).unwrap();
+  let _ = zk_cred_vega::mdoc_age::synthesize(&mut cs, &attacker.witness, &attacker.ecdsa, CUTOFF, NOW, SESSION).unwrap();
   assert!(cs.which_is_unsatisfied().is_some(), "wrong device key must not satisfy the relation");
 
   match mdoc_age_circuit::prove(&keys.pk, attacker) {
     Err(_) => println!("impersonation: proving refused, as it must be"),
     Ok(p) => assert!(
-      mdoc_age_circuit::verify_age(&p, &keys.vk, &ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF }).is_err(),
+      mdoc_age_circuit::verify_age(&p, &keys.vk, &ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW }).is_err(),
       "a proof from a witness that does not satisfy the relation must not verify"
     ),
   }

@@ -286,6 +286,8 @@ pub struct MdocAgeWitness {
 /// * without `doc_type` it cannot tell an mDL from a PID;
 /// * without `namespace` it does not know which namespace the attribute
 ///   came from, only which document type;
+/// * without `now` a prover chooses when the credential was checked for
+///   expiry, which is the same as not checking it;
 /// * without `old_enough` it learns nothing at all;
 /// * without `device_auth_digest` the verifier cannot tell the proof was
 ///   made for *their* session rather than replayed from another.
@@ -305,6 +307,11 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   pub issuer_qy: AllocatedNum<Scalar>,
   /// The ten ASCII bytes of the threshold date the comparison used.
   pub cutoff: Vec<AllocatedNum<Scalar>>,
+  /// The verifier's clock. The credential was proven live against this
+  /// instant, so a verifier must check it is the one they supplied --
+  /// otherwise a prover could pick a time when the credential was still
+  /// valid.
+  pub now: Vec<AllocatedNum<Scalar>>,
   /// The namespace the attribute was read from, NUL-padded to
   /// [`NAMESPACE_OUT_BYTES`] so the circuit's shape does not depend on
   /// its length.
@@ -475,16 +482,24 @@ where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
 {
+  if date.len() != cutoff.len() {
+    return Err(offset_bind::reject("comparing two dates of different widths"));
+  }
   let mut still_equal = Boolean::constant(true);
   let mut is_before = Boolean::constant(false);
-  for i in 0..10 {
-    let d_bits = date[i].to_bits_le(cs.namespace(|| format!("date bits {i}")))?;
-    let c_bits = cutoff[i].to_bits_le(cs.namespace(|| format!("cutoff bits {i}")))?;
+  for i in 0..date.len() {
+    // `byte_bits`, not `to_bits_le`: the latter decomposes to the field's
+    // full 256-bit width, thirty times the work for a value already known
+    // to be a byte. It also returns MSB-first, which is the order this
+    // comparison walks in.
+    let d_bits = offset_bind::byte_bits(cs.namespace(|| format!("date bits {i}")), &date[i])?;
+    let c_bits = offset_bind::byte_bits(cs.namespace(|| format!("cutoff bits {i}")), &cutoff[i])?;
     let mut lt = Boolean::constant(false);
     let mut eq_so_far = Boolean::constant(true);
     for b in (0..8).rev() {
-      let dbit = &d_bits[b];
-      let cbit = &c_bits[b];
+      // `byte_bits` returns MSB-first; walk from the most significant.
+      let dbit = &d_bits[7 - b];
+      let cbit = &c_bits[7 - b];
       // lt |= eq_so_far & !dbit & cbit
       let nd = dbit.not();
       let t = Boolean::and(cs.namespace(|| format!("lt {i} {b} a")), &eq_so_far, &nd)?;
@@ -533,6 +548,12 @@ pub struct CredentialBinding<Scalar: ff::PrimeField> {
   pub device_key: (AllocatedNum<Scalar>, AllocatedNum<Scalar>),
   /// The ten ASCII characters of the issuer-signed birthdate. Private.
   pub birth_date: Vec<AllocatedNum<Scalar>>,
+  /// The credential's validity window, twenty characters each. Private:
+  /// a verifier needs to know the credential *is* valid now, not when it
+  /// was issued or when it expires, both of which are a stable
+  /// per-credential fingerprint.
+  pub valid_from: Vec<AllocatedNum<Scalar>>,
+  pub valid_until: Vec<AllocatedNum<Scalar>>,
 }
 
 /// The credential-bound half: everything provable without knowing which
@@ -688,9 +709,14 @@ where
     })
     .collect::<Result<Vec<_>, SynthesisError>>()?;
 
+  let (valid_from, valid_until) =
+    offset_bind::bind_validity(cs.namespace(|| "validity"), &sig_bits, &padded, witness.landmarks.validity_info)?;
+
   Ok(CredentialBinding {
     issuer_qx,
     issuer_qy,
+    valid_from,
+    valid_until,
     doc_type: binding.doc_type,
     namespace: namespace_vars,
     device_key: binding.device_key,
@@ -700,12 +726,16 @@ where
 
 /// The session-bound half: the holder signs *this* verifier's digest, and
 /// the predicate is evaluated against *this* verifier's threshold.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_session<Scalar, CS>(
   cs: &mut CS,
   device_key: &(AllocatedNum<Scalar>, AllocatedNum<Scalar>),
   birth_date: &[AllocatedNum<Scalar>],
+  valid_from: &[AllocatedNum<Scalar>],
+  valid_until: &[AllocatedNum<Scalar>],
   device_auth: &DeviceAuthWitness,
   cutoff: &[u8; 10],
+  now: &[u8; offset_bind::TIMESTAMP_LEN],
   device_auth_digest: &[u8; 32],
 ) -> Result<SessionOutputs<Scalar>, SynthesisError>
 where
@@ -763,6 +793,26 @@ where
     device_auth_packed.push(out);
   }
 
+  // 6c. The credential must be live *now*, where "now" is the
+  //     verifier's clock, not the holder's.
+  //
+  //     Enforced rather than reported. An expired credential simply
+  //     cannot be proven, which avoids a second instance of CIRCUIT-04:
+  //     a validity *bit* the verifier might publish and forget to check
+  //     would be worth nothing. RFC 3339 UTC timestamps are fixed-width
+  //     and zero-padded, so lexicographic order is chronological and the
+  //     comparison needs no calendar arithmetic -- the same property the
+  //     age predicate relies on.
+  let now_vars = now
+    .iter()
+    .enumerate()
+    .map(|(i, &b)| AllocatedNum::alloc(cs.namespace(|| format!("now byte {i}")), || Ok(Scalar::from(b as u64))))
+    .collect::<Result<Vec<_>, _>>()?;
+  let started = date_not_after(cs.namespace(|| "validFrom <= now"), valid_from, &now_vars)?;
+  Boolean::enforce_equal(cs.namespace(|| "credential has started"), &started, &Boolean::constant(true))?;
+  let not_expired = date_not_after(cs.namespace(|| "now <= validUntil"), &now_vars, valid_until)?;
+  Boolean::enforce_equal(cs.namespace(|| "credential has not expired"), &not_expired, &Boolean::constant(true))?;
+
   // 7. The predicate, against a cutoff the verifier chose.
   let cutoff_vars = cutoff
     .iter()
@@ -774,12 +824,14 @@ where
 
 
 
-  Ok(SessionOutputs { cutoff: cutoff_vars, old_enough, device_auth_digest: device_auth_packed })
+  Ok(SessionOutputs { cutoff: cutoff_vars, now: now_vars, old_enough, device_auth_digest: device_auth_packed })
 }
 
 /// The session half's results.
 pub struct SessionOutputs<Scalar: ff::PrimeField> {
   pub cutoff: Vec<AllocatedNum<Scalar>>,
+  /// The verifier's clock, which the credential was checked live against.
+  pub now: Vec<AllocatedNum<Scalar>>,
   pub old_enough: Boolean,
   pub device_auth_digest: Vec<AllocatedNum<Scalar>>,
 }
@@ -791,6 +843,7 @@ pub fn synthesize<Scalar, CS>(
   witness: &MdocAgeWitness,
   ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
   cutoff: &[u8; 10],
+  now: &[u8; offset_bind::TIMESTAMP_LEN],
   device_auth_digest: &[u8; 32],
 ) -> Result<MdocAgeOutputs<Scalar>, SynthesisError>
 where
@@ -798,12 +851,23 @@ where
   CS: ConstraintSystem<Scalar>,
 {
   let cred = synthesize_credential(cs, witness, ecdsa)?;
-  let sess = synthesize_session(cs, &cred.device_key, &cred.birth_date, &witness.device_auth, cutoff, device_auth_digest)?;
+  let sess = synthesize_session(
+    cs,
+    &cred.device_key,
+    &cred.birth_date,
+    &cred.valid_from,
+    &cred.valid_until,
+    &witness.device_auth,
+    cutoff,
+    now,
+    device_auth_digest,
+  )?;
   Ok(MdocAgeOutputs {
     doc_type: cred.doc_type,
     issuer_qx: cred.issuer_qx,
     issuer_qy: cred.issuer_qy,
     cutoff: sess.cutoff,
+    now: sess.now,
     namespace: cred.namespace,
     old_enough: sess.old_enough,
     device_auth_digest: sess.device_auth_digest,

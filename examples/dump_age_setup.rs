@@ -52,6 +52,7 @@ fn prototype_from_fixture(name: &str) -> MdocAgeCircuit<Engine_> {
       sig_structure: sig,
       landmarks: zk_cred_vega::offset_bind::Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
+        validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -79,6 +80,7 @@ fn prototype_from_fixture(name: &str) -> MdocAgeCircuit<Engine_> {
       z: BigInt::from_bytes_be(Sign::Plus, &z),
     },
     cutoff: *b"2008-10-01",
+    now: *b"2026-10-10T12:00:00Z",
     device_auth_digest: session,
   }
 }

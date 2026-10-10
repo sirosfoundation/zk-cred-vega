@@ -159,6 +159,9 @@ struct DocSpec {
   /// one place a digest can be planted. No private key is needed,
   /// because an age proof never exercises device authentication.
   plant_forged_digest_in_device_key: bool,
+  /// Validity window, so a fixture can be expired or not yet valid.
+  valid_from: &'static str,
+  valid_until: &'static str,
   description: &'static str,
 }
 
@@ -365,6 +368,7 @@ struct Landmarks {
   device_key_info_offset: usize,
   device_key_x_offset: usize,
   doc_type_offset: usize,
+  validity_info_offset: usize,
   num_namespaces: usize,
   num_entries: usize,
 }
@@ -484,7 +488,7 @@ fn gen_doc(spec: DocSpec) {
 
   let validity_info = {
     let mut v = vec![0xa3];
-    for (k, t) in [("signed", signed_ts), ("validFrom", signed_ts), ("validUntil", "2031-10-01T00:00:00Z")] {
+    for (k, t) in [("signed", signed_ts), ("validFrom", spec.valid_from), ("validUntil", spec.valid_until)] {
       v.extend(tstr(k));
       v.extend(tdate(t));
     }
@@ -497,6 +501,7 @@ fn gen_doc(spec: DocSpec) {
   mso.extend(tstr(spec.doc_type));
   mso.extend(tstr("version"));
   mso.extend(tstr("1.0"));
+  let validity_info_offset_in_mso = mso.len();
   mso.extend(tstr("validityInfo"));
   mso.extend_from_slice(&validity_info);
 
@@ -625,6 +630,7 @@ fn gen_doc(spec: DocSpec) {
       device_key_info_offset,
       device_key_x_offset,
       doc_type_offset: mso_base + doc_type_offset_in_mso,
+      validity_info_offset: mso_base + validity_info_offset_in_mso,
       num_namespaces: ns_regions.len(),
       num_entries: target_num_entries,
     },
@@ -685,6 +691,8 @@ fn main() {
     salt_bytes: 16,
     photo_id_date_map: false,
     plant_forged_digest_in_device_key: false,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
     description: "ISO 18013-5 mDL, 35 elements, 16-byte salts (what our own MSOBuilder emits). \
                   Its namespace is neither equal to nor the same length as its docType."
       ,
@@ -698,6 +706,8 @@ fn main() {
     salt_bytes: 32,
     photo_id_date_map: false,
     plant_forged_digest_in_device_key: false,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
     description: "EU PID ARF 1.8, 34 elements, 32-byte salts. docType and namespace coincide.",
   });
 
@@ -709,6 +719,8 @@ fn main() {
     salt_bytes: 16,
     photo_id_date_map: true,
     plant_forged_digest_in_device_key: false,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
     description: "ISO/IEC 23220-4 Annex C Photo ID: three namespaces, and birth_date lives in \
                   org.iso.23220.1, which sorts FIRST -- so its entries are followed by another \
                   namespace, not by deviceKeyInfo. Its elementValue uses the ISO 23220-2 map form.",
@@ -722,10 +734,39 @@ fn main() {
     salt_bytes: 16,
     photo_id_date_map: false,
     plant_forged_digest_in_device_key: true,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
     description: "Adversarial: a correctly issued mDL whose holder chose a deviceKey x-coordinate \
                   equal to SHA-256 of a birth_date item the issuer never signed, claiming 2015-01-01. \
                   The forged item's digest really is in the signed bytes, so an offset proof that only \
                   checks \"this digest appears somewhere\" accepts it.",
+  });
+
+  gen_doc(DocSpec {
+    name: "mdl_expired",
+    doc_type: "org.iso.18013.5.1.mDL",
+    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    target_ns: "org.iso.18013.5.1",
+    salt_bytes: 16,
+    photo_id_date_map: false,
+    plant_forged_digest_in_device_key: false,
+    valid_from: "2020-01-01T00:00:00Z",
+    valid_until: "2021-01-01T00:00:00Z",
+    description: "A correctly issued and correctly signed mDL that expired in 2021. Every \
+                  signature and binding checks out; only the validity window does not.",
+  });
+
+  gen_doc(DocSpec {
+    name: "mdl_not_yet_valid",
+    doc_type: "org.iso.18013.5.1.mDL",
+    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    target_ns: "org.iso.18013.5.1",
+    salt_bytes: 16,
+    photo_id_date_map: false,
+    plant_forged_digest_in_device_key: false,
+    valid_from: "2040-01-01T00:00:00Z",
+    valid_until: "2045-01-01T00:00:00Z",
+    description: "A correctly issued mDL whose validity window has not started yet.",
   });
 
   gen_doc(DocSpec {
@@ -736,6 +777,8 @@ fn main() {
     salt_bytes: 32,
     photo_id_date_map: false,
     plant_forged_digest_in_device_key: false,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
     description: "Same Photo ID, but with a bare full-date birth_date and 32-byte salts -- the \
                   other half of the encoding/salt matrix.",
   });

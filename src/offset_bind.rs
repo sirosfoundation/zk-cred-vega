@@ -177,6 +177,215 @@ const DEVICE_KEY_X_DELTA: usize = DEVICE_KEY_INFO.len();
 /// `y` follows `x`'s 32 bytes plus its own `22 58 20` label and header.
 const DEVICE_KEY_Y_DELTA: usize = DEVICE_KEY_X_DELTA + 32 + 3;
 
+/// The whole `validityInfo` block, which sits before `valueDigests` in
+/// canonical MSO key order. Its layout is fully fixed for a conformant
+/// issuer, so one anchored window covers all of it:
+///
+/// ```text
+/// 6c "validityInfo" a3 66 "signed" c0 74   23 bytes  (anchor literal)
+/// <signed, 20 ASCII>                       20
+/// 69 "validFrom" c0 74                     12
+/// <validFrom, 20 ASCII>                    20
+/// 6a "validUntil" c0 74                    13
+/// <validUntil, 20 ASCII>                   20
+/// ```
+///
+/// The `74` in each `c0 74` is a `tstr` header for exactly 20 bytes, so
+/// pinning these literals also pins every timestamp to the 20-character
+/// RFC 3339 UTC form `YYYY-MM-DDTHH:MM:SSZ`. An issuer emitting
+/// fractional seconds or a numeric offset produces a longer string, a
+/// different header byte, and an honest credential this circuit cannot
+/// prove -- a completeness limit, not a soundness one, and the reason it
+/// is spelled out here.
+pub const VALIDITY_OPEN: &[u8] = b"\x6cvalidityInfo\xa3\x66signed\xc0\x74";
+const VALIDITY_MID_FROM: &[u8] = b"\x69validFrom\xc0\x74";
+const VALIDITY_MID_UNTIL: &[u8] = b"\x6avalidUntil\xc0\x74";
+/// Timestamps are `YYYY-MM-DDTHH:MM:SSZ`.
+pub const TIMESTAMP_LEN: usize = 20;
+/// Offset of `validFrom`'s first character from the anchor.
+pub const VALID_FROM_DELTA: usize = 23 + TIMESTAMP_LEN + 12;
+/// Offset of `validUntil`'s first character from the anchor.
+pub const VALID_UNTIL_DELTA: usize = VALID_FROM_DELTA + TIMESTAMP_LEN + 13;
+/// Everything above, as one window.
+pub const VALIDITY_WINDOW_LEN: usize = VALID_UNTIL_DELTA + TIMESTAMP_LEN;
+
+/// Decomposes a selected window's packs back into bits, eight per byte,
+/// most-significant first.
+///
+/// Returns bits rather than byte values on purpose. `AllocatedNum`'s own
+/// `to_bits_le` decomposes to the *field's* full width -- 256 constraints
+/// per byte, or about 27k for a window this size -- whereas allocating
+/// eight bits and checking one recomposition per pack costs roughly 130
+/// per pack. Callers comparing or matching bytes want the bits anyway.
+pub fn unpack_window_bits<Scalar, CS>(
+  mut cs: CS,
+  window: &SelectedWindow<Scalar>,
+  total_len: usize,
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  let mut out = Vec::with_capacity(total_len * 8);
+  for (p, pack) in window.packs.iter().enumerate() {
+    let lo = p * BYTES_PER_PACK;
+    let n = (total_len - lo).min(BYTES_PER_PACK);
+    let value = pack.get_value();
+    let mut recomposed = LinearCombination::<Scalar>::zero();
+    for i in 0..n {
+      // Big-endian within the pack, matching `pack_at`'s weighting:
+      // `to_repr` is little-endian, so big-endian byte `i` of an
+      // `n`-byte number sits at little-endian index `n - 1 - i`.
+      let shift = n - 1 - i;
+      let native = value.map(|v| v.to_repr().as_ref()[shift]);
+      for bit_idx in 0..8 {
+        let b = bellpepper_core::boolean::AllocatedBit::alloc(
+          cs.namespace(|| format!("pack {p} byte {i} bit {bit_idx}")),
+          native.map(|byte| (byte >> (7 - bit_idx)) & 1 == 1),
+        )?;
+        let mut coeff = Scalar::ONE;
+        for _ in 0..shift {
+          coeff *= Scalar::from(256u64);
+        }
+        for _ in 0..(7 - bit_idx) {
+          coeff = coeff.double();
+        }
+        recomposed = recomposed + (coeff, b.get_variable());
+        out.push(Boolean::from(b));
+      }
+    }
+    // Booleanity is enforced by `AllocatedBit::alloc`; this ties the bits
+    // to the pack, so they cannot be chosen independently of the window.
+    cs.enforce(
+      || format!("pack {p} recomposes from its bits"),
+      |lc| lc + &recomposed,
+      |lc| lc + CS::one(),
+      |lc| lc + pack.get_variable(),
+    );
+  }
+  Ok(out)
+}
+
+/// The eight bits of a byte-valued number, most-significant first.
+///
+/// Also *bounds* the value to a byte: the recomposition constraint plus
+/// `AllocatedBit`'s own booleanity leave no other satisfying assignment.
+/// Used instead of `AllocatedNum::to_bits_le`, which decomposes to the
+/// field's full 256-bit width and costs thirty times as much.
+pub fn byte_bits<Scalar, CS>(mut cs: CS, byte: &AllocatedNum<Scalar>) -> Result<Vec<Boolean>, SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  let native = byte.get_value().map(|v| v.to_repr().as_ref()[0]);
+  let mut bits = Vec::with_capacity(8);
+  let mut recomposed = LinearCombination::<Scalar>::zero();
+  for i in 0..8 {
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(
+      cs.namespace(|| format!("bit {i}")),
+      native.map(|n| (n >> (7 - i)) & 1 == 1),
+    )?;
+    let mut coeff = Scalar::ONE;
+    for _ in 0..(7 - i) {
+      coeff = coeff.double();
+    }
+    recomposed = recomposed + (coeff, b.get_variable());
+    bits.push(Boolean::from(b));
+  }
+  cs.enforce(|| "byte recomposes from its bits", |lc| lc + &recomposed, |lc| lc + CS::one(), |lc| lc + byte.get_variable());
+  Ok(bits)
+}
+
+/// A credential's validity window, twenty ASCII characters each.
+pub type ValidityWindow<Scalar> = (Vec<AllocatedNum<Scalar>>, Vec<AllocatedNum<Scalar>>);
+
+/// Reads the credential's validity window out of the signed bytes.
+///
+/// Returns `(validFrom, validUntil)` as twenty byte-values each. Both
+/// stay private: a verifier needs to know the credential *is* valid now,
+/// not when it was issued or when it expires -- those are a stable
+/// per-credential fingerprint, and publishing them is one of the leaks
+/// that made the previous circuit revision linkable.
+pub fn bind_validity<Scalar, CS>(
+  mut cs: CS,
+  bits: &[Boolean],
+  native: &[u8],
+  validity_info_offset: usize,
+) -> Result<ValidityWindow<Scalar>, SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  if validity_info_offset + VALIDITY_WINDOW_LEN > native.len() {
+    return Err(reject(format!(
+      "validityInfo at {validity_info_offset} plus {VALIDITY_WINDOW_LEN} bytes runs past the {}-byte buffer",
+      native.len()
+    )));
+  }
+  // One window over the whole block: one selector instead of five, since
+  // every field inside sits at a constant delta from the anchor.
+  let window = select_window::<Scalar, _>(
+    cs.namespace(|| "validityInfo"),
+    bits,
+    native,
+    &anchor_offsets(native.len()),
+    validity_info_offset,
+    VALIDITY_WINDOW_LEN,
+  )?;
+  let wb = unpack_window_bits(cs.namespace(|| "validity bytes"), &window, VALIDITY_WINDOW_LEN)?;
+
+  // Pin the three literal segments. Together they prove this really is
+  // `validityInfo` and that each timestamp is exactly twenty characters.
+  let mut literals: Vec<(usize, u8)> = Vec::new();
+  for (i, &b) in VALIDITY_OPEN.iter().enumerate() {
+    literals.push((i, b));
+  }
+  for (i, &b) in VALIDITY_MID_FROM.iter().enumerate() {
+    literals.push((VALIDITY_OPEN.len() + TIMESTAMP_LEN + i, b));
+  }
+  for (i, &b) in VALIDITY_MID_UNTIL.iter().enumerate() {
+    literals.push((VALID_FROM_DELTA + TIMESTAMP_LEN + i, b));
+  }
+  for (at, expect) in literals {
+    for bit in 0..8 {
+      let want = (expect >> (7 - bit)) & 1 == 1;
+      cs.enforce(
+        || format!("validityInfo literal byte {at} bit {bit}"),
+        |lc| lc + &wb[at * 8 + bit].lc(CS::one(), Scalar::ONE) - if want { (Scalar::ONE, CS::one()) } else { (Scalar::ZERO, CS::one()) },
+        |lc| lc + CS::one(),
+        |lc| lc,
+      );
+    }
+  }
+
+  let take = |cs: &mut CS, delta: usize, tag: &str| -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+    (0..TIMESTAMP_LEN)
+      .map(|i| {
+        let mut lc = LinearCombination::<Scalar>::zero();
+        let mut coeff = Scalar::from(128u64);
+        for bit in 0..8 {
+          lc = lc + &wb[(delta + i) * 8 + bit].lc(CS::one(), coeff);
+          coeff *= Scalar::from(2u64).invert().unwrap();
+        }
+        let v = AllocatedNum::alloc(cs.namespace(|| format!("{tag} {i}")), || {
+          let mut acc = 0u8;
+          for bit in 0..8 {
+            if wb[(delta + i) * 8 + bit].get_value().ok_or(SynthesisError::AssignmentMissing)? {
+              acc |= 1 << (7 - bit);
+            }
+          }
+          Ok(Scalar::from(acc as u64))
+        })?;
+        cs.enforce(|| format!("{tag} {i} value"), |l| l + &lc, |l| l + CS::one(), |l| l + v.get_variable());
+        Ok(v)
+      })
+      .collect()
+  };
+  let from = take(&mut cs, VALID_FROM_DELTA, "validFrom")?;
+  let until = take(&mut cs, VALID_UNTIL_DELTA, "validUntil")?;
+  Ok((from, until))
+}
+
 /// Smallest number of bytes that can follow the `deviceKeyInfo` key in a
 /// conformant MSO: the key's own value (`A1 69 "deviceKey"` + a 75-byte
 /// P-256 COSE_Key) plus `digestAlgorithm` and its value. Measured against
@@ -556,6 +765,8 @@ pub struct Landmarks {
   pub device_key_info: usize,
   /// Offset of the `67 "docType"` key.
   pub doc_type_key: usize,
+  /// Offset of the `6C "validityInfo"` key.
+  pub validity_info: usize,
 }
 
 /// Proves that `region_start .. region_end` really is the requested

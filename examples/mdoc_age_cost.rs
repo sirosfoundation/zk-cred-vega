@@ -19,6 +19,7 @@ const COMP: usize = 25_840; // one SHA-256 compression, from constraint_census
 const STEP: usize = 112_605; // one ClaimDigestStepCircuit, likewise
 /// A stand-in for the verifier's DeviceAuthentication digest.
 const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
+const NOW: &[u8; 20] = b"2026-10-10T12:00:00Z";
 
 fn main() {
   let docs = ["mdl_iso18013", "pid_arf18", "photo_id_23220", "photo_id_23220_bare_date"];
@@ -43,6 +44,7 @@ fn main() {
       sig_structure: sig.clone(),
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
+      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -87,7 +89,7 @@ fn main() {
     };
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let out = mdoc_age::synthesize(&mut cs, &witness, &ecdsa, b"2008-10-01", SESSION).expect("synthesis");
+    let out = mdoc_age::synthesize(&mut cs, &witness, &ecdsa, b"2008-10-01", NOW, SESSION).expect("synthesis");
     assert!(cs.is_satisfied(), "{name}: unsatisfied at {:?}", cs.which_is_unsatisfied());
     assert!(out.old_enough.get_value().unwrap());
 

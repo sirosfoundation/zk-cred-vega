@@ -63,7 +63,8 @@ use vega_prover::traits::{circuit::VegaCircuit, Engine};
 use crate::mdoc_age::{self, MdocAgeWitness, NAMESPACE_OUT_BYTES};
 
 /// Number of public inputs, in the order documented above.
-pub const PUBLIC_INPUT_LEN: usize = 2 + 2 + NAMESPACE_OUT_BYTES + 10 + 2 + 1;
+pub const PUBLIC_INPUT_LEN: usize =
+  2 + 2 + NAMESPACE_OUT_BYTES + 10 + crate::offset_bind::TIMESTAMP_LEN + 2 + 1;
 
 /// How many of `precommitted`'s returned values become public inputs:
 /// issuer `qx`/`qy`, the packed `docType`, and the padded namespace.
@@ -71,7 +72,13 @@ const PUBLIC_FROM_PRECOMMITTED: usize = 2 + 2 + NAMESPACE_OUT_BYTES;
 
 /// Everything `precommitted` returns: the public prefix above, then the
 /// device key and the ten birthdate characters, which stay private.
-const PRECOMMITTED_LEN: usize = PUBLIC_FROM_PRECOMMITTED + 2 + 10;
+const PRECOMMITTED_LEN: usize =
+  PUBLIC_FROM_PRECOMMITTED + 2 + 10 + 2 * zk_cred_vega_timestamp_len();
+
+/// `offset_bind::TIMESTAMP_LEN`, usable in a `const` expression.
+const fn zk_cred_vega_timestamp_len() -> usize {
+  crate::offset_bind::TIMESTAMP_LEN
+}
 
 /// Everything one presentation needs.
 #[derive(Clone)]
@@ -80,6 +87,9 @@ pub struct MdocAgeCircuit<E: Engine> {
   pub ecdsa: crate::ecdsa::EcdsaP256Witness<E::Scalar>,
   /// The verifier's threshold date, `YYYY-MM-DD`.
   pub cutoff: [u8; 10],
+  /// The verifier's clock, `YYYY-MM-DDTHH:MM:SSZ`. The credential must be
+  /// live at this instant or no proof exists.
+  pub now: [u8; crate::offset_bind::TIMESTAMP_LEN],
   /// The verifier's own `DeviceAuthentication` digest.
   pub device_auth_digest: [u8; 32],
 }
@@ -116,6 +126,7 @@ where
     v.extend(ns.iter().map(|&b| E::Scalar::from(b as u64)));
 
     v.extend(self.cutoff.iter().map(|&b| E::Scalar::from(b as u64)));
+    v.extend(self.now.iter().map(|&b| E::Scalar::from(b as u64)));
     v.extend(pack16::<E::Scalar>(&self.device_auth_digest));
 
     // The predicate's real value. A prover cannot choose it: the circuit
@@ -153,6 +164,8 @@ where
     out.push(cred.device_key.0);
     out.push(cred.device_key.1);
     out.extend(cred.birth_date);
+    out.extend(cred.valid_from);
+    out.extend(cred.valid_until);
     debug_assert_eq!(out.len(), PRECOMMITTED_LEN);
     Ok(out)
   }
@@ -181,17 +194,25 @@ where
       precommitted[PUBLIC_FROM_PRECOMMITTED].clone(),
       precommitted[PUBLIC_FROM_PRECOMMITTED + 1].clone(),
     );
+    const TS: usize = crate::offset_bind::TIMESTAMP_LEN;
+    let bd = PUBLIC_FROM_PRECOMMITTED + 2;
     let sess = mdoc_age::synthesize_session(
       cs,
       &device_key,
-      &precommitted[PUBLIC_FROM_PRECOMMITTED + 2..],
+      &precommitted[bd..bd + 10],
+      &precommitted[bd + 10..bd + 10 + TS],
+      &precommitted[bd + 10 + TS..bd + 10 + 2 * TS],
       &self.witness.device_auth,
       &self.cutoff,
+      &self.now,
       &self.device_auth_digest,
     )?;
 
     for (i, c) in sess.cutoff.iter().enumerate() {
       c.inputize(cs.namespace(|| format!("inputize cutoff {i}")))?;
+    }
+    for (i, n) in sess.now.iter().enumerate() {
+      n.inputize(cs.namespace(|| format!("inputize now {i}")))?;
     }
     for (i, p) in sess.device_auth_digest.iter().enumerate() {
       p.inputize(cs.namespace(|| format!("inputize device auth {i}")))?;
@@ -256,6 +277,8 @@ pub struct ExpectedContext {
   pub device_auth_digest: [u8; 32],
   /// The threshold this verifier asked about.
   pub cutoff: [u8; 10],
+  /// This verifier's clock. The credential was proven live against it.
+  pub now: [u8; crate::offset_bind::TIMESTAMP_LEN],
 }
 
 /// What a caller learns from an accepted proof.
@@ -306,9 +329,12 @@ pub fn verify_age(
   let issuer_qy = v[1];
   let doc_packs = &v[2..4];
   let ns_bytes = &v[4..4 + NAMESPACE_OUT_BYTES];
-  let cutoff = &v[4 + NAMESPACE_OUT_BYTES..14 + NAMESPACE_OUT_BYTES];
-  let digest_packs = &v[14 + NAMESPACE_OUT_BYTES..16 + NAMESPACE_OUT_BYTES];
-  let old_enough = v[16 + NAMESPACE_OUT_BYTES];
+  const TS: usize = crate::offset_bind::TIMESTAMP_LEN;
+  let c0 = 4 + NAMESPACE_OUT_BYTES;
+  let cutoff = &v[c0..c0 + 10];
+  let now = &v[c0 + 10..c0 + 10 + TS];
+  let digest_packs = &v[c0 + 10 + TS..c0 + 12 + TS];
+  let old_enough = v[c0 + 12 + TS];
 
   // CIRCUIT-04. Not "read the bit" — require it.
   if old_enough != S::ONE {
@@ -320,6 +346,11 @@ pub fn verify_age(
   }
   // And our question, not an easier one.
   if cutoff != expected.cutoff.iter().map(|&b| S::from(b as u64)).collect::<Vec<_>>().as_slice() {
+    return Err(reject());
+  }
+  // And our clock: the circuit proves the credential was live at this
+  // instant, so a prover who picked their own would be proving nothing.
+  if now != expected.now.iter().map(|&b| S::from(b as u64)).collect::<Vec<_>>().as_slice() {
     return Err(reject());
   }
 
