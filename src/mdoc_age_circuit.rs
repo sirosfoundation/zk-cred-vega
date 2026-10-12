@@ -367,6 +367,25 @@ pub struct ExpectedContext {
   pub cutoff: [u8; 10],
   /// This verifier's clock. The credential was proven live against it.
   pub now: [u8; crate::offset_bind::TIMESTAMP_LEN],
+  /// Which issuer keys this verifier will accept a credential from.
+  ///
+  /// Required rather than optional, and an enum rather than a list,
+  /// because the honest answer differs between deployments. Comparing
+  /// against a handful of pinned keys is one real policy; resolving a
+  /// national trust list, checking validity at a point in time and
+  /// consulting revocation is another, and no allow-list of
+  /// `(x, y)` pairs can express the second.
+  ///
+  /// What the enum removes is the *accidental* omission. Reading
+  /// `issuer_qx`/`issuer_qy` off an accepted proof and forgetting to
+  /// check them accepts a self-issued credential — the prover generates
+  /// a key, signs an MSO saying whatever they like, and every other
+  /// obligation in this module is satisfied honestly. That is the same
+  /// shape as CIRCUIT-04, and it is the fourth time in this circuit's
+  /// review that "returned to the caller" turned out to mean "not
+  /// checked". Naming [`IssuerPolicy::CallerChecksTrustList`] is a
+  /// deliberate, greppable statement that somebody owns it.
+  pub issuers: IssuerPolicy,
   /// The `(docType, namespace)` pairs this verifier will accept the
   /// answer from. Must be non-empty, and the proof's own pair must be
   /// one of them.
@@ -390,8 +409,24 @@ pub struct ExpectedContext {
   pub accepted: Vec<(String, String)>,
 }
 
+/// How [`check_public_values`] decides whether the issuer is acceptable.
+pub enum IssuerPolicy {
+  /// Only credentials signed by one of these keys, as uncompressed
+  /// P-256 affine coordinates, big-endian.
+  Only(Vec<([u8; 32], [u8; 32])>),
+  /// The caller will check [`VerifiedAgeProof::issuer_qx`] and
+  /// [`VerifiedAgeProof::issuer_qy`] against its own trust list.
+  ///
+  /// For the deployments where key equality is not the whole policy —
+  /// a trust list resolved at request time, validity windows,
+  /// revocation. Choosing this variant does not make the obligation go
+  /// away; it records who carries it.
+  CallerChecksTrustList,
+}
+
 impl ExpectedContext {
-  /// The common case: one document type, one namespace.
+  /// The common case: one document type, one namespace, issuer trust
+  /// handled by the caller.
   pub fn new(
     device_auth_digest: [u8; 32],
     cutoff: [u8; 10],
@@ -403,16 +438,27 @@ impl ExpectedContext {
       device_auth_digest,
       cutoff,
       now,
+      issuers: IssuerPolicy::CallerChecksTrustList,
       accepted: vec![(doc_type.to_string(), namespace.to_string())],
     }
+  }
+
+  /// The same, pinned to a set of issuer keys.
+  pub fn with_issuers(mut self, keys: Vec<([u8; 32], [u8; 32])>) -> Self {
+    self.issuers = IssuerPolicy::Only(keys);
+    self
   }
 }
 
 /// What a caller learns from an accepted proof.
 pub struct VerifiedAgeProof {
-  /// Check this against your issuer trust list. The proof says the
-  /// credential was signed by this key; it does not say the key is one
-  /// you trust.
+  /// The key the signature verified against.
+  ///
+  /// If [`ExpectedContext::issuers`] was [`IssuerPolicy::Only`], this is
+  /// already one of the keys named there. If it was
+  /// [`IssuerPolicy::CallerChecksTrustList`], **this is the check the
+  /// caller said it would do**: the proof says the credential was signed
+  /// by this key, never that the key is one you trust.
   pub issuer_qx: <crate::Engine_ as Engine>::Scalar,
   pub issuer_qy: <crate::Engine_ as Engine>::Scalar,
   pub doc_type: String,
@@ -582,6 +628,21 @@ pub fn check_public_values(
   // weaker statement than the verifier believes it requested.
   if !expected.accepted.iter().any(|(d, n)| *d == doc_type && *n == namespace) {
     return Err(reject());
+  }
+
+  // And from an issuer this verifier will take it from. Without this a
+  // prover generates their own key, signs an MSO saying whatever they
+  // like, and satisfies every other obligation here honestly.
+  if let IssuerPolicy::Only(keys) = &expected.issuers {
+    let matches = keys.iter().any(|(x, y)| {
+      let to_f = |b: &[u8; 32]| {
+        crate::nonnative::util::nat_to_f::<S>(&num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, b))
+      };
+      to_f(x) == Some(issuer_qx) && to_f(y) == Some(issuer_qy)
+    });
+    if !matches {
+      return Err(reject());
+    }
   }
 
   Ok(VerifiedAgeProof { issuer_qx, issuer_qy, doc_type, namespace })

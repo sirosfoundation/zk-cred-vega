@@ -850,3 +850,56 @@ fn an_answer_about_another_namespace_is_rejected() {
     "a verifier that asked about org.iso.23220.1 must not accept an answer about org.iso.23220.dtc.1"
   );
 }
+
+/// An issuer the verifier did not name is rejected when it says so.
+///
+/// Every other obligation in `check_public_values` can be satisfied
+/// honestly by a prover who issued the credential to themselves: generate
+/// a P-256 key, sign an MSO saying whatever you like, hold the matching
+/// device key. The issuer key is what separates that from a real
+/// credential, and it was returned to the caller rather than checked —
+/// the fourth time in this circuit's review that "returned" turned out to
+/// mean "not checked".
+#[test]
+fn a_credential_from_an_unnamed_issuer_is_rejected() {
+  use vega_prover::traits::circuit::VegaCircuit;
+  use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
+
+  let l = load("mdl_iso18013");
+  let c = MdocAgeCircuit::<Engine_> {
+    witness: l.witness.clone(),
+    ecdsa: l.ecdsa.clone(),
+    cutoff: *CUTOFF,
+    now: *NOW,
+    device_auth_digest: *SESSION,
+  };
+  let v = c.public_values().expect("public values");
+
+  let qx: [u8; 32] = hex::decode(l.json["ecdsa_witness"]["qx_hex"].as_str().unwrap()).unwrap().try_into().unwrap();
+  let qy: [u8; 32] = hex::decode(l.json["ecdsa_witness"]["qy_hex"].as_str().unwrap()).unwrap().try_into().unwrap();
+
+  let base = || ExpectedContext::new(*SESSION, *CUTOFF, *NOW, "org.iso.18013.5.1.mDL", "org.iso.18013.5.1");
+  assert!(
+    check_public_values(&v, &base().with_issuers(vec![(qx, qy)])).is_ok(),
+    "the fixture's own issuer must be accepted when it is named"
+  );
+
+  // Somebody else's key. A self-issued credential looks exactly like
+  // this to every other check here.
+  let mut other = qx;
+  other[31] ^= 1;
+  assert!(
+    check_public_values(&v, &base().with_issuers(vec![(other, qy)])).is_err(),
+    "a credential signed by an unnamed key must not be accepted"
+  );
+  assert!(
+    check_public_values(&v, &base().with_issuers(vec![])).is_err(),
+    "an empty issuer list accepts nothing, rather than everything"
+  );
+
+  // And the opt-out is explicit: the caller said it would check.
+  assert!(
+    check_public_values(&v, &base()).is_ok(),
+    "CallerChecksTrustList hands the key back rather than rejecting"
+  );
+}
