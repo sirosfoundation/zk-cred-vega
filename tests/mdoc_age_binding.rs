@@ -655,12 +655,12 @@ fn the_acceptance_path_parses_the_published_anchor_windows() {
   use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
   use vega_prover::traits::circuit::VegaCircuit;
 
-  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
   for (name, doc_type, namespace) in [
     ("mdl_iso18013", "org.iso.18013.5.1.mDL", "org.iso.18013.5.1"),
     ("pid_arf18", "eu.europa.ec.eudi.pid.1", "eu.europa.ec.eudi.pid.1"),
     ("photo_id_23220", "org.iso.23220.photoid.1", "org.iso.23220.1"),
   ] {
+    let expected = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, doc_type, namespace);
     let l = load(name);
     let c = MdocAgeCircuit::<Engine_> {
       witness: l.witness.clone(),
@@ -778,4 +778,75 @@ fn a_digest_from_a_later_namespace_is_rejected() {
       out.old_enough.get_value()
     ),
   }
+}
+
+/// The answer must be to the question that was asked.
+///
+/// The region bound stops a prover reading a digest from another
+/// namespace. It does not stop them proving that namespace's
+/// `birth_date` *honestly* and publishing its name truthfully — which is
+/// a correct proof of a statement the verifier did not request, and
+/// indistinguishable from the one it did unless somebody compares the
+/// two.
+///
+/// `photo_id_cross_namespace` is thirteen years old in
+/// `org.iso.23220.1` and an adult in `org.iso.23220.dtc.1`. A verifier
+/// asking about the first and reading the answer from the second accepts
+/// a child. Returning the pair and trusting the caller to compare it is
+/// the same shape as CIRCUIT-04 — so `ExpectedContext` requires it and
+/// `check_public_values` enforces it.
+#[test]
+fn an_answer_about_another_namespace_is_rejected() {
+  use vega_prover::traits::circuit::VegaCircuit;
+  use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
+
+  let l = load("photo_id_cross_namespace");
+  let other = l.json["claims"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == "org.iso.23220.dtc.1")
+    .unwrap();
+
+  // An entirely honest proof — of the *other* namespace's birth_date.
+  let mut w = l.witness.clone();
+  const DTC: &[u8] = b"\x73org.iso.23220.dtc.1";
+  let key_at = l
+    .witness
+    .sig_structure
+    .windows(DTC.len())
+    .position(|w| w == DTC)
+    .expect("the fixture carries the dtc namespace");
+  let (header_len, entries) = match l.witness.sig_structure[key_at + DTC.len()] {
+    h @ 0xa0..=0xb7 => (1usize, (h & 0x1f) as usize),
+    0xb8 => (2usize, l.witness.sig_structure[key_at + DTC.len() + 1] as usize),
+    h => panic!("{h:#04x} does not open the dtc entry map"),
+  };
+  w.namespace = "org.iso.23220.dtc.1".to_string();
+  w.landmarks.namespace_key = key_at;
+  w.landmarks.region_start = key_at + DTC.len() + header_len;
+  w.num_entries = entries;
+  w.digest_offset = other["digest_offset"].as_u64().unwrap() as usize;
+  w.item_bytes = hex::decode(other["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap();
+
+  let c = MdocAgeCircuit::<Engine_> {
+    witness: w,
+    ecdsa: l.ecdsa.clone(),
+    cutoff: *CUTOFF,
+    now: *NOW,
+    device_auth_digest: *SESSION,
+  };
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  synthesize(&mut cs, &c.witness, &c.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
+  assert!(cs.is_satisfied(), "the dtc namespace's own birth_date is honestly provable");
+
+  let v = c.public_values().expect("public values");
+  let asked_dtc = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, "org.iso.23220.photoid.1", "org.iso.23220.dtc.1");
+  assert!(check_public_values(&v, &asked_dtc).is_ok(), "a verifier that asked for dtc gets dtc");
+
+  let asked_base = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, "org.iso.23220.photoid.1", "org.iso.23220.1");
+  assert!(
+    check_public_values(&v, &asked_base).is_err(),
+    "a verifier that asked about org.iso.23220.1 must not accept an answer about org.iso.23220.dtc.1"
+  );
 }

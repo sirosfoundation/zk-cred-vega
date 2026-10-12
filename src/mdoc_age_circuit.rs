@@ -347,6 +347,45 @@ pub struct ExpectedContext {
   pub cutoff: [u8; 10],
   /// This verifier's clock. The credential was proven live against it.
   pub now: [u8; crate::offset_bind::TIMESTAMP_LEN],
+  /// The `(docType, namespace)` pairs this verifier will accept the
+  /// answer from. Must be non-empty, and the proof's own pair must be
+  /// one of them.
+  ///
+  /// This is not a convenience. The circuit proves a predicate over
+  /// `birth_date` *in a particular namespace of a particular document*,
+  /// and a credential may carry `birth_date` in more than one — ISO/IEC
+  /// 23220-4's DTC namespace alongside `org.iso.23220.1`, for one, and
+  /// nothing requires the two to agree. A holder can then prove the
+  /// favourable one entirely honestly, publish its namespace truthfully,
+  /// and a verifier who asked about the other and did not read the
+  /// answer accepts it. `test-vectors/photo_id_cross_namespace.json` is
+  /// that credential: thirteen years old in `org.iso.23220.1`, an adult
+  /// in `org.iso.23220.dtc.1`.
+  ///
+  /// Returning the pair and trusting the caller to compare it is the
+  /// mistake this module exists to prevent — the same shape as CIRCUIT-04,
+  /// where returning `old_enough` and trusting the caller to require 1
+  /// accepts every holder. So it is required here and checked, like the
+  /// cutoff, the clock and the session digest.
+  pub accepted: Vec<(String, String)>,
+}
+
+impl ExpectedContext {
+  /// The common case: one document type, one namespace.
+  pub fn new(
+    device_auth_digest: [u8; 32],
+    cutoff: [u8; 10],
+    now: [u8; crate::offset_bind::TIMESTAMP_LEN],
+    doc_type: &str,
+    namespace: &str,
+  ) -> Self {
+    Self {
+      device_auth_digest,
+      cutoff,
+      now,
+      accepted: vec![(doc_type.to_string(), namespace.to_string())],
+    }
+  }
 }
 
 /// What a caller learns from an accepted proof.
@@ -377,7 +416,10 @@ pub struct VerifiedAgeProof {
 ///   which is what makes the proof fresh and audience-bound rather than
 ///   replayed;
 /// * the cutoff is the one this verifier asked about, so a prover cannot
-///   answer an easier question than the one posed.
+///   answer an easier question than the one posed;
+/// * the `(docType, namespace)` the answer came from is one this verifier
+///   named, so a prover cannot answer about a different attribute of the
+///   same credential.
 ///
 /// There is deliberately no accessor that hands back a raw predicate bit.
 pub fn verify_age(
@@ -511,6 +553,14 @@ pub fn check_public_values(
   // walked to a different offset — and the count is right here in the
   // namespace's own signed header.
   if num_entries != S::from(entries as u64) {
+    return Err(reject());
+  }
+
+  // The answer has to be to the question that was asked. A credential
+  // may carry `birth_date` in more than one namespace with different
+  // values, so "some namespace of some document type" is a materially
+  // weaker statement than the verifier believes it requested.
+  if !expected.accepted.iter().any(|(d, n)| *d == doc_type && *n == namespace) {
     return Err(reject());
   }
 

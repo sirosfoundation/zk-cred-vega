@@ -26,6 +26,11 @@ use zk_cred_vega::Engine_;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
+/// Every end-to-end test proves against `mdl_iso18013`, so the
+/// verifier's question is that document's.
+const DOC_TYPE: &str = "org.iso.18013.5.1.mDL";
+const NAMESPACE: &str = "org.iso.18013.5.1";
+
 const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
 const OTHER_SESSION: &[u8; 32] = b"a-different-verifier-session-002";
 const CUTOFF: &[u8; 10] = b"2008-10-01";
@@ -108,7 +113,7 @@ fn real_proofs_under_real_keys() {
   let keys = mdoc_age_circuit::setup(circuit("mdl_iso18013", CUTOFF, SESSION, None)).expect("setup");
   println!("setup: {:?}", t.elapsed());
 
-  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
+  let expected = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE);
 
   // --- honest positive control -------------------------------------
   let t = Instant::now();
@@ -120,14 +125,14 @@ fn real_proofs_under_real_keys() {
   println!("honest proof accepted: docType={} ns={}", ok.doc_type, ok.namespace);
 
   // --- replay to another verifier's session -------------------------
-  let replayed = ExpectedContext { device_auth_digest: *OTHER_SESSION, cutoff: *CUTOFF, now: *NOW };
+  let replayed = ExpectedContext::new(*OTHER_SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE);
   assert!(
     mdoc_age_circuit::verify_age(&proof, &keys.vk, &replayed).is_err(),
     "a proof made for one session must not be accepted by another"
   );
 
   // --- a different question than the one asked ----------------------
-  let other_q = ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01", now: *NOW };
+  let other_q = ExpectedContext::new(*SESSION, *b"1990-01-01", *NOW, DOC_TYPE, NAMESPACE);
   assert!(
     mdoc_age_circuit::verify_age(&proof, &keys.vk, &other_q).is_err(),
     "a proof about one threshold must not answer another"
@@ -142,7 +147,7 @@ fn real_proofs_under_real_keys() {
     mdoc_age_circuit::verify_age(
       &under_proof,
       &keys.vk,
-      &ExpectedContext { device_auth_digest: *SESSION, cutoff: *b"1990-01-01", now: *NOW }
+      &ExpectedContext::new(*SESSION, *b"1990-01-01", *NOW, DOC_TYPE, NAMESPACE)
     )
     .is_err(),
     "a proof whose predicate is false must not be accepted"
@@ -168,7 +173,7 @@ fn impersonation_cannot_produce_a_proof() {
   match mdoc_age_circuit::prove(&keys.pk, attacker) {
     Err(_) => println!("impersonation: proving refused, as it must be"),
     Ok(p) => assert!(
-      mdoc_age_circuit::verify_age(&p, &keys.vk, &ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW }).is_err(),
+      mdoc_age_circuit::verify_age(&p, &keys.vk, &ExpectedContext::new(*SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE)).is_err(),
       "a proof from a witness that does not satisfy the relation must not verify"
     ),
   }
@@ -215,14 +220,14 @@ fn folded_proofs_verify_under_folded_keys() {
   let proof = mc::prove(&keys.pk, &steps, &core).expect("prove");
   println!("MC prove: {:?}", t.elapsed());
 
-  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
+  let expected = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE);
   let ok = mc::verify_age(&proof, &keys.vk, &expected).expect("honest folded proof must verify");
   assert_eq!(ok.doc_type, "org.iso.18013.5.1.mDL");
   assert_eq!(ok.namespace, "org.iso.18013.5.1");
 
   // Same obligations as the single-circuit path.
   assert!(
-    mc::verify_age(&proof, &keys.vk, &ExpectedContext { device_auth_digest: *OTHER_SESSION, cutoff: *CUTOFF, now: *NOW }).is_err(),
+    mc::verify_age(&proof, &keys.vk, &ExpectedContext::new(*OTHER_SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE)).is_err(),
     "a folded proof must not replay to another session"
   );
 
@@ -247,7 +252,7 @@ fn mc01_folding_the_wrong_indices_is_caught_by_the_acceptance_path() {
   use zk_cred_vega::mdoc_age_mc as mc;
   let (steps, core) = mc_build("mdl_iso18013", CUTOFF, SESSION);
   let keys = mc::setup(&steps[0], &core).expect("setup");
-  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
+  let expected = ExpectedContext::new(*SESSION, *CUTOFF, *NOW, DOC_TYPE, NAMESPACE);
 
   // Honest control first.
   let honest = mc::prove(&keys.pk, &steps, &core).expect("honest prove");
