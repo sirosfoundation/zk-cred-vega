@@ -18,13 +18,32 @@
 //! `birth_date` `IssuerSignedItem` — share one step set, with the
 //! chaining value resetting to the IV at the boundary (§4.2.1).
 //!
+//! # The folded form's one hard obligation
+//!
+//! `vega_mc_zkp::verify` checks how *many* step instances a proof carries
+//! and never what they claim. Nothing in the proof system requires the
+//! folded steps to be indices `0..n-1`.
+//!
+//! That matters: a prover folding `n` copies of step 0 proves one
+//! compression and leaves every other block's shared digest
+//! unconstrained — including the one [`crate::sha256_mc::select_digest`]
+//! hands to the ECDSA check as the signed message. Choosing that freely
+//! lets one credential's bytes be paired with another credential's
+//! genuine issuer signature. Such a proof **can be generated under the
+//! real proving key**; `mc01_folding_the_wrong_indices_is_caught_by_the_acceptance_path`
+//! does exactly that.
+//!
+//! [`verify_age`] is what rejects it, and it is the only thing that does.
+//! **Use it as the acceptance path. Do not call the proof system's
+//! `verify` directly and read the public values yourself.**
+//!
 //! **Unreviewed.** See the crate README.
 
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use ff::{Field, PrimeFieldBits};
 use vega_prover::traits::{circuit::VegaCircuit, Engine};
 
-use crate::mdoc_age::{self, Hasher, MdocAgeWitness, NAMESPACE_OUT_BYTES};
+use crate::mdoc_age::{self, Hasher, MdocAgeWitness};
 use crate::sha256_mc::{self, HashLayout};
 
 /// The two messages, in the order their blocks appear in the shared
@@ -141,7 +160,7 @@ pub struct CoreCircuit<E: Engine> {
 
 /// Public inputs, same contract and order as the single-circuit form.
 pub const PUBLIC_INPUT_LEN: usize = crate::mdoc_age_circuit::PUBLIC_INPUT_LEN;
-const PUBLIC_FROM_PRECOMMITTED: usize = 2 + 2 + NAMESPACE_OUT_BYTES;
+use crate::mdoc_age_circuit::PUBLIC_FROM_PRECOMMITTED;
 
 impl<E: Engine> VegaCircuit<E> for CoreCircuit<E>
 where

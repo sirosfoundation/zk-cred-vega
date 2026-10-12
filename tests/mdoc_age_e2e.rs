@@ -235,3 +235,38 @@ fn folded_proofs_verify_under_folded_keys() {
   println!("MC proof        : {:>9.2} kB", pr as f64 / 1e3);
   println!("  single-circuit was 614.44 MB / 614.44 MB / 111.83 kB");
 }
+
+/// MC-01 end-to-end: a prover that folds the wrong step indices.
+///
+/// Guide Stage D — not "an assignment satisfies the constraints" but "the
+/// original verifier accepts a malicious proof". The prover folds `n`
+/// copies of step 0 instead of steps `0..n-1`, so every block except the
+/// first is unproven and its shared digest is free.
+#[test]
+#[ignore = "slow: runs a real folded setup and a malicious proof attempt"]
+fn mc01_folding_the_wrong_indices_is_caught_by_the_acceptance_path() {
+  use zk_cred_vega::mdoc_age_mc as mc;
+  let (steps, core) = mc_build("mdl_iso18013", CUTOFF, SESSION);
+  let keys = mc::setup(&steps[0], &core).expect("setup");
+  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
+
+  // Honest control first.
+  let honest = mc::prove(&keys.pk, &steps, &core).expect("honest prove");
+  assert!(mc::verify_age(&honest, &keys.vk, &expected).is_ok(), "honest control must verify");
+
+  // The attack: every folded instance claims index 0.
+  let all_zero: Vec<_> = (0..steps.len()).map(|_| steps[0].clone()).collect();
+  match mc::prove(&keys.pk, &all_zero, &core) {
+    Err(e) => println!("MC-01: proving refused outright ({e:?})"),
+    Ok(bad) => {
+      // If it proves, the acceptance path is the only thing left.
+      let accepted = mc::verify_age(&bad, &keys.vk, &expected).is_ok();
+      assert!(
+        !accepted,
+        "a proof folding only step 0 was ACCEPTED — the step-index check in verify_age is \
+         the sole defence and it failed"
+      );
+      println!("MC-01: proof generated, and rejected by the step-index check in verify_age");
+    }
+  }
+}

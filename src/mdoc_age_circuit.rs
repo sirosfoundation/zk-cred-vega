@@ -68,7 +68,11 @@ pub const PUBLIC_INPUT_LEN: usize =
 
 /// How many of `precommitted`'s returned values become public inputs:
 /// issuer `qx`/`qy`, the packed `docType`, and the padded namespace.
-const PUBLIC_FROM_PRECOMMITTED: usize = 2 + 2 + NAMESPACE_OUT_BYTES;
+/// How many of `precommitted`'s returned values become public inputs.
+/// Shared with [`crate::mdoc_age_mc`] rather than duplicated: two copies
+/// that must agree are two copies that can drift, and a drift here breaks
+/// verification for one arithmetization only.
+pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + 2 + NAMESPACE_OUT_BYTES;
 
 /// Everything `precommitted` returns: the public prefix above, then the
 /// device key and the ten birthdate characters, which stay private.
