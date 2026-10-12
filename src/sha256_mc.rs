@@ -306,6 +306,22 @@ fn repack<Scalar: PrimeField>(bits: &[Boolean], one: bellpepper_core::Variable) 
 ///
 /// Every step circuit instance has this identical shape, which is what
 /// lets the folding scheme aggregate them.
+///
+/// # The public index is allocated, published and bound here
+///
+/// Deliberately all three in one place. An earlier revision left the
+/// caller to allocate and inputize the index and passed only `step` in
+/// here, so the published index and the one-hot selector were two
+/// independent witnesses that an honest prover happened to derive from
+/// the same number. A prover building its own R1CS witness could publish
+/// `0..n-1` while selecting block 0 in every instance — which defeats
+/// the verifier-side coverage check in
+/// [`crate::mdoc_age_mc::verify_age`] exactly, since that check reads
+/// the published indices.
+///
+/// `Σ j·sel[j] == idx` closes it for one constraint, and doing the
+/// allocation here means a caller cannot reintroduce the gap by
+/// forgetting to bind what it published.
 pub fn synthesize_step<Scalar, CS>(
   cs: &mut CS,
   shared: &[AllocatedNum<Scalar>],
@@ -319,6 +335,19 @@ where
   let one = CS::one();
   let n = layout.total_blocks();
   let sel = one_hot::<Scalar, _>(cs.namespace(|| "step index"), n, step)?;
+
+  let idx = AllocatedNum::alloc(cs.namespace(|| "public step index"), || Ok(Scalar::from(step as u64)))?;
+  idx.inputize(cs.namespace(|| "inputize step index"))?;
+  let mut weighted = LinearCombination::<Scalar>::zero();
+  for (j, b) in sel.iter().enumerate() {
+    weighted = weighted + (Scalar::from(j as u64), b.get_variable());
+  }
+  cs.enforce(
+    || "the published index is the block actually selected",
+    |lc| lc + &weighted,
+    |lc| lc + one,
+    |lc| lc + idx.get_variable(),
+  );
 
   // The block being compressed.
   let mut block_bits = Vec::with_capacity(512);
@@ -536,6 +565,46 @@ mod tests {
 
 
 
+  /// The published step index is the block that was actually compressed.
+  ///
+  /// This is the constraint that makes the verifier-side coverage check
+  /// in `mdoc_age_mc::verify_age` mean anything. Without it the index is
+  /// a free witness: a prover can publish `0..n-1` across the folded set
+  /// while every instance compresses block 0, and the coverage check —
+  /// which reads exactly those published indices — sees a well-formed
+  /// set.
+  ///
+  /// So the test does what such a prover would do. It takes a satisfied
+  /// step at block 3 and rewrites *only* the index, input variable and
+  /// aux together, leaving the selector and every readout alone. That is
+  /// precisely the freedom the old arithmetization left open, and it is
+  /// now unsatisfiable.
+  #[test]
+  fn the_published_step_index_cannot_disagree_with_the_selected_block() {
+    let msg: Vec<u8> = (0..200u8).collect();
+    let layout = HashLayout { message_blocks: vec![6] };
+    let (blocks, digests) = native_chain(&[&msg], &layout);
+
+    let mut cs = TestConstraintSystem::<S>::new();
+    let shared = alloc_shared(&mut cs, &blocks, &digests).unwrap();
+    synthesize_step(&mut cs, &shared, &layout, 3).unwrap();
+    assert!(cs.is_satisfied(), "honest step 3 should verify");
+
+    // Claim block 5 while still compressing block 3. Both the aux and
+    // the input are moved, so the `inputize` equality still holds and
+    // the only constraint left to object is the binding one.
+    cs.set("public step index/num", S::from(5u64));
+    cs.set("inputize step index/input variable", S::from(5u64));
+    assert!(
+      !cs.is_satisfied(),
+      "a step may publish an index it did not compress"
+    );
+    assert_eq!(
+      cs.which_is_unsatisfied(),
+      Some("the published index is the block actually selected")
+    );
+  }
+
   /// Every step verifies, and the core selects a digest equal to the real
   /// SHA-256 of the message — across two independent messages sharing one
   /// step set, which is §4.2.1's claim.
@@ -607,7 +676,7 @@ mod core_tests {
     let layout = HashLayout { message_blocks: vec![BLOCKS] };
 
     // Native chain for the shared witness.
-    let padded = crate::sha256_var::native_padded_buffer_sized(&msg, msg.len(), MAXB, BLOCKS);
+    let padded = crate::sha256_var::native_padded_buffer_sized(&msg, msg.len(), MAXB, BLOCKS).unwrap();
     let mut blocks = Vec::new();
     let mut digests = Vec::new();
     let mut state = IV;

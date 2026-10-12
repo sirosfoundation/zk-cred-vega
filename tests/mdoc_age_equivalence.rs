@@ -68,7 +68,6 @@ fn load(name: &str) -> Loaded {
       },
       namespace: ns.to_string(),
       doc_type: json["doc_type"].as_str().unwrap().to_string(),
-      num_namespaces: lm["num_namespaces"].as_u64().unwrap() as usize,
       num_entries: lm["num_entries"].as_u64().unwrap() as usize,
       item_bytes: hex::decode(t["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: t["digest_offset"].as_u64().unwrap() as usize,
@@ -160,7 +159,7 @@ fn the_two_arithmetizations_agree_on_every_witness() {
     let mut w = l.w.clone();
     mutate(&mut w);
     // An honest prover's shared witness is derived from its own witness.
-    let hash = HashWitness::from_witness(&w);
+    let hash = HashWitness::from_witness(&w).unwrap();
     let sc = sc_accepts(&l, &w, NOW, SESSION);
     let mc = mc_accepts(&l, &w, &hash, NOW, SESSION);
     assert_eq!(sc, expected, "{name}: single-circuit verdict");
@@ -176,7 +175,7 @@ fn the_two_arithmetizations_agree_on_every_witness() {
 #[test]
 fn the_two_arithmetizations_agree_on_session_and_clock() {
   let l = load("mdl_iso18013");
-  let hash = HashWitness::from_witness(&l.w);
+  let hash = HashWitness::from_witness(&l.w).unwrap();
   for (name, now, session, expected) in [
     ("honest", NOW, SESSION, true),
     ("replayed session", NOW, b"a-different-verifier-session-002", false),
@@ -189,7 +188,7 @@ fn the_two_arithmetizations_agree_on_session_and_clock() {
 
   // Expired credential, under both.
   let l = load("mdl_expired");
-  let hash = HashWitness::from_witness(&l.w);
+  let hash = HashWitness::from_witness(&l.w).unwrap();
   assert!(!sc_accepts(&l, &l.w, NOW, SESSION), "expired must fail single-circuit");
   assert!(!mc_accepts(&l, &l.w, &hash, NOW, SESSION), "expired must fail folded");
 }
@@ -208,7 +207,7 @@ fn the_two_arithmetizations_agree_on_session_and_clock() {
 fn a_shared_witness_that_is_not_the_credential_is_rejected() {
   let l = load("mdl_iso18013");
   let other = load("pid_arf18");
-  let wrong = HashWitness::from_witness(&other.w);
+  let wrong = HashWitness::from_witness(&other.w).unwrap();
 
   // The steps are internally consistent — they are a real SHA-256 chain,
   // just of the wrong document — so this is not caught by the steps.
@@ -230,7 +229,7 @@ fn a_shared_witness_that_is_not_the_credential_is_rejected() {
 #[test]
 fn a_tampered_shared_block_is_rejected() {
   let l = load("mdl_iso18013");
-  let mut hash = HashWitness::from_witness(&l.w);
+  let mut hash = HashWitness::from_witness(&l.w).unwrap();
   hash.blocks[2][7] ^= 0x01;
   assert!(!mc_accepts(&l, &l.w, &hash, NOW, SESSION), "a tampered shared block must be rejected");
 }
@@ -239,7 +238,7 @@ fn a_tampered_shared_block_is_rejected() {
 #[test]
 fn a_tampered_intermediate_digest_is_rejected() {
   let l = load("mdl_iso18013");
-  let mut hash = HashWitness::from_witness(&l.w);
+  let mut hash = HashWitness::from_witness(&l.w).unwrap();
   hash.digests[3][0] ^= 0x80;
   assert!(!mc_accepts(&l, &l.w, &hash, NOW, SESSION), "a tampered intermediate digest must be rejected");
 }
@@ -263,7 +262,7 @@ fn a_tampered_intermediate_digest_is_rejected() {
 fn mc01_unproven_blocks_leave_the_signed_digest_free() {
   let l = load("mdl_iso18013");
   let layout = mdoc_age_mc::layout();
-  let mut hash = HashWitness::from_witness(&l.w);
+  let mut hash = HashWitness::from_witness(&l.w).unwrap();
 
   // The block whose digest the core selects for the Sig_structure.
   let terminal = zk_cred_vega::sha256_var::terminal_block_for_len(l.w.sig_structure.len()) - 1;
@@ -285,4 +284,78 @@ fn mc01_unproven_blocks_leave_the_signed_digest_free() {
     cs.which_is_unsatisfied().is_some(),
     "step {terminal} is what binds this digest — the index check is what forces it to be folded"
   );
+}
+
+/// Both deployment circuits are driven through the `VegaCircuit` trait
+/// exactly as the prover drives them, and what they publish is what they
+/// say they publish.
+///
+/// Every other test here calls the gadgets directly, which skips the two
+/// places this one covers: the `precommitted` vector's layout, and the
+/// agreement between `public_values` and the values `synthesize` actually
+/// inputizes. Both are pure bookkeeping and both are easy to get wrong —
+/// adding one value to the credential-bound half left the folded core
+/// slicing the old layout, and that surfaces as an out-of-range panic
+/// inside the prover rather than a verification failure. The end-to-end
+/// tests catch it, but they are `#[ignore]`d and CI does not run them, so
+/// it would have merged.
+///
+/// `TestConstraintSystem::verify` is the sharp part: it requires the
+/// declared public values to equal the inputized ones, position by
+/// position.
+#[test]
+fn both_deployment_circuits_publish_what_they_declare() {
+  use vega_prover::traits::circuit::VegaCircuit;
+  use zk_cred_vega::mdoc_age_circuit::{MdocAgeCircuit, PRECOMMITTED_LEN, PUBLIC_INPUT_LEN};
+  use zk_cred_vega::Engine_;
+
+  for name in ["mdl_iso18013", "pid_arf18", "photo_id_23220"] {
+    let l = load(name);
+
+    // ---- single circuit ----
+    let sc = MdocAgeCircuit::<Engine_> {
+      witness: l.w.clone(),
+      ecdsa: l.e.clone(),
+      cutoff: *CUTOFF,
+      now: *NOW,
+      device_auth_digest: *SESSION,
+    };
+    let declared = sc.public_values().expect("public values");
+    assert_eq!(declared.len(), PUBLIC_INPUT_LEN, "{name}: single-circuit public input count");
+
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let shared = sc.shared(&mut cs).expect("shared");
+    let pre = sc.precommitted(&mut cs, &shared).expect("precommitted");
+    assert_eq!(pre.len(), PRECOMMITTED_LEN, "{name}: single-circuit precommitted length");
+    sc.synthesize(&mut cs, &shared, &pre, None).expect("synthesize");
+    assert!(cs.is_satisfied(), "{name}: single circuit unsatisfied at {:?}", cs.which_is_unsatisfied());
+    assert!(cs.verify(&declared), "{name}: the single circuit published something it did not declare");
+
+    // ---- folded core and one step ----
+    let (steps, core) =
+      mdoc_age_mc::build(&l.w, &l.e, *CUTOFF, *NOW, *SESSION).expect("folded build");
+    let core_declared = core.public_values().expect("core public values");
+    assert_eq!(core_declared, declared, "{name}: the two arithmetizations must publish the same statement");
+
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let shared = core.shared(&mut cs).expect("core shared");
+    let pre = core.precommitted(&mut cs, &shared).expect("core precommitted");
+    assert_eq!(pre.len(), PRECOMMITTED_LEN, "{name}: folded core precommitted length");
+    core.synthesize(&mut cs, &shared, &pre, None).expect("core synthesize");
+    assert!(cs.is_satisfied(), "{name}: folded core unsatisfied at {:?}", cs.which_is_unsatisfied());
+    assert!(cs.verify(&core_declared), "{name}: the folded core published something it did not declare");
+
+    for step in [0, steps.len() / 2, steps.len() - 1] {
+      let s = &steps[step];
+      let mut cs = TestConstraintSystem::<Scalar>::new();
+      let shared = s.shared(&mut cs).expect("step shared");
+      let pre = s.precommitted(&mut cs, &shared).expect("step precommitted");
+      s.synthesize(&mut cs, &shared, &pre, None).expect("step synthesize");
+      assert!(cs.is_satisfied(), "{name}: step {step} unsatisfied");
+      assert!(
+        cs.verify(&s.public_values().expect("step public values")),
+        "{name}: step {step} published an index it did not declare"
+      );
+    }
+  }
 }

@@ -75,7 +75,6 @@ fn circuit(name: &str, cutoff: &[u8; 10], session: &[u8; 32], device_key: Option
       },
       namespace: ns.to_string(),
       doc_type: json["doc_type"].as_str().unwrap().to_string(),
-      num_namespaces: lm["num_namespaces"].as_u64().unwrap() as usize,
       num_entries: lm["num_entries"].as_u64().unwrap() as usize,
       item_bytes: hex::decode(t["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: t["digest_offset"].as_u64().unwrap() as usize,
@@ -195,7 +194,7 @@ fn artifact_sizes() {
 fn mc_build(name: &str, cutoff: &[u8; 10], session: &[u8; 32])
   -> (Vec<zk_cred_vega::mdoc_age_mc::StepCircuit<Engine_>>, zk_cred_vega::mdoc_age_mc::CoreCircuit<Engine_>) {
   let c = circuit(name, cutoff, session, None);
-  zk_cred_vega::mdoc_age_mc::build(&c.witness, &c.ecdsa, c.cutoff, c.now, c.device_auth_digest)
+  zk_cred_vega::mdoc_age_mc::build(&c.witness, &c.ecdsa, c.cutoff, c.now, c.device_auth_digest).unwrap()
 }
 
 /// The folded form proves and verifies the same statement.

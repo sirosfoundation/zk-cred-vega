@@ -52,7 +52,6 @@ fn main() {
       },
       namespace: ns.to_string(),
       doc_type: json["doc_type"].as_str().unwrap().to_string(),
-      num_namespaces: lm["num_namespaces"].as_u64().unwrap() as usize,
       num_entries: lm["num_entries"].as_u64().unwrap() as usize,
       item_bytes: hex::decode(target["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: target["digest_offset"].as_u64().unwrap() as usize,
@@ -99,7 +98,7 @@ fn main() {
       name,
       sig.len(),
       zk_cred_vega::sha256_var::terminal_block_for_len(sig.len()),
-      witness.num_namespaces,
+      json["landmarks"]["num_namespaces"].as_u64().unwrap(),
       total_entries,
       cs.num_constraints()
     );

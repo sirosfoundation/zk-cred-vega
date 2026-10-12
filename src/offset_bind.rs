@@ -433,6 +433,30 @@ fn tstr_header(len: usize) -> Result<Vec<u8>, SynthesisError> {
   })
 }
 
+/// How many bytes `<tstr header><namespace><entry-count map header>`
+/// occupies — the offset from the namespace anchor to the first digest
+/// entry.
+///
+/// Published, so prover and verifier must agree on it exactly. One
+/// function rather than three copies: it is computed here to build the
+/// anchor, in `mdoc_age_circuit`'s `public_values` to declare it, and
+/// checked against the verifier's own namespace in
+/// `check_public_values`.
+pub fn namespace_prefix_len(namespace: &str, num_entries: usize) -> Result<usize, SynthesisError> {
+  if num_entries >= 256 {
+    return Err(reject(format!(
+      "{num_entries} valueDigests entries needs a wider map header than this binding encodes"
+    )));
+  }
+  Ok(tstr_header(namespace.len())?.len() + namespace.len() + map_header(num_entries).len())
+}
+
+/// How many bytes the `docType` entry `67 "docType" <tstr>` occupies —
+/// the published prefix of that anchor's window.
+pub fn doc_type_prefix_len(doc_type: &str) -> Result<usize, SynthesisError> {
+  Ok(DOC_TYPE_KEY.len() + tstr_header(doc_type.len())?.len() + doc_type.len())
+}
+
 /// A byte's value as a linear combination of its eight big-endian bits,
 /// scaled by `scale`. Free: no constraint, just a re-weighting of
 /// variables the caller has already allocated for the hash.
@@ -500,6 +524,27 @@ fn pack_constant<Scalar: PrimeField>(window: &[u8]) -> Vec<Scalar> {
 /// and an EU PID differed by 24 constraints, which under a fixed-setup
 /// folding system means two setups for what is meant to be one circuit.
 pub const MAX_ANCHOR_WINDOW: usize = 48;
+
+/// Width of the two anchors whose *content* depends on the document: the
+/// requested namespace's sub-map header and the `docType` entry.
+///
+/// Fixed, and that is the whole point. An anchor sized to its own
+/// literal makes the window's linear combinations span a
+/// document-dependent set of message bits, and comparing it to a literal
+/// puts document-dependent *constants* in the matrices. Neither changes
+/// the constraint count, so a count-only shape test sees nothing — and a
+/// proving key set up from one document type then does not fit another,
+/// which is the opposite of this circuit's reason to exist.
+///
+/// These two windows are therefore selected at a constant width and
+/// published verbatim; the verifier parses them. 40 bytes covers
+/// `67 "docType" 78 <len> <docType>` for a 30-character `docType` and
+/// `<tstr ns> <ns> <map header>` for a 36-character namespace, against
+/// the longest in use today at 23.
+pub const ANCHOR_TEXT_WINDOW: usize = 40;
+
+/// Field elements an [`ANCHOR_TEXT_WINDOW`] window packs into.
+pub const ANCHOR_TEXT_PACKS: usize = ANCHOR_TEXT_WINDOW.div_ceil(BYTES_PER_PACK);
 
 /// The candidate offsets every anchor search uses. Constant for a given
 /// buffer size, independent of the literal being searched for.
@@ -593,22 +638,155 @@ where
   Ok(SelectedWindow { packs, offset })
 }
 
-/// Selects and pins an anchor literal, with a candidate set and pack
-/// count that are both independent of the literal's content.
+/// Selects a fixed-width window at `real_offset`, blanks everything past
+/// `prefix_len`, and returns the masked window alongside `prefix_len`
+/// itself as a bound variable.
 ///
-/// A `select_window` call emits one selection constraint per candidate per
-/// pack, so a literal that rounds to a different number of packs changes
-/// the circuit's shape. Each anchor therefore declares the pack count it
-/// must always occupy — the counts differ between anchors, which is fine;
-/// what matters is that none of them varies with the *document*.
+/// This is how the two anchors whose content depends on the document —
+/// the `docType` entry and the requested namespace's sub-map header —
+/// reach the verifier. Three things have to hold at once, and only this
+/// shape gets all three.
 ///
-/// That is a real restriction on which document types this circuit can
-/// serve without a new setup, so it is enforced rather than assumed: a
-/// `docType` or namespace long enough to spill into another pack has to
-/// be caught here, not discovered as a shape mismatch after the artifact
-/// ships. The three target types sit comfortably inside their bands --
-/// namespace windows run 18 to 26 bytes and `docType` windows 30 to 32,
-/// both two packs.
+/// **The width must be constant.** Sizing a window to its own literal
+/// makes its packs span a document-dependent set of message bits, and
+/// comparing it to that literal writes the literal into the matrices.
+/// Neither shows up in the constraint count, so an mDL, an EU PID and a
+/// Photo ID produced three different R1CS instances that a count-only
+/// shape test called identical.
+///
+/// **The tail must not be published.** A constant-width window overruns
+/// its literal, and in the namespace's case what follows is the start of
+/// the digest table — a `digestID` and part of a 32-byte digest. Those
+/// are stable per-credential identifiers, and publishing them is the
+/// linkability leak that made r12 unusable. So every byte at or past
+/// `prefix_len` is forced to zero before the window is packed.
+///
+/// **`prefix_len` must be bound to that mask.** It is where the caller
+/// takes the digest region to begin, so a prover free to misdeclare it
+/// is a prover free to move the region. Deriving the mask and the
+/// published length from one one-hot makes them the same quantity rather
+/// than two that happen to agree.
+pub fn select_masked_text_anchor<Scalar, CS>(
+  mut cs: CS,
+  bits: &[Boolean],
+  native: &[u8],
+  real_offset: usize,
+  prefix_len: usize,
+  label: &str,
+) -> Result<(Vec<AllocatedNum<Scalar>>, AllocatedNum<Scalar>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  if prefix_len == 0 || prefix_len > ANCHOR_TEXT_WINDOW {
+    return Err(reject(format!(
+      "{label} prefix is {prefix_len} bytes, outside this circuit's fixed \
+       1..={ANCHOR_TEXT_WINDOW}-byte anchor window"
+    )));
+  }
+  let window = select_window::<Scalar, _>(
+    cs.namespace(|| "select"),
+    bits,
+    native,
+    &anchor_offsets(native.len()),
+    real_offset,
+    ANCHOR_TEXT_WINDOW,
+  )?;
+  let window_bits = unpack_window_bits(cs.namespace(|| "unpack"), &window, ANCHOR_TEXT_WINDOW)?;
+
+  // One-hot over every length the window admits — a constant candidate
+  // set, so the shape does not move with the document.
+  let mut len_sel = Vec::with_capacity(ANCHOR_TEXT_WINDOW);
+  let mut sum = LinearCombination::<Scalar>::zero();
+  let mut len_lc = LinearCombination::<Scalar>::zero();
+  for n in 1..=ANCHOR_TEXT_WINDOW {
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(
+      cs.namespace(|| format!("length {n}")),
+      Some(n == prefix_len),
+    )?;
+    sum = sum + b.get_variable();
+    len_lc = len_lc + (Scalar::from(n as u64), b.get_variable());
+    len_sel.push(b);
+  }
+  cs.enforce(|| "exactly one length", |lc| lc + &sum, |lc| lc + CS::one(), |lc| lc + CS::one());
+  let prefix = AllocatedNum::alloc(cs.namespace(|| "prefix length"), || Ok(Scalar::from(prefix_len as u64)))?;
+  cs.enforce(
+    || "the published length is the one that masks the window",
+    |lc| lc + &len_lc,
+    |lc| lc + CS::one(),
+    |lc| lc + prefix.get_variable(),
+  );
+
+  // `active[j]` is 1 while `j < prefix_len`: a free sum over the lengths
+  // that reach past byte `j`.
+  let one = CS::one();
+  let mut masked_bytes = Vec::with_capacity(ANCHOR_TEXT_WINDOW);
+  for j in 0..ANCHOR_TEXT_WINDOW {
+    let mut active = LinearCombination::<Scalar>::zero();
+    for (i, b) in len_sel.iter().enumerate() {
+      if i + 1 > j {
+        active = active + b.get_variable();
+      }
+    }
+    let byte = byte_lc::<Scalar>(&window_bits, one, j, Scalar::ONE);
+    let keep = j < prefix_len;
+    let value = if keep { native.get(real_offset + j).copied().unwrap_or(0) } else { 0 };
+    let out = AllocatedNum::alloc(cs.namespace(|| format!("masked byte {j}")), || Ok(Scalar::from(value as u64)))?;
+    cs.enforce(
+      || format!("byte {j} survives only inside the prefix"),
+      |lc| lc + &byte,
+      |lc| lc + &active,
+      |lc| lc + out.get_variable(),
+    );
+    masked_bytes.push(out);
+  }
+
+  // Repack the masked bytes the way `pack_at` weights a window, so the
+  // verifier reassembles them with one rule.
+  let mut packs = Vec::with_capacity(ANCHOR_TEXT_PACKS);
+  for p in 0..ANCHOR_TEXT_PACKS {
+    let lo = p * BYTES_PER_PACK;
+    let n = (ANCHOR_TEXT_WINDOW - lo).min(BYTES_PER_PACK);
+    let mut lc = LinearCombination::<Scalar>::zero();
+    let mut value = Some(Scalar::ZERO);
+    for i in 0..n {
+      let mut coeff = Scalar::ONE;
+      for _ in 0..(n - 1 - i) {
+        coeff *= Scalar::from(256u64);
+      }
+      lc = lc + (coeff, masked_bytes[lo + i].get_variable());
+      value = value.and_then(|a| masked_bytes[lo + i].get_value().map(|b| a + coeff * b));
+    }
+    let out = AllocatedNum::alloc(cs.namespace(|| format!("masked pack {p}")), || {
+      value.ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+      || format!("masked pack {p} recombines"),
+      |lc2| lc2 + &lc,
+      |lc2| lc2 + CS::one(),
+      |lc2| lc2 + out.get_variable(),
+    );
+    packs.push(out);
+  }
+
+  Ok((packs, prefix))
+}
+
+/// Selects a window and pins it to a literal that is **the same for
+/// every document type**.
+///
+/// Only for those. A literal that varies with the document — a
+/// namespace, a `docType`, an entry count — must not come through here:
+/// the comparison puts its bytes into matrix coefficients and the window
+/// length decides which message bits each row spans, so two documents
+/// get two different R1CS instances with the same constraint count. Use
+/// a fixed [`ANCHOR_TEXT_WINDOW`] window and publish it instead, and let
+/// the verifier check the content.
+///
+/// `expected_packs` is still declared and enforced, because a literal
+/// that rounds to a different number of packs changes the constraint
+/// count too, and a mismatch should fail here rather than show up as an
+/// unusable artifact later.
 pub fn select_anchor<Scalar, CS>(
   mut cs: CS,
   bits: &[Boolean],
@@ -715,9 +893,23 @@ pub struct RegionBinding<Scalar: PrimeField> {
   /// Offset of the `deviceKeyInfo` key, which closes the whole
   /// `valueDigests` table: the hard upper bound.
   pub region_end: LinearCombination<Scalar>,
-  /// The credential's `docType`, read from the signed bytes so a verifier
-  /// learns which document type the proof is about.
+  /// The credential's `docType` entry — `67 "docType"`, the value's
+  /// `tstr` header and the value — read from the signed bytes at a fixed
+  /// [`ANCHOR_TEXT_WINDOW`] width, so a verifier learns which document
+  /// type the proof is about and this circuit's shape does not depend on
+  /// which that is. Trailing bytes past the `docType` value are whatever
+  /// the MSO has there; the verifier checks the prefix.
   pub doc_type: Vec<AllocatedNum<Scalar>>,
+  /// The requested namespace's sub-map header, the same way: the `tstr`
+  /// header, the namespace itself and its entry-count map header, at a
+  /// fixed width.
+  pub namespace: Vec<AllocatedNum<Scalar>>,
+  /// How many bytes of [`Self::namespace`] that header occupies, so
+  /// `region_start` can be `namespace_offset + this` without a
+  /// document-dependent constant. Published: a verifier that knows which
+  /// namespace it asked for knows what this must be, and checking it is
+  /// what stops a prover shifting the digest region by misdeclaring it.
+  pub namespace_prefix_len: AllocatedNum<Scalar>,
   /// The holder's device public key, read out of the issuer-signed bytes.
   ///
   /// **Keep these private.** They are the holder binding's input, not its
@@ -740,10 +932,9 @@ pub struct CredentialShape<'a> {
   /// The credential's `docType`, which for an mDL is neither equal to nor
   /// the same length as its namespace.
   pub doc_type: &'a str,
-  /// How many namespaces the `valueDigests` table holds: one for an mDL
-  /// or EU PID, three for a Photo ID.
-  pub num_namespaces: usize,
-  /// How many entries the requested namespace's own map holds.
+  /// How many entries the requested namespace's own map holds. Used only
+  /// to size the namespace sub-map header natively — it feeds an
+  /// allocated variable, never a matrix coefficient.
   pub num_entries: usize,
 }
 
@@ -794,22 +985,26 @@ where
   if shape.num_entries >= 256 {
     return Err(reject(format!("{} valueDigests entries needs a wider map header than this binding encodes", shape.num_entries)));
   }
-  if shape.num_namespaces >= 256 {
-    return Err(reject(format!("{} namespaces needs a wider map header than this binding encodes", shape.num_namespaces)));
-  }
 
-  // ---- Anchor 1: `6C "valueDigests" <namespace-count map header>` ---
-  // Opens the table. Pinning the namespace count here stops a prover
-  // claiming a table of a different shape than the issuer signed.
-  let mut open = VALUE_DIGESTS_OPEN_KEY.to_vec();
-  open.extend_from_slice(&map_header(shape.num_namespaces));
-  let open_len = open.len();
+  // ---- Anchor 1: `6C "valueDigests"` -------------------------------
+  // Opens the table. The same thirteen bytes in every MSO, so it stays a
+  // literal comparison.
+  //
+  // An earlier revision appended `map_header(num_namespaces)` to pin the
+  // table's own shape. That byte is `A1` for an mDL and `A3` for a Photo
+  // ID, so it put the *document* into a matrix coefficient — and it
+  // bought nothing: the count is used nowhere else, and the only thing
+  // this anchor has to establish is a lower bound for where the
+  // requested namespace's sub-map may begin. Since a CBOR map header is
+  // at least one byte, `+ 14` is a sound lower bound whatever the count,
+  // and the sub-map itself is pinned independently by anchor 2.
+  let open_len = VALUE_DIGESTS_OPEN_KEY.len() + 1;
   let table_window = select_anchor::<Scalar, _>(
     cs.namespace(|| "valueDigests anchor"),
     bits,
     native,
     landmarks.value_digests_key,
-    &open,
+    VALUE_DIGESTS_OPEN_KEY,
     1,
     "valueDigests",
   )?;
@@ -819,22 +1014,59 @@ where
   // For a single-namespace credential this sits immediately after anchor
   // 1; for Photo ID it is one of three, and `org.iso.23220.1` -- where
   // `birth_date` lives -- sorts first rather than last.
+  //
+  // Selected at a fixed width and *published* rather than compared to a
+  // literal, because the literal is the namespace and would otherwise
+  // reach the matrices. The verifier knows which namespace it asked
+  // for, so checking the prefix is its job, and it is free there.
   let mut ns_open = tstr_header(shape.namespace.len())?;
   ns_open.extend_from_slice(shape.namespace.as_bytes());
   ns_open.extend_from_slice(&map_header(shape.num_entries));
   let ns_open_len = ns_open.len();
-  let ns_window = select_anchor::<Scalar, _>(
+  if ns_open_len > ANCHOR_TEXT_WINDOW {
+    return Err(reject(format!(
+      "the namespace sub-map header for `{}` is {ns_open_len} bytes, over this circuit's \
+       fixed {ANCHOR_TEXT_WINDOW}-byte anchor window",
+      shape.namespace
+    )));
+  }
+  let ns_end = landmarks.namespace_key + ANCHOR_TEXT_WINDOW;
+  if ns_end > native.len() {
+    return Err(reject(format!(
+      "the namespace landmark at {} plus a {ANCHOR_TEXT_WINDOW}-byte window runs past the \
+       {}-byte buffer",
+      landmarks.namespace_key,
+      native.len()
+    )));
+  }
+  if &native[landmarks.namespace_key..landmarks.namespace_key + ns_open_len] != ns_open.as_slice() {
+    return Err(reject(format!(
+      "the namespace landmark at {} does not point at `{}` in the signed bytes",
+      landmarks.namespace_key, shape.namespace
+    )));
+  }
+  let ns_offset = select_window::<Scalar, _>(
+    cs.namespace(|| "namespace offset"),
+    bits,
+    native,
+    &anchor_offsets(native.len()),
+    landmarks.namespace_key,
+    1,
+  )?
+  .offset;
+  let (ns_packs, ns_prefix_len) = select_masked_text_anchor::<Scalar, _>(
     cs.namespace(|| "namespace anchor"),
     bits,
     native,
     landmarks.namespace_key,
-    &ns_open,
-    2,
+    ns_open_len,
     "namespace",
   )?;
 
-  // The namespace's entries begin right after its own header.
-  let region_start = ns_window.offset.clone() + (Scalar::from(ns_open_len as u64), CS::one());
+  // The namespace's entries begin right after its own header. The length
+  // is a variable, not a constant: as a constant it is 18 for an mDL and
+  // 25 for an EU PID, and that difference alone is a different R1CS.
+  let region_start = ns_offset.clone() + ns_prefix_len.get_variable();
 
   // The namespace sub-map must sit inside the table, not before it.
   if landmarks.namespace_key < landmarks.value_digests_key + open_len {
@@ -846,7 +1078,7 @@ where
   }
   enforce_ge(
     cs.namespace(|| "namespace sits inside the table"),
-    &ns_window.offset,
+    &ns_offset,
     &(table_window.offset.clone() + (Scalar::from(open_len as u64), CS::one())),
     landmarks.namespace_key - (landmarks.value_digests_key + open_len),
     16,
@@ -931,43 +1163,55 @@ where
   let device_key = (coords[0].clone(), coords[1].clone());
 
   // ---- docType, read out for the verifier --------------------------
-  let doc_type_header = tstr_header(shape.doc_type.len())?;
-  let doc_type_window_len = DOC_TYPE_KEY.len() + doc_type_header.len() + shape.doc_type.len();
-
-  // The whole window is pinned to a literal: the key, the value's tstr
-  // header, and the value itself. The docType is a public output, so
-  // there is nothing in it to hide — and pinning it to the bytes that
-  // were actually signed is what stops a prover naming a document type
-  // the issuer did not.
+  // Selected at the same fixed width as the namespace anchor, and for
+  // the same reason: `org.iso.18013.5.1.mDL` and
+  // `eu.europa.ec.eudi.pid.1` are different lengths *and* different
+  // bytes, so a literal comparison here writes the document type into
+  // the matrices. The window is published instead — the `docType` was
+  // always a public output, so a literal comparison was only ever
+  // duplicating a check the verifier has to do anyway.
   let mut expected = DOC_TYPE_KEY.to_vec();
-  expected.extend_from_slice(&doc_type_header);
+  expected.extend_from_slice(&tstr_header(shape.doc_type.len())?);
   expected.extend_from_slice(shape.doc_type.as_bytes());
-  let doc_type_end = landmarks.doc_type_key + doc_type_window_len;
+  if expected.len() > ANCHOR_TEXT_WINDOW {
+    return Err(reject(format!(
+      "the docType entry for `{}` is {} bytes, over this circuit's fixed \
+       {ANCHOR_TEXT_WINDOW}-byte anchor window",
+      shape.doc_type,
+      expected.len()
+    )));
+  }
+  let doc_type_end = landmarks.doc_type_key + ANCHOR_TEXT_WINDOW;
   if doc_type_end > native.len() {
     return Err(reject(format!(
-      "docType landmark at {} plus a {doc_type_window_len}-byte window runs past the {}-byte buffer",
+      "docType landmark at {} plus a {ANCHOR_TEXT_WINDOW}-byte window runs past the {}-byte buffer",
       landmarks.doc_type_key,
       native.len()
     )));
   }
-  let doc_type_bytes = &native[landmarks.doc_type_key..doc_type_end];
-  if doc_type_bytes != expected.as_slice() {
+  if &native[landmarks.doc_type_key..landmarks.doc_type_key + expected.len()] != expected.as_slice() {
     return Err(reject(format!(
       "the docType landmark at {} does not point at `{}` in the signed bytes",
       landmarks.doc_type_key, shape.doc_type
     )));
   }
-  let doc_window = select_anchor::<Scalar, _>(
+  let (doc_packs, _) = select_masked_text_anchor::<Scalar, _>(
     cs.namespace(|| "docType anchor"),
     bits,
     native,
     landmarks.doc_type_key,
-    &expected,
-    2,
+    expected.len(),
     "docType",
   )?;
 
-  Ok(RegionBinding { region_start, region_end, doc_type: doc_window.packs, device_key })
+  Ok(RegionBinding {
+    region_start,
+    region_end,
+    doc_type: doc_packs,
+    namespace: ns_packs,
+    namespace_prefix_len: ns_prefix_len,
+    device_key,
+  })
 }
 
 #[cfg(test)]

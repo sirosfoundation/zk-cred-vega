@@ -46,7 +46,6 @@ fn load() -> (MdocAgeWitness, zk_cred_vega::ecdsa::EcdsaP256Witness<Scalar>) {
         doc_type_key: lm["doc_type_offset"].as_u64().unwrap() as usize,
       },
       namespace: ns.to_string(), doc_type: json["doc_type"].as_str().unwrap().to_string(),
-      num_namespaces: lm["num_namespaces"].as_u64().unwrap() as usize,
       num_entries: lm["num_entries"].as_u64().unwrap() as usize,
       item_bytes: hex::decode(t["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: t["digest_offset"].as_u64().unwrap() as usize,
@@ -66,7 +65,7 @@ fn load() -> (MdocAgeWitness, zk_cred_vega::ecdsa::EcdsaP256Witness<Scalar>) {
 fn main() {
   let (w, e) = load();
   let l = mdoc_age_mc::layout();
-  let hw = HashWitness::from_witness(&w);
+  let hw = HashWitness::from_witness(&w).unwrap();
 
   // Single circuit, for reference.
   let mut cs = TestConstraintSystem::<Scalar>::new();

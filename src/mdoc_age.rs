@@ -156,16 +156,22 @@ pub fn candidate_value_key_offsets() -> Vec<usize> {
 /// the end of it that depends on how the date is encoded.
 const VALUE_KEY_LEN: usize = 13;
 
-/// Fixed width of the exposed namespace, NUL-padded.
+/// Field elements the published namespace window occupies.
 ///
-/// The namespace must be published at a constant length or the circuit's
-/// shape would depend on it: an mDL's `org.iso.18013.5.1` is 17
-/// characters and an EU PID's is 23, and allocating one variable per
-/// character made those two circuits differ by exactly 6 constraints --
-/// caught by `all_document_types_produce_an_identical_circuit_shape`
-/// while fixing CIRCUIT-03. 32 covers every namespace the anchor's own
-/// two-pack bound already admits.
-pub const NAMESPACE_OUT_BYTES: usize = 32;
+/// The namespace reaches the verifier as the fixed-width anchor window
+/// it was selected from — `<tstr header><namespace><entry-count map
+/// header>` followed by whatever the MSO has next — not as a string.
+///
+/// Two earlier revisions got this wrong in two different ways. The first
+/// allocated one variable per character, so an mDL's 17-character
+/// `org.iso.18013.5.1` and an EU PID's 23 differed by exactly 6
+/// constraints. The second NUL-padded to a fixed 32 bytes, which fixed
+/// the count but left the namespace's *bytes* as matrix coefficients —
+/// invisible to a count-only shape test — and made decoding
+/// non-injective, since a namespace containing a NUL would be read back
+/// as a shorter one. Publishing the window verbatim and letting the
+/// verifier check the prefix is both shape-free and unambiguous.
+pub const NAMESPACE_OUT_PACKS: usize = offset_bind::ANCHOR_TEXT_PACKS;
 
 /// `71 "elementIdentifier" 6a "birth_date"` -- the trailing literal that
 /// proves the item is the attribute this circuit claims it is.
@@ -248,9 +254,6 @@ pub struct MdocAgeWitness {
   /// anchor. What reaches the verifier is the window read out of the
   /// signed bytes, returned as [`MdocAgeOutputs::doc_type`].
   pub doc_type: String,
-  /// How many namespaces the credential's `valueDigests` table holds.
-  /// One for an mDL or an EU PID, three for a Photo ID.
-  pub num_namespaces: usize,
   /// How many entries the requested namespace's own map holds.
   pub num_entries: usize,
   /// The `birth_date` `IssuerSignedItem`, tag(24)-wrapped, as signed.
@@ -312,9 +315,8 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// otherwise a prover could pick a time when the credential was still
   /// valid.
   pub now: Vec<AllocatedNum<Scalar>>,
-  /// The namespace the attribute was read from, NUL-padded to
-  /// [`NAMESPACE_OUT_BYTES`] so the circuit's shape does not depend on
-  /// its length.
+  /// The requested namespace's sub-map header as read from the signed
+  /// bytes, packed into [`NAMESPACE_OUT_PACKS`] field elements.
   ///
   /// Without this the accepted statement does not say *which* namespace
   /// the `birth_date` came from. A Photo ID carries three, and the
@@ -322,6 +324,11 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// one -- so a verifier that does not pin this is accepting a weaker
   /// statement than it thinks.
   pub namespace: Vec<AllocatedNum<Scalar>>,
+  /// How many bytes of [`Self::namespace`] the header occupies. The
+  /// verifier must check this against the namespace it asked for: it is
+  /// where the digest region is taken to begin, so a prover free to
+  /// misdeclare it is a prover free to move the region.
+  pub namespace_prefix_len: AllocatedNum<Scalar>,
   /// True iff the holder's birthdate is at or before `cutoff`.
   ///
   /// **Publishing this is not enough: the verifier must require the value
@@ -601,6 +608,7 @@ pub struct CredentialBinding<Scalar: ff::PrimeField> {
   pub issuer_qy: AllocatedNum<Scalar>,
   pub doc_type: Vec<AllocatedNum<Scalar>>,
   pub namespace: Vec<AllocatedNum<Scalar>>,
+  pub namespace_prefix_len: AllocatedNum<Scalar>,
   /// The holder's device key. Private — see [`MdocAgeOutputs`].
   pub device_key: (AllocatedNum<Scalar>, AllocatedNum<Scalar>),
   /// The ten ASCII characters of the issuer-signed birthdate. Private.
@@ -683,7 +691,6 @@ where
     offset_bind::CredentialShape {
       namespace: &witness.namespace,
       doc_type: &witness.doc_type,
-      num_namespaces: witness.num_namespaces,
       num_entries: witness.num_entries,
     },
     witness.landmarks,
@@ -750,29 +757,6 @@ where
   )?;
 
 
-  if witness.namespace.len() > NAMESPACE_OUT_BYTES {
-    return Err(offset_bind::reject(format!(
-      "namespace is {} bytes, over the {NAMESPACE_OUT_BYTES}-byte published width",
-      witness.namespace.len()
-    )));
-  }
-  let mut namespace_padded = witness.namespace.as_bytes().to_vec();
-  namespace_padded.resize(NAMESPACE_OUT_BYTES, 0);
-  let namespace_vars = namespace_padded
-    .iter()
-    .enumerate()
-    .map(|(i, &b)| {
-      let v = AllocatedNum::alloc(cs.namespace(|| format!("namespace byte {i}")), || Ok(Scalar::from(b as u64)))?;
-      cs.enforce(
-        || format!("namespace byte {i} matches the anchored literal"),
-        |lc| lc + v.get_variable() - (Scalar::from(b as u64), one),
-        |lc| lc + CS::one(),
-        |lc| lc,
-      );
-      Ok(v)
-    })
-    .collect::<Result<Vec<_>, SynthesisError>>()?;
-
   let (valid_from, valid_until) =
     offset_bind::bind_validity(cs.namespace(|| "validity"), &sig_bits, &padded, witness.landmarks.validity_info)?;
 
@@ -782,7 +766,8 @@ where
     valid_from,
     valid_until,
     doc_type: binding.doc_type,
-    namespace: namespace_vars,
+    namespace: binding.namespace,
+    namespace_prefix_len: binding.namespace_prefix_len,
     device_key: binding.device_key,
     birth_date: date,
   })
@@ -933,6 +918,7 @@ where
     cutoff: sess.cutoff,
     now: sess.now,
     namespace: cred.namespace,
+    namespace_prefix_len: cred.namespace_prefix_len,
     old_enough: sess.old_enough,
     device_auth_digest: sess.device_auth_digest,
   })

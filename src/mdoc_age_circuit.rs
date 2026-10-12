@@ -45,11 +45,23 @@
 //! | # | values | count |
 //! |---|---|---|
 //! | 1 | issuer `qx`, `qy` | 2 |
-//! | 2 | `docType`, packed 16 bytes at a time | 2 |
-//! | 3 | namespace, NUL-padded | 32 |
-//! | 4 | `cutoff`, one byte per element | 10 |
-//! | 5 | `DeviceAuthentication` digest, packed | 2 |
-//! | 6 | `old_enough` | 1 |
+//! | 2 | the `docType` anchor window, packed 16 bytes at a time | 3 |
+//! | 3 | the namespace anchor window, the same way | 3 |
+//! | 4 | the namespace window's prefix length | 1 |
+//! | 5 | `cutoff`, one byte per element | 10 |
+//! | 6 | `now`, one byte per element | 20 |
+//! | 7 | `DeviceAuthentication` digest, packed | 2 |
+//! | 8 | `old_enough` | 1 |
+//!
+//! Rows 2 to 4 are the **windows as they appear in the signed bytes**,
+//! not a reconstruction of the document type and namespace, and
+//! [`check_public_values`] parses them. That is not a presentation
+//! choice. Comparing an anchor to its literal in-circuit writes the
+//! literal into the R1CS matrices and sizes the window to it, so an mDL,
+//! an EU PID and a Photo ID produced three different matrices — with
+//! *identical* constraint counts, which is why a count-only shape test
+//! never saw it. Three matrices are three proving keys, and this circuit
+//! exists to have one.
 //!
 //! Deliberately absent: the device key, the validity timestamps and the
 //! `digestID`s. See [`crate::mdoc_age::MdocAgeOutputs`].
@@ -60,24 +72,56 @@ use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use ff::{Field, PrimeField, PrimeFieldBits};
 use vega_prover::traits::{circuit::VegaCircuit, Engine};
 
-use crate::mdoc_age::{self, MdocAgeWitness, NAMESPACE_OUT_BYTES};
+use crate::mdoc_age::{self, MdocAgeWitness, NAMESPACE_OUT_PACKS};
+
+/// Field elements the published `docType` window occupies.
+pub const DOC_TYPE_OUT_PACKS: usize = crate::offset_bind::ANCHOR_TEXT_PACKS;
 
 /// Number of public inputs, in the order documented above.
-pub const PUBLIC_INPUT_LEN: usize =
-  2 + 2 + NAMESPACE_OUT_BYTES + 10 + crate::offset_bind::TIMESTAMP_LEN + 2 + 1;
+pub const PUBLIC_INPUT_LEN: usize = PUBLIC_FROM_PRECOMMITTED + 10 + crate::offset_bind::TIMESTAMP_LEN + 2 + 1;
 
 /// How many of `precommitted`'s returned values become public inputs:
-/// issuer `qx`/`qy`, the packed `docType`, and the padded namespace.
-/// How many of `precommitted`'s returned values become public inputs.
+/// issuer `qx`/`qy`, the `docType` window, the namespace window and that
+/// window's prefix length.
+///
 /// Shared with [`crate::mdoc_age_mc`] rather than duplicated: two copies
 /// that must agree are two copies that can drift, and a drift here breaks
 /// verification for one arithmetization only.
-pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + 2 + NAMESPACE_OUT_BYTES;
+pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + DOC_TYPE_OUT_PACKS + NAMESPACE_OUT_PACKS + 1;
 
 /// Everything `precommitted` returns: the public prefix above, then the
-/// device key and the ten birthdate characters, which stay private.
-const PRECOMMITTED_LEN: usize =
+/// device key, the ten birthdate characters and the validity window,
+/// which stay private.
+pub const PRECOMMITTED_LEN: usize =
   PUBLIC_FROM_PRECOMMITTED + 2 + 10 + 2 * zk_cred_vega_timestamp_len();
+
+/// Flattens a [`mdoc_age::CredentialBinding`] into the vector
+/// `precommitted` returns, public prefix first.
+///
+/// Both arithmetizations call this rather than each building the vector
+/// themselves. They did build it themselves, and the duplication cost a
+/// day: adding one value to the credential-bound half left the folded
+/// core's `synthesize` slicing the old layout, which surfaces as an
+/// out-of-range panic inside the prover rather than as a verification
+/// failure. The order here and [`PUBLIC_FROM_PRECOMMITTED`] are one
+/// fact, so they live in one place.
+pub fn pack_precommitted<Scalar: PrimeField>(
+  cred: mdoc_age::CredentialBinding<Scalar>,
+) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+  let mut out = vec![cred.issuer_qx, cred.issuer_qy];
+  out.extend(cred.doc_type);
+  out.extend(cred.namespace);
+  out.push(cred.namespace_prefix_len);
+  out.push(cred.device_key.0);
+  out.push(cred.device_key.1);
+  out.extend(cred.birth_date);
+  out.extend(cred.valid_from);
+  out.extend(cred.valid_until);
+  if out.len() != PRECOMMITTED_LEN {
+    return Err(SynthesisError::Unsatisfiable);
+  }
+  Ok(out)
+}
 
 /// `offset_bind::TIMESTAMP_LEN`, usable in a `const` expression.
 const fn zk_cred_vega_timestamp_len() -> usize {
@@ -113,21 +157,29 @@ where
   fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
     let mut v = vec![self.ecdsa.qx, self.ecdsa.qy];
 
-    let mut doc = b"\x67docType".to_vec();
-    doc.push(if self.witness.doc_type.len() < 24 {
-      0x60 | self.witness.doc_type.len() as u8
-    } else {
-      0x78
-    });
-    if self.witness.doc_type.len() >= 24 {
-      doc.push(self.witness.doc_type.len() as u8);
-    }
-    doc.extend_from_slice(self.witness.doc_type.as_bytes());
-    v.extend(pack16::<E::Scalar>(&doc));
-
-    let mut ns = self.witness.namespace.as_bytes().to_vec();
-    ns.resize(NAMESPACE_OUT_BYTES, 0);
-    v.extend(ns.iter().map(|&b| E::Scalar::from(b as u64)));
+    // Both anchors are published as the fixed-width windows the circuit
+    // selected, read straight out of the signed bytes rather than
+    // reconstructed — the circuit's value is whatever is *there*, and
+    // reconstructing is how the two drift apart — and masked past the
+    // prefix exactly as the circuit masks them, because the tail of the
+    // namespace window is the start of the digest table.
+    let masked = |at: usize, prefix: usize| -> Result<Vec<E::Scalar>, SynthesisError> {
+      const W: usize = crate::offset_bind::ANCHOR_TEXT_WINDOW;
+      let bytes = self.witness.sig_structure.get(at..at + W).ok_or(SynthesisError::Unsatisfiable)?;
+      if prefix > W {
+        return Err(SynthesisError::Unsatisfiable);
+      }
+      let mut out = bytes.to_vec();
+      out[prefix..].fill(0);
+      Ok(pack16::<E::Scalar>(&out))
+    };
+    let ns_prefix = crate::offset_bind::namespace_prefix_len(&self.witness.namespace, self.witness.num_entries)?;
+    v.extend(masked(
+      self.witness.landmarks.doc_type_key,
+      crate::offset_bind::doc_type_prefix_len(&self.witness.doc_type)?,
+    )?);
+    v.extend(masked(self.witness.landmarks.namespace_key, ns_prefix)?);
+    v.push(E::Scalar::from(ns_prefix as u64));
 
     v.extend(self.cutoff.iter().map(|&b| E::Scalar::from(b as u64)));
     v.extend(self.now.iter().map(|&b| E::Scalar::from(b as u64)));
@@ -166,18 +218,9 @@ where
 
     // Returned, not inputized — see this module's note on why. The
     // first `PUBLIC_FROM_PRECOMMITTED` are published by `synthesize`;
-    // the rest (device key, birthdate) stay private and are only
-    // consumed there.
-    let mut out = vec![cred.issuer_qx, cred.issuer_qy];
-    out.extend(cred.doc_type);
-    out.extend(cred.namespace);
-    out.push(cred.device_key.0);
-    out.push(cred.device_key.1);
-    out.extend(cred.birth_date);
-    out.extend(cred.valid_from);
-    out.extend(cred.valid_until);
-    debug_assert_eq!(out.len(), PRECOMMITTED_LEN);
-    Ok(out)
+    // the rest (device key, birthdate, validity window) stay private and
+    // are only consumed there.
+    pack_precommitted(cred)
   }
 
   fn num_challenges(&self) -> usize {
@@ -257,11 +300,15 @@ pub struct AgeKeys {
 
 /// Runs setup for this circuit's shape.
 ///
-/// Any satisfying witness produces the same shape — that is what
+/// Any satisfying witness produces the same R1CS — the same matrices,
+/// not merely the same constraint count, which is what
 /// `all_document_types_produce_an_identical_circuit_shape` asserts across
-/// mDL, EU PID and Photo ID, both salt lengths and both date encodings —
-/// so `prototype` may be built from any valid credential, including a
-/// synthetic fixture. Keys are randomized, so a deterministic source
+/// mDL, EU PID and Photo ID, both salt lengths and both date encodings by
+/// comparing `TestConstraintSystem::hash`. So `prototype` may be built
+/// from any valid credential, including a synthetic fixture. The
+/// distinction is not pedantic: an earlier revision had all three
+/// document types at 1,343,074 constraints and three different matrices,
+/// so a key set up from the mDL prototype did not fit a PID proof. Keys are randomized, so a deterministic source
 /// build does **not** reproduce them; provenance has to be recorded when
 /// an artifact is published.
 pub fn setup(prototype: MdocAgeCircuit<crate::Engine_>) -> Result<AgeKeys, crate::VegaMdocError> {
@@ -348,14 +395,19 @@ pub fn check_public_values(
 
   let issuer_qx = v[0];
   let issuer_qy = v[1];
-  let doc_packs = &v[2..4];
-  let ns_bytes = &v[4..4 + NAMESPACE_OUT_BYTES];
+  let mut at = 2;
+  let doc_packs = &v[at..at + DOC_TYPE_OUT_PACKS];
+  at += DOC_TYPE_OUT_PACKS;
+  let ns_packs = &v[at..at + NAMESPACE_OUT_PACKS];
+  at += NAMESPACE_OUT_PACKS;
+  let ns_prefix_len = v[at];
+  at += 1;
+  debug_assert_eq!(at, PUBLIC_FROM_PRECOMMITTED);
   const TS: usize = crate::offset_bind::TIMESTAMP_LEN;
-  let c0 = 4 + NAMESPACE_OUT_BYTES;
-  let cutoff = &v[c0..c0 + 10];
-  let now = &v[c0 + 10..c0 + 10 + TS];
-  let digest_packs = &v[c0 + 10 + TS..c0 + 12 + TS];
-  let old_enough = v[c0 + 12 + TS];
+  let cutoff = &v[at..at + 10];
+  let now = &v[at + 10..at + 10 + TS];
+  let digest_packs = &v[at + 10 + TS..at + 12 + TS];
+  let old_enough = v[at + 12 + TS];
 
   // CIRCUIT-04. Not "read the bit" — require it.
   if old_enough != S::ONE {
@@ -375,35 +427,67 @@ pub fn check_public_values(
     return Err(reject());
   }
 
-  let byte = |s: &S| -> u8 { s.to_repr().as_ref()[0] };
-  let namespace = String::from_utf8(ns_bytes.iter().map(byte).take_while(|&b| b != 0).collect())
-    .map_err(|_| reject())?;
-  // docType arrives packed 16 bytes at a time, and the final pack holds
-  // only the remainder — `pack16` right-aligns it rather than padding,
-  // matching how `offset_bind::pack_at` weights a short trailing chunk.
-  // Reading it as a padded 16 bytes inserts NULs mid-string, which is
-  // exactly what the end-to-end test caught. So parse the length out of
-  // the first pack and take only that many bytes from the second.
-  let unpack = |p: &S, n: usize| -> Vec<u8> {
-    let r = p.to_repr();
-    r.as_ref()[..n].iter().rev().copied().collect()
+  // Both anchors arrive as the fixed-width windows the circuit selected
+  // out of the signed bytes, packed 16 bytes to an element with a short
+  // trailing chunk right-aligned rather than padded — `offset_bind`
+  // weights a short chunk the same way, and reading it as a padded 16
+  // inserts NULs mid-string, which is what an end-to-end test caught
+  // when the `docType` was two packs.
+  //
+  // Parsing them *here* rather than comparing them to a literal
+  // in-circuit is what keeps the circuit's shape free of the document:
+  // a literal comparison puts the namespace's own bytes into the R1CS
+  // matrices, so a key set up for an mDL would not fit an EU PID. The
+  // check is the same check; it is simply free on this side.
+  let unpack_window = |packs: &[S]| -> Vec<u8> {
+    let mut out = Vec::with_capacity(crate::offset_bind::ANCHOR_TEXT_WINDOW);
+    let mut left = crate::offset_bind::ANCHOR_TEXT_WINDOW;
+    for p in packs {
+      let n = left.min(16);
+      let r = p.to_repr();
+      out.extend(r.as_ref()[..n].iter().rev().copied());
+      left -= n;
+    }
+    out
   };
-  let head = unpack(&doc_packs[0], 16);
-  if head[..8] != *b"\x67docType" {
+
+  /// Reads a canonical CBOR text string, returning it and the byte after it.
+  fn read_tstr(bytes: &[u8], at: usize) -> Option<(String, usize)> {
+    let (start, len) = match *bytes.get(at)? {
+      h if (0x60..0x78).contains(&h) => (at + 1, (h & 0x1f) as usize),
+      0x78 => (at + 2, *bytes.get(at + 1)? as usize),
+      _ => return None,
+    };
+    // Canonical CBOR: the one-byte form is mandatory below 24, so a
+    // two-byte header claiming a short length is a different encoding of
+    // the same string and must not be accepted as equivalent.
+    if start == at + 2 && len < 24 {
+      return None;
+    }
+    let end = start.checked_add(len)?;
+    Some((String::from_utf8(bytes.get(start..end)?.to_vec()).ok()?, end))
+  }
+
+  let doc_bytes = unpack_window(doc_packs);
+  if doc_bytes.get(..8) != Some(&b"\x67docType"[..]) {
     return Err(reject());
   }
-  let (value_start, len) = match head[8] {
-    h if (0x60..0x78).contains(&h) => (9usize, (h & 0x1f) as usize),
-    0x78 => (10usize, head[9] as usize),
+  let (doc_type, _) = read_tstr(&doc_bytes, 8).ok_or_else(reject)?;
+
+  let ns_bytes = unpack_window(ns_packs);
+  let (namespace, after_ns) = read_tstr(&ns_bytes, 0).ok_or_else(reject)?;
+  // The namespace's entry-count map header follows it, and where it ends
+  // is where the circuit took the digest region to begin. A prover free
+  // to misdeclare that length is a prover free to move the region, so
+  // this is derived from the window and required to match.
+  let map_header_len = match *ns_bytes.get(after_ns).ok_or_else(reject)? {
+    0xa0..=0xb7 => 1,
+    0xb8 => 2,
     _ => return Err(reject()),
   };
-  let total = value_start + len;
-  if !(16..=32).contains(&total) {
+  if ns_prefix_len != S::from((after_ns + map_header_len) as u64) {
     return Err(reject());
   }
-  let mut doc_bytes = head;
-  doc_bytes.extend(unpack(&doc_packs[1], total - 16));
-  let doc_type = String::from_utf8(doc_bytes[value_start..total].to_vec()).map_err(|_| reject())?;
 
   Ok(VerifiedAgeProof { issuer_qx, issuer_qy, doc_type, namespace })
 }

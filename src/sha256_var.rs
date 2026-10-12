@@ -148,24 +148,42 @@ pub fn injected_byte(byte_idx: usize, real_len: usize) -> Option<u8> {
 /// is constrained to equal. `max_message_bytes`/`num_blocks` size the
 /// buffer the same way [`sha256_var_sized`]'s do — see that function.
 #[allow(clippy::needless_range_loop)] // `byte_idx` is the value being reasoned about, not just an index
-pub fn native_padded_buffer_sized(message: &[u8], real_len: usize, max_message_bytes: usize, num_blocks: usize) -> Vec<u8> {
-  assert!(real_len <= message.len(), "real_len exceeds supplied message length");
-  assert!(real_len <= max_message_bytes, "real_len exceeds max_message_bytes");
+///
+/// Fallible rather than asserting. This runs during *witness
+/// generation*, before any constraint exists to be unsatisfied, and the
+/// crate ships as a `cdylib`/`staticlib` into an Android AAR and Go cgo
+/// — where a panic unwinding into the host is a process abort. An
+/// over-budget credential is a thing a verifier should reject, not a
+/// thing that kills the wallet.
+pub fn native_padded_buffer_sized(
+  message: &[u8],
+  real_len: usize,
+  max_message_bytes: usize,
+  num_blocks: usize,
+) -> Result<Vec<u8>, SynthesisError> {
   let buffer_bytes = num_blocks * 64;
+  if real_len > message.len() || real_len > max_message_bytes || max_message_bytes + 9 > buffer_bytes {
+    // The third clause is the budget's own consistency: SHA-256 needs a
+    // 0x80 marker and an eight-byte length field after the message, so a
+    // `max_message_bytes` that leaves less than nine bytes of room would
+    // put the length field outside the buffer and silently produce a
+    // buffer that is not a valid padding of anything.
+    return Err(SynthesisError::Unsatisfiable);
+  }
   let mut buf = vec![0u8; buffer_bytes];
   buf[..real_len].copy_from_slice(&message[..real_len]);
   for byte_idx in real_len..buffer_bytes {
-    buf[byte_idx] = injected_byte(byte_idx, real_len).expect("byte_idx >= real_len by loop range");
+    buf[byte_idx] = injected_byte(byte_idx, real_len).ok_or(SynthesisError::Unsatisfiable)?;
   }
-  buf
+  Ok(buf)
 }
 
 /// [`native_padded_buffer_sized`] fixed to this module's claim-sized
 /// constants ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]).
-pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTES] {
-  native_padded_buffer_sized(message, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)
+pub fn native_padded_buffer(message: &[u8], real_len: usize) -> Result<[u8; BUFFER_BYTES], SynthesisError> {
+  native_padded_buffer_sized(message, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)?
     .try_into()
-    .expect("native_padded_buffer_sized returns num_blocks*64 bytes")
+    .map_err(|_| SynthesisError::Unsatisfiable)
 }
 
 /// The in-circuit gadget, generalized over the maximum message size —
@@ -471,7 +489,7 @@ mod native_tests {
     let message: Vec<u8> = (0..MAX_VAR_MESSAGE_BYTES).map(|i| (i * 7 + 3) as u8).collect();
 
     for real_len in interesting_lengths() {
-      let buf = native_padded_buffer(&message, real_len);
+      let buf = native_padded_buffer(&message, real_len).unwrap();
       let blocks = terminal_block_for_len(real_len);
       let prefix = &buf[..blocks * 64];
 

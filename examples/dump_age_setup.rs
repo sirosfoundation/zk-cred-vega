@@ -60,7 +60,6 @@ fn prototype_from_fixture(name: &str) -> MdocAgeCircuit<Engine_> {
       },
       namespace: ns.to_string(),
       doc_type: json["doc_type"].as_str().unwrap().to_string(),
-      num_namespaces: lm["num_namespaces"].as_u64().unwrap() as usize,
       num_entries: lm["num_entries"].as_u64().unwrap() as usize,
       item_bytes: hex::decode(t["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: t["digest_offset"].as_u64().unwrap() as usize,

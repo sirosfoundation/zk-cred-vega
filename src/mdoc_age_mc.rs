@@ -77,7 +77,14 @@ pub struct HashWitness {
 }
 
 impl HashWitness {
-  pub fn from_witness(w: &MdocAgeWitness) -> Self {
+  /// Fallible: this is witness generation, so there is no constraint yet
+  /// to be unsatisfied, and the crate crosses an FFI boundary where a
+  /// panic aborts the host process. An over-budget `sig_structure` or
+  /// `IssuerSignedItem` is a credential to reject, not a reason to take
+  /// the wallet down with it — the circuit's own malformed-witness
+  /// checks already return `Unsatisfiable`, and this must reach them
+  /// rather than panic on the way.
+  pub fn from_witness(w: &MdocAgeWitness) -> Result<Self, SynthesisError> {
     let l = layout();
     let mut blocks = Vec::new();
     let mut digests = Vec::new();
@@ -89,7 +96,7 @@ impl HashWitness {
     .enumerate()
     {
       let n = l.message_blocks[m];
-      let padded = crate::sha256_var::native_padded_buffer_sized(msg, msg.len(), max, n);
+      let padded = crate::sha256_var::native_padded_buffer_sized(msg, msg.len(), max, n)?;
       let mut state = sha256_mc::IV;
       for b in padded.chunks(64) {
         let mut blk = [0u8; 64];
@@ -103,7 +110,7 @@ impl HashWitness {
         digests.push(d);
       }
     }
-    Self { blocks, digests }
+    Ok(Self { blocks, digests })
   }
 }
 
@@ -149,8 +156,10 @@ where
     _precommitted: &[AllocatedNum<E::Scalar>],
     _challenges: Option<&[E::Scalar]>,
   ) -> Result<(), SynthesisError> {
-    let idx = AllocatedNum::alloc(cs.namespace(|| "step index"), || Ok(E::Scalar::from(self.step as u64)))?;
-    idx.inputize(cs.namespace(|| "inputize step index"))?;
+    // The index is allocated, inputized *and* bound to the one-hot
+    // selector inside `synthesize_step`. Doing it here instead left the
+    // published index and the selected block unrelated — see that
+    // function's doc.
     sha256_mc::synthesize_step(cs, shared, &layout(), self.step)
   }
 }
@@ -206,15 +215,10 @@ where
       &Hasher::Folded { shared, layout: &l, message: SIG_MESSAGE },
       &Hasher::Folded { shared, layout: &l, message: ITEM_MESSAGE },
     )?;
-    let mut out = vec![cred.issuer_qx, cred.issuer_qy];
-    out.extend(cred.doc_type);
-    out.extend(cred.namespace);
-    out.push(cred.device_key.0);
-    out.push(cred.device_key.1);
-    out.extend(cred.birth_date);
-    out.extend(cred.valid_from);
-    out.extend(cred.valid_until);
-    Ok(out)
+    // Same packer as the single-circuit form, deliberately: the two
+    // halves of this layout — the order of the values and how many of
+    // them are public — are one fact and must not be stated twice.
+    crate::mdoc_age_circuit::pack_precommitted(cred)
   }
 
   fn num_challenges(&self) -> usize {
@@ -229,6 +233,9 @@ where
     _challenges: Option<&[E::Scalar]>,
   ) -> Result<(), SynthesisError> {
     const TS: usize = crate::offset_bind::TIMESTAMP_LEN;
+    if precommitted.len() != crate::mdoc_age_circuit::PRECOMMITTED_LEN {
+      return Err(SynthesisError::Unsatisfiable);
+    }
     for (i, p) in precommitted[..PUBLIC_FROM_PRECOMMITTED].iter().enumerate() {
       p.inputize(cs.namespace(|| format!("inputize credential value {i}")))?;
     }
@@ -282,8 +289,8 @@ pub fn build(
   cutoff: [u8; 10],
   now: [u8; crate::offset_bind::TIMESTAMP_LEN],
   device_auth_digest: [u8; 32],
-) -> (Vec<StepCircuit<crate::Engine_>>, CoreCircuit<crate::Engine_>) {
-  let hash = HashWitness::from_witness(witness);
+) -> Result<(Vec<StepCircuit<crate::Engine_>>, CoreCircuit<crate::Engine_>), SynthesisError> {
+  let hash = HashWitness::from_witness(witness)?;
   let steps = (0..layout().total_blocks())
     .map(|step| StepCircuit { hash: hash.clone(), step, _marker: std::marker::PhantomData })
     .collect();
@@ -295,7 +302,7 @@ pub fn build(
     now,
     device_auth_digest,
   };
-  (steps, core)
+  Ok((steps, core))
 }
 
 // ---- Keys, proving and acceptance ----------------------------------
