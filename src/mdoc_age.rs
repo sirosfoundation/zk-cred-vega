@@ -321,14 +321,15 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// Without this the accepted statement does not say *which* namespace
   /// the `birth_date` came from.
   ///
-  /// **Publishing it is not yet enough.** The digest's upper bound is
-  /// `deviceKeyInfo`, which closes the whole `valueDigests` table rather
-  /// than this namespace's sub-map, so for a multi-namespace credential
-  /// the digest may come from a *later* namespace while this still reads
-  /// the one that was asked about. An earlier version of this comment
-  /// said pinning the namespace handled it; it does not.
-  /// `a_digest_from_a_later_namespace_is_rejected` carries the exploit
-  /// and fails until the bound is made exact.
+  /// Publishing it is necessary but was once mistaken for sufficient.
+  /// The digest's upper bound used to be `deviceKeyInfo`, which closes
+  /// the whole `valueDigests` table rather than this namespace's
+  /// sub-map, so a multi-namespace credential could prove a digest from
+  /// a *later* namespace while this still read the one that was asked
+  /// about — the output correct and the attribute from somewhere else.
+  /// [`crate::offset_bind::walk_namespace_entries`] now bounds the
+  /// region at the namespace's own end, and
+  /// `a_digest_from_a_later_namespace_is_rejected` holds it there.
   pub namespace: Vec<AllocatedNum<Scalar>>,
   /// How many bytes of [`Self::namespace`] the header occupies. The
   /// verifier must check this against the namespace it asked for: it is
@@ -543,8 +544,12 @@ impl MdocAgeWitness {
   /// the item the same way the circuit reads them. Returns `None` if the
   /// witness is malformed; `synthesize` rejects those separately.
   pub fn birth_date_bytes(&self) -> Option<[u8; 10]> {
-    let at = self.element_value_key_offset + self.date_encoding.date_rel();
-    self.item_bytes.get(at..at + 10)?.try_into().ok()
+    // Checked: `element_value_key_offset` is a witness, and this runs
+    // from `public_values()` — before synthesis has had a chance to
+    // reject an unreachable offset. `a + b` inside a `get` argument is
+    // evaluated first, so the bounds check never gets to fire.
+    let at = self.element_value_key_offset.checked_add(self.date_encoding.date_rel())?;
+    self.item_bytes.get(at..at.checked_add(10)?)?.try_into().ok()
   }
 }
 

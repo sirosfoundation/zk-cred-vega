@@ -48,12 +48,16 @@
 //! | 2 | the `docType` anchor window, packed 16 bytes at a time | 3 |
 //! | 3 | the namespace anchor window, the same way | 3 |
 //! | 4 | the namespace window's prefix length | 1 |
-//! | 5 | `cutoff`, one byte per element | 10 |
-//! | 6 | `now`, one byte per element | 20 |
-//! | 7 | `DeviceAuthentication` digest, packed | 2 |
-//! | 8 | `old_enough` | 1 |
+//! | 5 | the namespace's entry count | 1 |
+//! | 6 | `cutoff`, one byte per element | 10 |
+//! | 7 | `now`, one byte per element | 20 |
+//! | 8 | `DeviceAuthentication` digest, packed | 2 |
+//! | 9 | `old_enough` | 1 |
 //!
-//! Rows 2 to 4 are the **windows as they appear in the signed bytes**,
+//! Rows 4 and 5 are where the digest region begins and ends; the
+//! verifier derives both from the namespace window in row 3 and requires
+//! them to match, which is what stops a prover moving or stretching the
+//! region. Rows 2 to 3 are the **windows as they appear in the signed bytes**,
 //! not a reconstruction of the document type and namespace, and
 //! [`check_public_values`] parses them. That is not a presentation
 //! choice. Comparing an anchor to its literal in-circuit writes the
@@ -166,7 +170,12 @@ where
     // namespace window is the start of the digest table.
     let masked = |at: usize, prefix: usize| -> Result<Vec<E::Scalar>, SynthesisError> {
       const W: usize = crate::offset_bind::ANCHOR_TEXT_WINDOW;
-      let bytes = self.witness.sig_structure.get(at..at + W).ok_or(SynthesisError::Unsatisfiable)?;
+      // `at + W` would be evaluated before `get` could reject it, and
+      // the landmark is a witness: near `usize::MAX` that panics in
+      // debug and wraps in release, both before synthesis has run any of
+      // the fallible landmark checks.
+      let end = at.checked_add(W).ok_or(SynthesisError::Unsatisfiable)?;
+      let bytes = self.witness.sig_structure.get(at..end).ok_or(SynthesisError::Unsatisfiable)?;
       if prefix > W {
         return Err(SynthesisError::Unsatisfiable);
       }
