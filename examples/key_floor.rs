@@ -86,14 +86,19 @@ impl<E: Engine> VegaCircuit<E> for Dense {
 }
 
 fn main() {
-  for n in [1usize, 1_000, 100_000, 224_119, 1_343_074] {
+  for n in [1usize, 1_000, 100_000, 224_119, 1_353_874] {
     let (pk, vk) = VegaZkSNARK::<Engine_>::setup(Tiny { n }).expect("setup");
     let p = bincode::serialize(&pk).map(|v| v.len()).unwrap_or(0);
     let v = bincode::serialize(&vk).map(|v| v.len()).unwrap_or(0);
     println!("  ~{n:>7} constraints -> pk {:>8.2} MB   vk {:>8.2} MB", p as f64 / 1e6, v as f64 / 1e6);
   }
-  println!("\n  r13 single-circuit (1,343,074) measured 614.44 MB");
-  println!("  r13 folded        (224,119 shape) measured 420.11 MB");
+  println!("\n  r13 single-circuit (1,353,874) measured 728.22 MB");
+  println!("  r13 folded        (224,119 shape) measured 445.77 MB");
+  // Both grew when the document-dependent anchors became constant-width
+  // masked windows: +0.8% constraints, +18% key. The anchors went from
+  // two packs to three and the mask unpacks each window to bits, so the
+  // added rows are wide ones. The same measurement, made again by
+  // accident -- what the key costs is row density, not count.
   for (n, width) in [(100_000usize, 1usize), (100_000, 64), (100_000, 256)] {
     let (pk, _vk) = VegaZkSNARK::<Engine_>::setup(Dense { n, width }).expect("setup");
     let p = bincode::serialize(&pk).map(|v| v.len()).unwrap_or(0);
