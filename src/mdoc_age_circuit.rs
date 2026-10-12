@@ -327,14 +327,34 @@ pub fn setup(prototype: MdocAgeCircuit<crate::Engine_>) -> Result<AgeKeys, crate
   Ok(AgeKeys { pk, vk })
 }
 
+/// A proof, deliberately opaque — like [`crate::mdoc_age_mc::FoldedAgeProof`].
+///
+/// It does not hand out the inner `VegaZkSNARK`, whose own `verify`
+/// returns the public values and checks none of the obligations in
+/// [`check_public_values`]: not that `old_enough` is 1, not that the
+/// session digest is this verifier's, not the cutoff, not the clock, not
+/// which `(docType, namespace)` the answer came from. A caller holding
+/// the raw type can call that `verify` and read a number, which is the
+/// whole failure mode this module exists to prevent.
+///
+/// The folded path had this wrapper and the single-circuit path did not,
+/// which is the kind of asymmetry that survives review precisely because
+/// each half looks right on its own.
+///
+/// Serialization goes through the wrapper, so a stored proof keeps the
+/// property when it comes back.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct AgeProof(VegaZkSNARK<crate::Engine_>);
+
 /// Produces a proof for one presentation.
 pub fn prove(
   pk: &VegaProverKey<crate::Engine_>,
   circuit: MdocAgeCircuit<crate::Engine_>,
-) -> Result<VegaZkSNARK<crate::Engine_>, crate::VegaMdocError> {
+) -> Result<AgeProof, crate::VegaMdocError> {
   let prep = VegaZkSNARK::<crate::Engine_>::prep_prove(pk, circuit.clone(), false)?;
   let (proof, _next) = VegaZkSNARK::<crate::Engine_>::prove(pk, circuit, prep, false)?;
-  Ok(proof)
+  Ok(AgeProof(proof))
 }
 
 /// What the verifier demanded. Every field is checked against the proof,
@@ -423,12 +443,12 @@ pub struct VerifiedAgeProof {
 ///
 /// There is deliberately no accessor that hands back a raw predicate bit.
 pub fn verify_age(
-  proof: &VegaZkSNARK<crate::Engine_>,
+  proof: &AgeProof,
   vk: &VegaVerifierKey<crate::Engine_>,
   expected: &ExpectedContext,
 ) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
 
-  let v = proof.verify(vk)?;
+  let v = proof.0.verify(vk)?;
   check_public_values(&v, expected)
 }
 
