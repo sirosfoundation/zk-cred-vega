@@ -456,6 +456,254 @@ pub fn namespace_prefix_len(namespace: &str, num_entries: usize) -> Result<usize
   Ok(tstr_header(namespace.len())?.len() + namespace.len() + map_header(num_entries).len())
 }
 
+/// Most entries one `valueDigests` namespace may hold.
+///
+/// A shape constant, so it bounds every document this circuit serves,
+/// not just the ones in the fixtures: the entry walk below emits
+/// [`MAX_NAMESPACE_ENTRIES`] steps whatever the credential holds, and
+/// masks the ones past the real count. The largest real namespace we
+/// target is an mDL's 35.
+pub const MAX_NAMESPACE_ENTRIES: usize = 64;
+
+/// `58 20` plus 32 bytes: a `valueDigests` entry's value is a
+/// `bstr .size 32` in every profile this circuit serves.
+const DIGEST_VALUE_LEN: usize = 34;
+
+/// The window each walk step reads: the `digestID`'s head plus enough to
+/// reach the `58 20` that opens its value at any canonical width.
+const ENTRY_HEAD_WINDOW: usize = 7;
+
+/// The four canonical CBOR `uint` widths a `digestID` can take, with the
+/// head byte that selects each.
+///
+/// ISO 18013-5 §9.1.2.4 puts `digestID` below 2^31, so the eight-byte
+/// form cannot occur; and canonical CBOR (RFC 8949 §4.2.1) makes the
+/// encoding unique, which is what lets one head byte determine the width
+/// rather than merely be consistent with it.
+const DIGEST_ID_WIDTHS: [(usize, Option<u8>); 4] = [(1, None), (2, Some(0x18)), (3, Some(0x19)), (5, Some(0x1a))];
+
+/// Walks the requested namespace's entries and returns where its sub-map
+/// ends.
+///
+/// # Why this is not just `deviceKeyInfo`
+///
+/// It was, and that was a soundness break. `deviceKeyInfo` closes the
+/// whole `valueDigests` table. For a single-namespace mDL or EU PID the
+/// two offsets coincide, but `org.iso.23220.1` sorts *first* of a Photo
+/// ID's three namespaces, so its entries are followed by 1,096 bytes of
+/// two other namespaces — and every digest in those satisfied a range
+/// check bounded by the table's end. A credential carrying `birth_date`
+/// in two namespaces could prove the favourable one while publishing the
+/// name of the other; `a_digest_from_a_later_namespace_is_rejected`
+/// carries that exploit, with a thirteen-year-old passing an
+/// eighteen-plus check.
+///
+/// # Why a walk
+///
+/// The sub-map's end is determined by its content and nothing else. An
+/// entry is a `digestID` `uint` followed by `58 20` and 32 bytes, so the
+/// only thing that varies is the `digestID`'s width — one, two, three or
+/// five bytes, decided uniquely by its head byte under canonical CBOR.
+/// Summing `width + 34` over the entries gives the end exactly.
+///
+/// Bounding it instead by a width *range* (`34n ..= 38n`) narrows the
+/// hole without closing it: the next namespace's first digests still land
+/// inside. Anchoring on "a namespace key sorting after this one" does not
+/// close it either, because a prover wants a *larger* region and any
+/// later namespace satisfies that. The end has to be the immediate
+/// successor, and only the content says where that is.
+///
+/// # Cost
+///
+/// One `ENTRY_HEAD_WINDOW`-byte selection per step. Seven bytes rather
+/// than one so that a single window reaches both the head byte and the
+/// `58 20` that must follow it at whichever width the head declares —
+/// checking the value's header as well as the key's costs nothing extra
+/// this way, and leaves the step sound by construction rather than by an
+/// appeal to what the CDDL says a well-formed MSO contains.
+#[allow(clippy::too_many_arguments)]
+pub fn walk_namespace_entries<Scalar, CS>(
+  mut cs: CS,
+  bits: &[Boolean],
+  native: &[u8],
+  region_start: &LinearCombination<Scalar>,
+  region_start_native: usize,
+  num_entries: usize,
+) -> Result<(LinearCombination<Scalar>, AllocatedNum<Scalar>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  if num_entries == 0 || num_entries > MAX_NAMESPACE_ENTRIES {
+    return Err(reject(format!(
+      "the requested namespace holds {num_entries} entries, outside this circuit's fixed        1..={MAX_NAMESPACE_ENTRIES}"
+    )));
+  }
+  let one = CS::one();
+
+  // How many entries, as a one-hot over a constant candidate set. The
+  // count is also published, and the verifier checks it against the
+  // entry-count map header in the namespace window it already parses —
+  // so a prover cannot shorten the walk to stop early.
+  let mut count_sel = Vec::with_capacity(MAX_NAMESPACE_ENTRIES);
+  let mut count_sum = LinearCombination::<Scalar>::zero();
+  let mut count_lc = LinearCombination::<Scalar>::zero();
+  for n in 1..=MAX_NAMESPACE_ENTRIES {
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(
+      cs.namespace(|| format!("count {n}")),
+      Some(n == num_entries),
+    )?;
+    count_sum = count_sum + b.get_variable();
+    count_lc = count_lc + (Scalar::from(n as u64), b.get_variable());
+    count_sel.push(b);
+  }
+  cs.enforce(|| "exactly one entry count", |lc| lc + &count_sum, |lc| lc + one, |lc| lc + one);
+  let entries = AllocatedNum::alloc(cs.namespace(|| "entry count"), || Ok(Scalar::from(num_entries as u64)))?;
+  cs.enforce(
+    || "the published entry count is the one that bounds the walk",
+    |lc| lc + &count_lc,
+    |lc| lc + one,
+    |lc| lc + entries.get_variable(),
+  );
+
+  let mut here = region_start.clone();
+  let mut here_native = region_start_native;
+  for i in 0..MAX_NAMESPACE_ENTRIES {
+    let mut cs = cs.namespace(|| format!("entry {i}"));
+    // Live while `i` is inside the real count: a free sum over the
+    // counts that reach past entry `i`.
+    let mut live = LinearCombination::<Scalar>::zero();
+    for (n, b) in count_sel.iter().enumerate() {
+      if n + 1 > i {
+        live = live + b.get_variable();
+      }
+    }
+    let is_live = i < num_entries;
+
+    // Past the last entry `here` is the sub-map's end, which is a
+    // namespace key or `deviceKeyInfo` — real bytes either way, so the
+    // window still selects; its content is simply not constrained.
+    let at = if here_native + ENTRY_HEAD_WINDOW <= native.len() { here_native } else { 0 };
+    let head = select_window::<Scalar, _>(
+      cs.namespace(|| "head"),
+      bits,
+      native,
+      &window_offsets(native.len(), ENTRY_HEAD_WINDOW),
+      at,
+      ENTRY_HEAD_WINDOW,
+    )?;
+    cs.enforce(
+      || "the step reads where the walk has reached",
+      |lc| lc + &head.offset - &here,
+      |lc| lc + &live,
+      |lc| lc,
+    );
+    let head_bits = unpack_window_bits(cs.namespace(|| "head bits"), &head, ENTRY_HEAD_WINDOW)?;
+
+    // Which `digestID` width this entry uses. `live` rather than one, so
+    // every constraint below falls away past the last entry.
+    let mut width_sel = Vec::with_capacity(DIGEST_ID_WIDTHS.len());
+    let mut width_sum = LinearCombination::<Scalar>::zero();
+    let real_width = if is_live { digest_id_width(native, here_native)? } else { 0 };
+    for (w, _) in DIGEST_ID_WIDTHS {
+      let b = bellpepper_core::boolean::AllocatedBit::alloc(
+        cs.namespace(|| format!("width {w}")),
+        Some(is_live && w == real_width),
+      )?;
+      width_sum = width_sum + b.get_variable();
+      width_sel.push(b);
+    }
+    cs.enforce(|| "one width while live", |lc| lc + &width_sum, |lc| lc + one, |lc| lc + &live);
+
+    let byte = |j: usize| byte_lc::<Scalar>(&head_bits, one, j, Scalar::ONE);
+    for (k, (w, head_byte)) in DIGEST_ID_WIDTHS.into_iter().enumerate() {
+      let sel = width_sel[k].get_variable();
+      match head_byte {
+        // The one-byte form: major type 0 and an argument below 24.
+        // Canonical CBOR makes the short form mandatory there, so the
+        // three top bits being zero and `!(b4 & b3)` is exactly it.
+        None => {
+          for bit in [0usize, 1, 2] {
+            cs.enforce(
+              || format!("width {w}: head bit {bit} is zero"),
+              |lc| lc + sel,
+              |lc| lc + &head_bits[bit].lc(one, Scalar::ONE),
+              |lc| lc,
+            );
+          }
+          let b4 = &head_bits[3];
+          let b3 = &head_bits[4];
+          let both = Boolean::and(cs.namespace(|| "argument is 24 or more"), b4, b3)?;
+          cs.enforce(
+            || format!("width {w}: the argument is below 24"),
+            |lc| lc + sel,
+            |lc| lc + &both.lc(one, Scalar::ONE),
+            |lc| lc,
+          );
+        }
+        Some(expect) => cs.enforce(
+          || format!("width {w}: head byte is {expect:#04x}"),
+          |lc| lc + sel,
+          |lc| lc + &byte(0) - (Scalar::from(expect as u64), one),
+          |lc| lc,
+        ),
+      }
+      // And the value really is a 32-byte byte string, so the entry
+      // really is `width + 34` long.
+      for (rel, expect) in [(0usize, 0x58u8), (1, 0x20)] {
+        cs.enforce(
+          || format!("width {w}: value header byte {rel} is {expect:#04x}"),
+          |lc| lc + sel,
+          |lc| lc + &byte(w + rel) - (Scalar::from(expect as u64), one),
+          |lc| lc,
+        );
+      }
+    }
+
+    // Advance by `width + 34` while live, and stand still after.
+    let mut step = LinearCombination::<Scalar>::zero();
+    for (k, (w, _)) in DIGEST_ID_WIDTHS.into_iter().enumerate() {
+      step = step + (Scalar::from((w + DIGEST_VALUE_LEN) as u64), width_sel[k].get_variable());
+    }
+    here = here + &step;
+    if is_live {
+      here_native += real_width + DIGEST_VALUE_LEN;
+    }
+  }
+
+  Ok((here, entries))
+}
+
+/// Where the requested namespace's entries end, natively — the same sum
+/// `walk_namespace_entries` constrains, computed out of circuit so the
+/// prover can supply the range check's witness.
+pub fn native_region_end_of(native: &[u8], region_start: usize, num_entries: usize) -> Result<usize, SynthesisError> {
+  native_region_end(native, region_start, num_entries)
+}
+
+fn native_region_end(native: &[u8], region_start: usize, num_entries: usize) -> Result<usize, SynthesisError> {
+  let mut at = region_start;
+  for _ in 0..num_entries {
+    at = at
+      .checked_add(digest_id_width(native, at)? + DIGEST_VALUE_LEN)
+      .ok_or_else(|| reject(format!("the namespace's entries overflow from {region_start}")))?;
+  }
+  Ok(at)
+}
+
+/// The canonical CBOR `uint` width at `at`, natively.
+fn digest_id_width(native: &[u8], at: usize) -> Result<usize, SynthesisError> {
+  match native.get(at) {
+    Some(&b) if b < 0x18 => Ok(1),
+    Some(0x18) => Ok(2),
+    Some(0x19) => Ok(3),
+    Some(0x1a) => Ok(5),
+    other => Err(reject(format!(
+      "the valueDigests entry at {at} opens with {other:?}, which is not a canonical digestID"
+    ))),
+  }
+}
+
 /// `at + len`, rejecting rather than overflowing or running past the
 /// buffer.
 ///
@@ -930,6 +1178,12 @@ pub struct RegionBinding<Scalar: PrimeField> {
   /// namespace it asked for knows what this must be, and checking it is
   /// what stops a prover shifting the digest region by misdeclaring it.
   pub namespace_prefix_len: AllocatedNum<Scalar>,
+  /// How many entries the requested namespace holds, as bound by the
+  /// entry walk. Published: the verifier reads the same number out of
+  /// the entry-count map header in [`Self::namespace`], and checking the
+  /// two agree is what stops a prover ending the walk early and
+  /// shrinking — or lengthening — the region.
+  pub num_entries: AllocatedNum<Scalar>,
   /// The holder's device public key, read out of the issuer-signed bytes.
   ///
   /// **Keep these private.** They are the holder binding's input, not its
@@ -1101,8 +1355,12 @@ where
   )?;
 
   // ---- Anchor 3: `6D "deviceKeyInfo"` ------------------------------
-  // Closes the whole table. This is the bound doing the security work:
-  // everything past it is the holder's own deviceKey.
+  // Closes the whole table. Everything past it is the holder's own
+  // deviceKey, which is what makes it the right place to read that key.
+  //
+  // It is *not* the digest region's upper bound. It was, and that was a
+  // soundness break — see `walk_namespace_entries`. It stays as the
+  // table's outer limit, which the walk's end must respect.
   let end_window = select_anchor::<Scalar, _>(
     cs.namespace(|| "deviceKeyInfo anchor"),
     bits,
@@ -1112,22 +1370,38 @@ where
     3,
     "deviceKeyInfo",
   )?;
-  let region_end = end_window.offset.clone();
 
-  // The span must be non-empty and must not run backwards. Without this
-  // a prover could claim an end anchor preceding the start and satisfy
-  // the digest range check vacuously.
+  // ---- The requested namespace's own end ---------------------------
   if landmarks.device_key_info <= landmarks.region_start {
     return Err(reject(format!(
       "landmarks describe an empty or inverted digest region: starts at {}, ends at {}",
       landmarks.region_start, landmarks.device_key_info
     )));
   }
-  enforce_ge(
-    cs.namespace(|| "region end follows region start"),
-    &region_end,
+  let (region_end, num_entries) = walk_namespace_entries::<Scalar, _>(
+    cs.namespace(|| "namespace entries"),
+    bits,
+    native,
     &region_start,
-    landmarks.device_key_info - landmarks.region_start,
+    landmarks.region_start,
+    shape.num_entries,
+  )?;
+
+  // The walk cannot run past the table. A credential whose sub-map ends
+  // beyond `deviceKeyInfo` is malformed, and without this the walk's
+  // arithmetic alone would not say so.
+  let walked_native = native_region_end(native, landmarks.region_start, shape.num_entries)?;
+  if walked_native > landmarks.device_key_info {
+    return Err(reject(format!(
+      "the namespace's {} entries end at {walked_native}, past deviceKeyInfo at {}",
+      shape.num_entries, landmarks.device_key_info
+    )));
+  }
+  enforce_ge(
+    cs.namespace(|| "the namespace ends inside the table"),
+    &end_window.offset,
+    &region_end,
+    landmarks.device_key_info - walked_native,
     16,
   )?;
 
@@ -1221,6 +1495,7 @@ where
     doc_type: doc_packs,
     namespace: ns_packs,
     namespace_prefix_len: ns_prefix_len,
+    num_entries,
     device_key,
   })
 }

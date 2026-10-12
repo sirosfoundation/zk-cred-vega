@@ -232,7 +232,7 @@ fn folded_proofs_verify_under_folded_keys() {
   println!("MC prover key   : {:>9.2} MB", pk as f64 / 1e6);
   println!("MC verifier key : {:>9.2} MB", vk as f64 / 1e6);
   println!("MC proof        : {:>9.2} kB", pr as f64 / 1e3);
-  println!("  single-circuit was 614.44 MB / 614.44 MB / 111.83 kB");
+  println!("  single-circuit was 1153.07 MB / 1153.07 MB / 111.83 kB (see artifact_sizes)");
 }
 
 /// MC-01 end-to-end: a prover that folds the wrong step indices.

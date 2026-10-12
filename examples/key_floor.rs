@@ -86,19 +86,25 @@ impl<E: Engine> VegaCircuit<E> for Dense {
 }
 
 fn main() {
-  for n in [1usize, 1_000, 100_000, 224_119, 1_353_874] {
+  for n in [1usize, 1_000, 100_000, 528_000, 1_684_884] {
     let (pk, vk) = VegaZkSNARK::<Engine_>::setup(Tiny { n }).expect("setup");
     let p = bincode::serialize(&pk).map(|v| v.len()).unwrap_or(0);
     let v = bincode::serialize(&vk).map(|v| v.len()).unwrap_or(0);
     println!("  ~{n:>7} constraints -> pk {:>8.2} MB   vk {:>8.2} MB", p as f64 / 1e6, v as f64 / 1e6);
   }
-  println!("\n  r13 single-circuit (1,353,874) measured 728.22 MB");
-  println!("  r13 folded        (224,119 shape) measured 445.77 MB");
-  // Both grew when the document-dependent anchors became constant-width
-  // masked windows: +0.8% constraints, +18% key. The anchors went from
-  // two packs to three and the mask unpacks each window to bits, so the
-  // added rows are wide ones. The same measurement, made again by
-  // accident -- what the key costs is row density, not count.
+  println!("\n  r13 single-circuit (1,684,884) measured 1153.07 MB");
+  println!("  r13 folded        (~528k shape)  measured  908.37 MB");
+  // Both have grown twice now, and each time by far more than the
+  // constraint count did:
+  //
+  //   constant-width masked anchors   +0.8% constraints   614 ->  728 MB
+  //   the namespace entry walk       +24.4% constraints   728 -> 1153 MB
+  //
+  // Each added selection windows -- rows spanning 56 to 320 bit
+  // variables -- rather than arithmetic. Two independent confirmations
+  // that the artifact is a function of row density, not of count, and
+  // the reason the folded form no longer helps much: the walk lives in
+  // the core, which is not folded.
   for (n, width) in [(100_000usize, 1usize), (100_000, 64), (100_000, 256)] {
     let (pk, _vk) = VegaZkSNARK::<Engine_>::setup(Dense { n, width }).expect("setup");
     let p = bincode::serialize(&pk).map(|v| v.len()).unwrap_or(0);

@@ -160,7 +160,13 @@ fn every_document_type_proves_age_through_the_same_circuit() {
 #[test]
 fn all_document_types_produce_an_identical_circuit_shape() {
   let mut shapes = Vec::new();
-  for name in ALL_DOCS {
+  // `photo_id_cross_namespace` joins them here but not in `ALL_DOCS`:
+  // its honest holder is a child, so it has no business in the tests
+  // that assert the predicate is true. It belongs here because it is a
+  // different byte length again, and because the entry walk made the
+  // entry count a circuit input — 27, 34 and 35 entries must still
+  // produce one R1CS.
+  for name in ALL_DOCS.iter().copied().chain(["photo_id_cross_namespace"]) {
     let l = load(name);
     let mut cs = TestConstraintSystem::<Scalar>::new();
     synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis");
@@ -729,31 +735,22 @@ fn the_anchor_windows_do_not_publish_the_digest_table() {
 /// A digest from a *different* namespace of the same credential must not
 /// satisfy a proof that names this one.
 ///
-/// # This test fails today. That is deliberate.
+/// This was a soundness break until the region's upper bound became the
+/// namespace's own end rather than `deviceKeyInfo`. For a
+/// single-namespace mDL or EU PID those offsets coincide; for a Photo ID
+/// they do not, because `org.iso.23220.1` sorts *first* of three, so its
+/// entries are followed by 1,096 bytes of two other namespaces — all of
+/// it inside a range bounded by the table's end.
 ///
-/// `bind_digest_region` bounds the digest above by `deviceKeyInfo`, which
-/// closes the whole `valueDigests` table rather than the requested
-/// namespace's sub-map. For a single-namespace mDL or EU PID those are
-/// the same offset. For a Photo ID they are not: `org.iso.23220.1` sorts
-/// *first* of three, so its entries are followed by two more namespaces —
-/// 1,096 bytes of them in this fixture — and every digest in those falls
-/// inside the range the check accepts.
-///
-/// Measured on `photo_id_cross_namespace`, whose `birth_date` is
-/// `2015-01-01` in `org.iso.23220.1` and `1996-01-30` in
-/// `org.iso.23220.dtc.1`: pointing `digest_offset` at the second entry
-/// and supplying its item leaves the system **satisfied** with
-/// `old_enough = true`, while the published namespace still reads
-/// `org.iso.23220.1`. A thirteen-year-old passes an eighteen-plus check,
-/// and the proof names the namespace that says so.
-///
-/// The fix is an exact upper bound on the sub-map — the count and the
-/// entries' own `digestID` widths determine where it ends, so proving it
-/// means walking the entries, which is new in-circuit CBOR parsing and a
-/// real cost. Carried as a failing test rather than a comment so that it
-/// cannot be forgotten and cannot be mistaken for passing.
+/// `photo_id_cross_namespace` carries `birth_date` twice: `2015-01-01`
+/// in `org.iso.23220.1`, which the proof names, and `1996-01-30` in
+/// `org.iso.23220.dtc.1`, which sorts after it. Pointing `digest_offset`
+/// at the second entry used to leave the system satisfied with
+/// `old_enough = true` and the published namespace still reading
+/// `org.iso.23220.1` — a thirteen-year-old passing an eighteen-plus
+/// check, with the proof naming the namespace that says they are
+/// thirteen.
 #[test]
-#[ignore = "open soundness gap: the digest's upper bound is the table, not the namespace"]
 fn a_digest_from_a_later_namespace_is_rejected() {
   let l = load("photo_id_cross_namespace");
   let other = l.json["claims"]

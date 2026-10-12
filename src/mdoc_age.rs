@@ -106,7 +106,7 @@ use crate::offset_bind::{self, Landmarks};
 /// This is the one parameter that is baked into the setup artifact and
 /// cannot be changed without a new circuit revision, so it is sized
 /// deliberately rather than tightly. The cost is real and falls on every
-/// document type: the SHA-256 over the credential is ~80% of the circuit,
+/// document type: the SHA-256 over the credential is ~61% of the circuit,
 /// and 40 blocks costs about 310k more constraints than 28 would. Issuing
 /// two size tiers would claw that back for mDL and PID at the price of a
 /// second setup and a second artifact to keep in the catalog.
@@ -335,6 +335,10 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// where the digest region is taken to begin, so a prover free to
   /// misdeclare it is a prover free to move the region.
   pub namespace_prefix_len: AllocatedNum<Scalar>,
+  /// How many entries that namespace holds. The verifier reads the same
+  /// number out of the entry-count map header in [`Self::namespace`];
+  /// it is where the region *ends*, so the same reasoning applies.
+  pub num_entries: AllocatedNum<Scalar>,
   /// True iff the holder's birthdate is at or before `cutoff`.
   ///
   /// **Publishing this is not enough: the verifier must require the value
@@ -615,6 +619,7 @@ pub struct CredentialBinding<Scalar: ff::PrimeField> {
   pub doc_type: Vec<AllocatedNum<Scalar>>,
   pub namespace: Vec<AllocatedNum<Scalar>>,
   pub namespace_prefix_len: AllocatedNum<Scalar>,
+  pub num_entries: AllocatedNum<Scalar>,
   /// The holder's device key. Private — see [`MdocAgeOutputs`].
   pub device_key: (AllocatedNum<Scalar>, AllocatedNum<Scalar>),
   /// The ten ASCII characters of the issuer-signed birthdate. Private.
@@ -725,7 +730,9 @@ where
     cs.namespace(|| "digest ends inside the region"),
     &binding.region_end,
     &(located.offset.clone() + (Scalar::from(32u64), one)),
-    witness.landmarks.device_key_info.wrapping_sub(witness.digest_offset + 32) & 0xffff,
+    offset_bind::native_region_end_of(&padded, witness.landmarks.region_start, witness.num_entries)?
+      .wrapping_sub(witness.digest_offset + 32)
+      & 0xffff,
     16,
   )?;
 
@@ -774,6 +781,7 @@ where
     doc_type: binding.doc_type,
     namespace: binding.namespace,
     namespace_prefix_len: binding.namespace_prefix_len,
+    num_entries: binding.num_entries,
     device_key: binding.device_key,
     birth_date: date,
   })
@@ -925,6 +933,7 @@ where
     now: sess.now,
     namespace: cred.namespace,
     namespace_prefix_len: cred.namespace_prefix_len,
+    num_entries: cred.num_entries,
     old_enough: sess.old_enough,
     device_auth_digest: sess.device_auth_digest,
   })

@@ -81,13 +81,13 @@ pub const DOC_TYPE_OUT_PACKS: usize = crate::offset_bind::ANCHOR_TEXT_PACKS;
 pub const PUBLIC_INPUT_LEN: usize = PUBLIC_FROM_PRECOMMITTED + 10 + crate::offset_bind::TIMESTAMP_LEN + 2 + 1;
 
 /// How many of `precommitted`'s returned values become public inputs:
-/// issuer `qx`/`qy`, the `docType` window, the namespace window and that
-/// window's prefix length.
+/// issuer `qx`/`qy`, the `docType` window, the namespace window, that
+/// window's prefix length and the namespace's entry count.
 ///
 /// Shared with [`crate::mdoc_age_mc`] rather than duplicated: two copies
 /// that must agree are two copies that can drift, and a drift here breaks
 /// verification for one arithmetization only.
-pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + DOC_TYPE_OUT_PACKS + NAMESPACE_OUT_PACKS + 1;
+pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + DOC_TYPE_OUT_PACKS + NAMESPACE_OUT_PACKS + 2;
 
 /// Everything `precommitted` returns: the public prefix above, then the
 /// device key, the ten birthdate characters and the validity window,
@@ -112,6 +112,7 @@ pub fn pack_precommitted<Scalar: PrimeField>(
   out.extend(cred.doc_type);
   out.extend(cred.namespace);
   out.push(cred.namespace_prefix_len);
+  out.push(cred.num_entries);
   out.push(cred.device_key.0);
   out.push(cred.device_key.1);
   out.extend(cred.birth_date);
@@ -180,6 +181,7 @@ where
     )?);
     v.extend(masked(self.witness.landmarks.namespace_key, ns_prefix)?);
     v.push(E::Scalar::from(ns_prefix as u64));
+    v.push(E::Scalar::from(self.witness.num_entries as u64));
 
     v.extend(self.cutoff.iter().map(|&b| E::Scalar::from(b as u64)));
     v.extend(self.now.iter().map(|&b| E::Scalar::from(b as u64)));
@@ -401,7 +403,8 @@ pub fn check_public_values(
   let ns_packs = &v[at..at + NAMESPACE_OUT_PACKS];
   at += NAMESPACE_OUT_PACKS;
   let ns_prefix_len = v[at];
-  at += 1;
+  let num_entries = v[at + 1];
+  at += 2;
   debug_assert_eq!(at, PUBLIC_FROM_PRECOMMITTED);
   const TS: usize = crate::offset_bind::TIMESTAMP_LEN;
   let cutoff = &v[at..at + 10];
@@ -480,12 +483,25 @@ pub fn check_public_values(
   // is where the circuit took the digest region to begin. A prover free
   // to misdeclare that length is a prover free to move the region, so
   // this is derived from the window and required to match.
-  let map_header_len = match *ns_bytes.get(after_ns).ok_or_else(reject)? {
-    0xa0..=0xb7 => 1,
-    0xb8 => 2,
+  let (map_header_len, entries) = match *ns_bytes.get(after_ns).ok_or_else(reject)? {
+    h @ 0xa0..=0xb7 => (1usize, (h & 0x1f) as usize),
+    0xb8 => (2usize, *ns_bytes.get(after_ns + 1).ok_or_else(reject)? as usize),
     _ => return Err(reject()),
   };
+  // Canonical CBOR: the one-byte form is mandatory below 24, so the
+  // two-byte form claiming a small count is a different encoding of the
+  // same map and must not pass as equivalent.
+  if map_header_len == 2 && entries < 24 {
+    return Err(reject());
+  }
   if ns_prefix_len != S::from((after_ns + map_header_len) as u64) {
+    return Err(reject());
+  }
+  // Where the digest region *ends*. The circuit walks exactly this many
+  // entries, so a prover who declared a different count would have
+  // walked to a different offset — and the count is right here in the
+  // namespace's own signed header.
+  if num_entries != S::from(entries as u64) {
     return Err(reject());
   }
 
