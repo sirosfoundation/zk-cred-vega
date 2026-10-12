@@ -67,6 +67,10 @@ getrandom = "0.2"
 hex = "0.4.3"
 rand = "0.8"
 serde_json = "1.0"
+# For examples/perf_profile_traced.rs only - surfaces vega-prover's own
+# existing tracing instrumentation (61 call sites in vega_mc_zkp.rs alone),
+# not used by the library itself.
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "time"] }
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]

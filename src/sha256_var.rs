@@ -148,24 +148,48 @@ pub fn injected_byte(byte_idx: usize, real_len: usize) -> Option<u8> {
 /// is constrained to equal. `max_message_bytes`/`num_blocks` size the
 /// buffer the same way [`sha256_var_sized`]'s do — see that function.
 #[allow(clippy::needless_range_loop)] // `byte_idx` is the value being reasoned about, not just an index
-pub fn native_padded_buffer_sized(message: &[u8], real_len: usize, max_message_bytes: usize, num_blocks: usize) -> Vec<u8> {
-  assert!(real_len <= message.len(), "real_len exceeds supplied message length");
-  assert!(real_len <= max_message_bytes, "real_len exceeds max_message_bytes");
-  let buffer_bytes = num_blocks * 64;
+///
+/// Fallible rather than asserting. This runs during *witness
+/// generation*, before any constraint exists to be unsatisfied, and the
+/// crate ships as a `cdylib`/`staticlib` into an Android AAR and Go cgo
+/// — where a panic unwinding into the host is a process abort. An
+/// over-budget credential is a thing a verifier should reject, not a
+/// thing that kills the wallet.
+pub fn native_padded_buffer_sized(
+  message: &[u8],
+  real_len: usize,
+  max_message_bytes: usize,
+  num_blocks: usize,
+) -> Result<Vec<u8>, SynthesisError> {
+  // Checked throughout, including the comparison operands themselves: a
+  // function whose contract is "reject, never panic" cannot reach that
+  // rejection through arithmetic that traps in debug and wraps in
+  // release. Wrapping is the worse half — `max_message_bytes + 9`
+  // wrapping to a small number would *pass* the budget check.
+  let buffer_bytes = num_blocks.checked_mul(64).ok_or(SynthesisError::Unsatisfiable)?;
+  let needed = max_message_bytes.checked_add(9).ok_or(SynthesisError::Unsatisfiable)?;
+  if real_len > message.len() || real_len > max_message_bytes || needed > buffer_bytes {
+    // The third clause is the budget's own consistency: SHA-256 needs a
+    // 0x80 marker and an eight-byte length field after the message, so a
+    // `max_message_bytes` that leaves less than nine bytes of room would
+    // put the length field outside the buffer and silently produce a
+    // buffer that is not a valid padding of anything.
+    return Err(SynthesisError::Unsatisfiable);
+  }
   let mut buf = vec![0u8; buffer_bytes];
   buf[..real_len].copy_from_slice(&message[..real_len]);
   for byte_idx in real_len..buffer_bytes {
-    buf[byte_idx] = injected_byte(byte_idx, real_len).expect("byte_idx >= real_len by loop range");
+    buf[byte_idx] = injected_byte(byte_idx, real_len).ok_or(SynthesisError::Unsatisfiable)?;
   }
-  buf
+  Ok(buf)
 }
 
 /// [`native_padded_buffer_sized`] fixed to this module's claim-sized
 /// constants ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]).
-pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTES] {
-  native_padded_buffer_sized(message, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)
+pub fn native_padded_buffer(message: &[u8], real_len: usize) -> Result<[u8; BUFFER_BYTES], SynthesisError> {
+  native_padded_buffer_sized(message, real_len, MAX_VAR_MESSAGE_BYTES, NUM_BLOCKS)?
     .try_into()
-    .expect("native_padded_buffer_sized returns num_blocks*64 bytes")
+    .map_err(|_| SynthesisError::Unsatisfiable)
 }
 
 /// The in-circuit gadget, generalized over the maximum message size —
@@ -194,13 +218,28 @@ pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTE
 /// rather than recomputing "is this byte real" a second, independent
 /// way — see this function's own internal comment on why.
 #[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
-pub fn sha256_var_sized<Scalar, CS>(
-  mut cs: CS,
+/// A padded buffer and the two by-products both hashing designs need:
+/// the per-byte "real content" mask, and the one-hot over the witnessed
+/// length that pins the padding boundary.
+pub type PaddedBuffer = (Vec<Boolean>, Vec<Boolean>, Vec<AllocatedBit>);
+
+/// Builds the canonically padded buffer for a witnessed-length message,
+/// plus the per-byte "this position is real message content" mask.
+///
+/// Split out of [`sha256_var_sized`] so the multi-circuit path
+/// ([`crate::sha256_mc`]) reuses exactly this padding logic rather than
+/// reimplementing it. What differs between the single- and multi-circuit
+/// designs is where the compressions happen; how a message is padded and
+/// how its length is hidden is identical, and duplicating it would be
+/// two things that must agree silently drifting apart.
+#[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
+pub fn padded_buffer_bits<Scalar, CS>(
+  cs: &mut CS,
   raw_bits: &[Boolean],
   real_len: usize,
   max_message_bytes: usize,
   num_blocks: usize,
-) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+) -> Result<PaddedBuffer, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -313,6 +352,24 @@ where
       buffer_bits.push(Boolean::from(out_bit));
     }
   }
+
+  Ok((buffer_bits, msg_active_bits, len_selector))
+}
+
+#[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`bit_idx` the formulas reason about
+pub fn sha256_var_sized<Scalar, CS>(
+  mut cs: CS,
+  raw_bits: &[Boolean],
+  real_len: usize,
+  max_message_bytes: usize,
+  num_blocks: usize,
+) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  let (buffer_bits, msg_active_bits, len_selector) =
+    padded_buffer_bits(&mut cs, raw_bits, real_len, max_message_bytes, num_blocks)?;
 
   // 3. Run the fixed num_blocks compression rounds unconditionally,
   // recording the state after each block.
@@ -438,7 +495,7 @@ mod native_tests {
     let message: Vec<u8> = (0..MAX_VAR_MESSAGE_BYTES).map(|i| (i * 7 + 3) as u8).collect();
 
     for real_len in interesting_lengths() {
-      let buf = native_padded_buffer(&message, real_len);
+      let buf = native_padded_buffer(&message, real_len).unwrap();
       let blocks = terminal_block_for_len(real_len);
       let prefix = &buf[..blocks * 64];
 

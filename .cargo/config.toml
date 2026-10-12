@@ -1,0 +1,7 @@
+# Each `mdoc_age_binding` test builds a full ~1.3M-constraint
+# `TestConstraintSystem` in memory. Run in parallel across a default-sized
+# thread pool they exhaust RAM and the harness is SIGKILLed, which looks
+# like a mysterious test failure rather than an out-of-memory. Two at a
+# time is comfortable on a 16 GB CI runner and still uses both cores.
+[env]
+RUST_TEST_THREADS = "2"
