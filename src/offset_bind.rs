@@ -316,7 +316,12 @@ where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  if validity_info_offset + VALIDITY_WINDOW_LEN > native.len() {
+  // `checked_add`, not `+`: the offset is a prover-supplied witness, so a
+  // value near `usize::MAX` would overflow on the way to the rejection
+  // this check exists to produce — panicking in debug, and in release
+  // wrapping to a small number that passes.
+  let window_end = validity_info_offset.checked_add(VALIDITY_WINDOW_LEN);
+  if window_end.is_none_or(|end| end > native.len()) {
     return Err(reject(format!(
       "validityInfo at {validity_info_offset} plus {VALIDITY_WINDOW_LEN} bytes runs past the {}-byte buffer",
       native.len()
@@ -449,6 +454,21 @@ pub fn namespace_prefix_len(namespace: &str, num_entries: usize) -> Result<usize
     )));
   }
   Ok(tstr_header(namespace.len())?.len() + namespace.len() + map_header(num_entries).len())
+}
+
+/// `at + len`, rejecting rather than overflowing or running past the
+/// buffer.
+///
+/// Every landmark in [`Landmarks`] is a prover-supplied witness, so each
+/// one of these additions takes an arbitrary `usize`. Plain `+` panics in
+/// debug and wraps in release, and the wrap is the dangerous half: an
+/// offset near `usize::MAX` wraps to a small number that *passes* the
+/// bounds check it was supposed to fail.
+fn window_end(at: usize, len: usize, native_len: usize, label: &str) -> Result<usize, SynthesisError> {
+  match at.checked_add(len) {
+    Some(end) if end <= native_len => Ok(end),
+    _ => Err(reject(format!("{label} at {at} plus {len} bytes runs past the {native_len}-byte buffer"))),
+  }
 }
 
 /// How many bytes the `docType` entry `67 "docType" <tstr>` occupies —
@@ -1030,16 +1050,9 @@ where
       shape.namespace
     )));
   }
-  let ns_end = landmarks.namespace_key + ANCHOR_TEXT_WINDOW;
-  if ns_end > native.len() {
-    return Err(reject(format!(
-      "the namespace landmark at {} plus a {ANCHOR_TEXT_WINDOW}-byte window runs past the \
-       {}-byte buffer",
-      landmarks.namespace_key,
-      native.len()
-    )));
-  }
-  if &native[landmarks.namespace_key..landmarks.namespace_key + ns_open_len] != ns_open.as_slice() {
+  window_end(landmarks.namespace_key, ANCHOR_TEXT_WINDOW, native.len(), "the namespace landmark")?;
+  let ns_literal_end = window_end(landmarks.namespace_key, ns_open_len, native.len(), "the namespace header")?;
+  if &native[landmarks.namespace_key..ns_literal_end] != ns_open.as_slice() {
     return Err(reject(format!(
       "the namespace landmark at {} does not point at `{}` in the signed bytes",
       landmarks.namespace_key, shape.namespace
@@ -1069,18 +1082,21 @@ where
   let region_start = ns_offset.clone() + ns_prefix_len.get_variable();
 
   // The namespace sub-map must sit inside the table, not before it.
-  if landmarks.namespace_key < landmarks.value_digests_key + open_len {
+  let table_body = landmarks
+    .value_digests_key
+    .checked_add(open_len)
+    .ok_or_else(|| reject(format!("the valueDigests landmark at {} overflows", landmarks.value_digests_key)))?;
+  if landmarks.namespace_key < table_body {
     return Err(reject(format!(
-      "the namespace key at {} precedes the end of the valueDigests header at {}",
-      landmarks.namespace_key,
-      landmarks.value_digests_key + open_len
+      "the namespace key at {} precedes the end of the valueDigests header at {table_body}",
+      landmarks.namespace_key
     )));
   }
   enforce_ge(
     cs.namespace(|| "namespace sits inside the table"),
     &ns_offset,
     &(table_window.offset.clone() + (Scalar::from(open_len as u64), CS::one())),
-    landmarks.namespace_key - (landmarks.value_digests_key + open_len),
+    landmarks.namespace_key - table_body,
     16,
   )?;
 
@@ -1122,10 +1138,11 @@ where
   // choosing and call them the device key.
   let mut coords = Vec::with_capacity(2);
   for (label, delta) in [("device key x", DEVICE_KEY_X_DELTA), ("device key y", DEVICE_KEY_Y_DELTA)] {
-    let at = landmarks.device_key_info + delta;
-    if at + 32 > native.len() {
-      return Err(reject(format!("{label} at {at} runs past the {}-byte buffer", native.len())));
-    }
+    let at = landmarks
+      .device_key_info
+      .checked_add(delta)
+      .ok_or_else(|| reject(format!("the deviceKeyInfo landmark at {} overflows", landmarks.device_key_info)))?;
+    window_end(at, 32, native.len(), label)?;
     let w = select_window::<Scalar, _>(
       cs.namespace(|| label),
       bits,
@@ -1181,15 +1198,9 @@ where
       expected.len()
     )));
   }
-  let doc_type_end = landmarks.doc_type_key + ANCHOR_TEXT_WINDOW;
-  if doc_type_end > native.len() {
-    return Err(reject(format!(
-      "docType landmark at {} plus a {ANCHOR_TEXT_WINDOW}-byte window runs past the {}-byte buffer",
-      landmarks.doc_type_key,
-      native.len()
-    )));
-  }
-  if &native[landmarks.doc_type_key..landmarks.doc_type_key + expected.len()] != expected.as_slice() {
+  window_end(landmarks.doc_type_key, ANCHOR_TEXT_WINDOW, native.len(), "the docType landmark")?;
+  let doc_literal_end = window_end(landmarks.doc_type_key, expected.len(), native.len(), "the docType entry")?;
+  if &native[landmarks.doc_type_key..doc_literal_end] != expected.as_slice() {
     return Err(reject(format!(
       "the docType landmark at {} does not point at `{}` in the signed bytes",
       landmarks.doc_type_key, shape.doc_type

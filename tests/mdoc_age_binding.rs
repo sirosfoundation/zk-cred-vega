@@ -725,3 +725,60 @@ fn the_anchor_windows_do_not_publish_the_digest_table() {
   assert!(tail.iter().any(|&b| b != 0), "the fixture's tail is all zeros, so this test is vacuous");
   assert_ne!(&published[prefix_len..], tail, "the digest table was published verbatim");
 }
+
+/// A digest from a *different* namespace of the same credential must not
+/// satisfy a proof that names this one.
+///
+/// # This test fails today. That is deliberate.
+///
+/// `bind_digest_region` bounds the digest above by `deviceKeyInfo`, which
+/// closes the whole `valueDigests` table rather than the requested
+/// namespace's sub-map. For a single-namespace mDL or EU PID those are
+/// the same offset. For a Photo ID they are not: `org.iso.23220.1` sorts
+/// *first* of three, so its entries are followed by two more namespaces —
+/// 1,096 bytes of them in this fixture — and every digest in those falls
+/// inside the range the check accepts.
+///
+/// Measured on `photo_id_cross_namespace`, whose `birth_date` is
+/// `2015-01-01` in `org.iso.23220.1` and `1996-01-30` in
+/// `org.iso.23220.dtc.1`: pointing `digest_offset` at the second entry
+/// and supplying its item leaves the system **satisfied** with
+/// `old_enough = true`, while the published namespace still reads
+/// `org.iso.23220.1`. A thirteen-year-old passes an eighteen-plus check,
+/// and the proof names the namespace that says so.
+///
+/// The fix is an exact upper bound on the sub-map — the count and the
+/// entries' own `digestID` widths determine where it ends, so proving it
+/// means walking the entries, which is new in-circuit CBOR parsing and a
+/// real cost. Carried as a failing test rather than a comment so that it
+/// cannot be forgotten and cannot be mistaken for passing.
+#[test]
+#[ignore = "open soundness gap: the digest's upper bound is the table, not the namespace"]
+fn a_digest_from_a_later_namespace_is_rejected() {
+  let l = load("photo_id_cross_namespace");
+  let other = l.json["claims"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == "org.iso.23220.dtc.1")
+    .expect("the fixture carries a second birth_date, in a namespace sorting after the target");
+
+  // The honest holder of this credential is a child by the namespace the
+  // proof names, so an accepted proof here is not a technicality.
+  assert_eq!(l.witness.birth_date_bytes().unwrap(), *b"2015-01-01");
+
+  let mut w = l.witness.clone();
+  w.digest_offset = other["digest_offset"].as_u64().unwrap() as usize;
+  w.item_bytes = hex::decode(other["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap();
+
+  let mut cs = TestConstraintSystem::<Scalar>::new();
+  match synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, NOW, SESSION) {
+    Err(_) => {}
+    Ok(out) => assert!(
+      cs.which_is_unsatisfied().is_some(),
+      "a digest from org.iso.23220.dtc.1 satisfied a proof naming org.iso.23220.1, \
+       reporting old_enough={:?} for a holder born 2015-01-01",
+      out.old_enough.get_value()
+    ),
+  }
+}

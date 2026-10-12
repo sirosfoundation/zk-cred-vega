@@ -161,8 +161,14 @@ pub fn native_padded_buffer_sized(
   max_message_bytes: usize,
   num_blocks: usize,
 ) -> Result<Vec<u8>, SynthesisError> {
-  let buffer_bytes = num_blocks * 64;
-  if real_len > message.len() || real_len > max_message_bytes || max_message_bytes + 9 > buffer_bytes {
+  // Checked throughout, including the comparison operands themselves: a
+  // function whose contract is "reject, never panic" cannot reach that
+  // rejection through arithmetic that traps in debug and wraps in
+  // release. Wrapping is the worse half — `max_message_bytes + 9`
+  // wrapping to a small number would *pass* the budget check.
+  let buffer_bytes = num_blocks.checked_mul(64).ok_or(SynthesisError::Unsatisfiable)?;
+  let needed = max_message_bytes.checked_add(9).ok_or(SynthesisError::Unsatisfiable)?;
+  if real_len > message.len() || real_len > max_message_bytes || needed > buffer_bytes {
     // The third clause is the budget's own consistency: SHA-256 needs a
     // 0x80 marker and an eight-byte length field after the message, so a
     // `max_message_bytes` that leaves less than nine bytes of room would

@@ -270,6 +270,35 @@ fn pid_elements(portrait: &[u8], seed: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// ISO/IEC 23220-4 Annex C Photo ID, as multipaz's `PhotoID.kt` declares
 /// it: 27 elements in `org.iso.23220.1` (including `birth_date`), 11 in
 /// `org.iso.23220.photoid.1`, 18 in `org.iso.23220.dtc.1`.
+/// A Photo ID whose `birth_date` appears in **two** namespaces with
+/// different values: a child's in `org.iso.23220.1`, an adult's in
+/// `org.iso.23220.dtc.1`.
+///
+/// Not a contrived shape. ISO/IEC 23220-4's DTC namespace carries travel
+/// document data groups, and a real credential may well restate a date of
+/// birth there; nothing in the standard forbids the two disagreeing, and
+/// nothing in the circuit's statement should depend on them agreeing.
+///
+/// `org.iso.23220.dtc.1` is 19 characters to `org.iso.23220.1`'s 15, so
+/// canonical CBOR sorts it **after** — which puts its digests inside
+/// `[region_start, deviceKeyInfo)`, the range the digest check uses.
+fn photo_id_cross_namespace(portrait: &[u8]) -> Vec<Ns> {
+  let mut out = photo_id_namespaces(portrait, true);
+  for ns in out.iter_mut() {
+    if ns.name == "org.iso.23220.1" {
+      for e in ns.elements.iter_mut() {
+        if e.0 == "birth_date" {
+          e.1 = birth_date_map("2015-01-01");
+        }
+      }
+    }
+    if ns.name == "org.iso.23220.dtc.1" {
+      ns.elements.push(("birth_date", birth_date_map(BIRTH_DATE)));
+    }
+  }
+  out
+}
+
 fn photo_id_namespaces(portrait: &[u8], date_map: bool) -> Vec<Ns> {
   let bd = if date_map { birth_date_map(BIRTH_DATE) } else { full_date(BIRTH_DATE) };
   vec![
@@ -724,6 +753,23 @@ fn main() {
     description: "ISO/IEC 23220-4 Annex C Photo ID: three namespaces, and birth_date lives in \
                   org.iso.23220.1, which sorts FIRST -- so its entries are followed by another \
                   namespace, not by deviceKeyInfo. Its elementValue uses the ISO 23220-2 map form.",
+  });
+
+  gen_doc(DocSpec {
+    name: "photo_id_cross_namespace",
+    doc_type: "org.iso.23220.photoid.1",
+    namespaces: photo_id_cross_namespace(&portrait),
+    target_ns: "org.iso.23220.1",
+    salt_bytes: 16,
+    photo_id_date_map: true,
+    plant_forged_digest_in_device_key: false,
+    valid_from: "2026-10-01T00:00:00Z",
+    valid_until: "2031-10-01T00:00:00Z",
+    description: "Adversarial: a correctly issued Photo ID carrying birth_date in TWO namespaces \
+                  with different values -- 2015-01-01 in org.iso.23220.1, which the proof names, \
+                  and 1996-01-30 in org.iso.23220.dtc.1, which sorts after it. The digest range \
+                  check runs from the named namespace's first entry to deviceKeyInfo, so every \
+                  later namespace's digests fall inside it.",
   });
 
   gen_doc(DocSpec {

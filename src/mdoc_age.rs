@@ -319,10 +319,16 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   /// bytes, packed into [`NAMESPACE_OUT_PACKS`] field elements.
   ///
   /// Without this the accepted statement does not say *which* namespace
-  /// the `birth_date` came from. A Photo ID carries three, and the
-  /// region binding only rules out namespaces sorting before the claimed
-  /// one -- so a verifier that does not pin this is accepting a weaker
-  /// statement than it thinks.
+  /// the `birth_date` came from.
+  ///
+  /// **Publishing it is not yet enough.** The digest's upper bound is
+  /// `deviceKeyInfo`, which closes the whole `valueDigests` table rather
+  /// than this namespace's sub-map, so for a multi-namespace credential
+  /// the digest may come from a *later* namespace while this still reads
+  /// the one that was asked about. An earlier version of this comment
+  /// said pinning the namespace handled it; it does not.
+  /// `a_digest_from_a_later_namespace_is_rejected` carries the exploit
+  /// and fails until the bound is made exact.
   pub namespace: Vec<AllocatedNum<Scalar>>,
   /// How many bytes of [`Self::namespace`] the header occupies. The
   /// verifier must check this against the namespace it asked for: it is

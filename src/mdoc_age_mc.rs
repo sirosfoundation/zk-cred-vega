@@ -77,6 +77,22 @@ pub struct HashWitness {
 }
 
 impl HashWitness {
+  /// Checks the vectors are the shape the layout demands.
+  ///
+  /// `blocks` and `digests` are public fields, so a caller can hand
+  /// either circuit a short one. `alloc_shared` accepts whatever it is
+  /// given, and `synthesize_step` then indexes past the end — a panic,
+  /// across an FFI boundary where that aborts the host, instead of the
+  /// `Unsatisfiable` a malformed witness is supposed to produce. Both
+  /// `shared` implementations call this first.
+  pub fn check(&self) -> Result<(), SynthesisError> {
+    let n = layout().total_blocks();
+    if self.blocks.len() != n || self.digests.len() != n {
+      return Err(SynthesisError::Unsatisfiable);
+    }
+    Ok(())
+  }
+
   /// Fallible: this is witness generation, so there is no constraint yet
   /// to be unsatisfied, and the crate crosses an FFI boundary where a
   /// panic aborts the host process. An over-budget `sig_structure` or
@@ -134,6 +150,7 @@ where
     &self,
     cs: &mut CS,
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    self.hash.check()?;
     sha256_mc::alloc_shared(cs, &self.hash.blocks, &self.hash.digests)
   }
 
@@ -199,6 +216,7 @@ where
     cs: &mut CS,
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     // Byte-for-byte the same allocation as the step circuit's.
+    self.hash.check()?;
     sha256_mc::alloc_shared(cs, &self.hash.blocks, &self.hash.digests)
   }
 
