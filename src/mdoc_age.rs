@@ -568,11 +568,20 @@ impl<Scalar: PrimeFieldBits> Hasher<'_, Scalar> {
         crate::sha256_var::sha256_var_sized(cs.namespace(|| "hash"), raw_bits, real_len, max_bytes, blocks)
       }
       Hasher::Folded { shared, layout, message } => {
-        let (buffer_bits, active, _) =
+        let (buffer_bits, active, len_selector) =
           crate::sha256_var::padded_buffer_bits(cs, raw_bits, real_len, max_bytes, blocks)?;
         crate::sha256_mc::bind_message_to_shared(cs, shared, layout, *message, &buffer_bits)?;
         let terminal = crate::sha256_var::terminal_block_for_len(real_len) - 1;
-        let digest = crate::sha256_mc::select_digest(cs, shared, layout, *message, terminal)?;
+        // `len_selector` ties the selected block to the padding boundary
+        // rather than leaving them two independent witnesses -- MC-03.
+        let digest = crate::sha256_mc::select_digest(
+          cs,
+          shared,
+          layout,
+          *message,
+          terminal,
+          Some(&len_selector),
+        )?;
         Ok((digest, active))
       }
     }

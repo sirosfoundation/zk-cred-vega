@@ -33,9 +33,17 @@
 //! real proving key**; `mc01_folding_the_wrong_indices_is_caught_by_the_acceptance_path`
 //! does exactly that.
 //!
-//! [`verify_age`] is what rejects it, and it is the only thing that does.
-//! **Use it as the acceptance path. Do not call the proof system's
-//! `verify` directly and read the public values yourself.**
+//! The fix cannot live inside a circuit. "Every block index is covered
+//! exactly once" is a property of the *set* of folded instances, and no
+//! single circuit sees the set — only the verifier does. So it is
+//! necessarily a verifier-side check, and the thing that can be fixed is
+//! making it unskippable.
+//!
+//! [`FoldedAgeProof`] is therefore opaque: it holds the proof but does
+//! not hand out the inner `VegaMcZkSNARK`, so within this crate's API
+//! there is no way to reach public values except through [`verify_age`],
+//! which performs the check. That turns a documented obligation into one
+//! the type system keeps.
 //!
 //! **Unreviewed.** See the crate README.
 
@@ -310,31 +318,51 @@ pub fn setup(
   Ok(AgeKeys { pk, vk })
 }
 
+/// A folded proof, deliberately opaque.
+///
+/// It does not expose the inner `VegaMcZkSNARK`, because that type's own
+/// `verify` returns public values **without** checking which block
+/// indices the folded steps claimed — and a proof that folds the wrong
+/// indices leaves the signed digest free. See this module's header.
+///
+/// Serialization goes through this wrapper, so a stored proof keeps the
+/// same property when it comes back.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct FoldedAgeProof(VegaMcZkSNARK<crate::Engine_>);
+
 /// Proves one presentation.
 pub fn prove(
   pk: &VegaMcProverKey<crate::Engine_>,
   steps: &[StepCircuit<crate::Engine_>],
   core: &CoreCircuit<crate::Engine_>,
-) -> Result<VegaMcZkSNARK<crate::Engine_>, crate::VegaMdocError> {
+) -> Result<FoldedAgeProof, crate::VegaMdocError> {
   let prep = VegaMcZkSNARK::<crate::Engine_>::prep_prove(pk, steps, core, false)?;
   let (proof, _next) = VegaMcZkSNARK::<crate::Engine_>::prove(pk, steps, core, prep, false)?;
-  Ok(proof)
+  Ok(FoldedAgeProof(proof))
 }
 
 /// Verifies and enforces every caller obligation, exactly as the
 /// single-circuit [`crate::mdoc_age_circuit::verify_age`] does. The
 /// arithmetization differs; the accepted statement does not.
 pub fn verify_age(
-  proof: &VegaMcZkSNARK<crate::Engine_>,
+  proof: &FoldedAgeProof,
   vk: &VegaMcVerifierKey<crate::Engine_>,
   expected: &crate::mdoc_age_circuit::ExpectedContext,
 ) -> Result<crate::mdoc_age_circuit::VerifiedAgeProof, crate::VegaMdocError> {
-  let (step_values, core_values) = proof.verify(vk, layout().total_blocks())?;
+  let n = layout().total_blocks();
+  let (step_values, core_values) = proof.0.verify(vk, n)?;
 
-  // Each folded step must have proven the index it claims, in order.
-  // Without this a prover could fold the same block repeatedly and leave
-  // others unproven.
-  if step_values.len() != layout().total_blocks() {
+  // MC-01. Every block index must be claimed exactly once, in order.
+  //
+  // The proof system checks only how many instances there are, so
+  // without this a prover folds n copies of one step, proves a single
+  // compression, and leaves every other block's shared digest free --
+  // including the one `select_digest` hands to the ECDSA check as the
+  // signed message. Rejecting duplicates is the point; rejecting a
+  // permutation as well costs nothing and keeps the rule simple enough
+  // to state.
+  if step_values.len() != n {
     return Err(crate::VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
   for (i, v) in step_values.iter().enumerate() {

@@ -254,19 +254,30 @@ fn mc01_folding_the_wrong_indices_is_caught_by_the_acceptance_path() {
   let honest = mc::prove(&keys.pk, &steps, &core).expect("honest prove");
   assert!(mc::verify_age(&honest, &keys.vk, &expected).is_ok(), "honest control must verify");
 
-  // The attack: every folded instance claims index 0.
-  let all_zero: Vec<_> = (0..steps.len()).map(|_| steps[0].clone()).collect();
-  match mc::prove(&keys.pk, &all_zero, &core) {
-    Err(e) => println!("MC-01: proving refused outright ({e:?})"),
-    Ok(bad) => {
-      // If it proves, the acceptance path is the only thing left.
-      let accepted = mc::verify_age(&bad, &keys.vk, &expected).is_ok();
-      assert!(
-        !accepted,
-        "a proof folding only step 0 was ACCEPTED — the step-index check in verify_age is \
-         the sole defence and it failed"
-      );
-      println!("MC-01: proof generated, and rejected by the step-index check in verify_age");
+  // Three ways to get the folded set wrong. Duplicates are the dangerous
+  // one; a permutation and a dropped index are checked too, because the
+  // rule is "exactly once, in order" and a rule worth having is worth
+  // testing at its edges.
+  let mut variants: Vec<(&str, Vec<_>)> = Vec::new();
+  variants.push(("every instance claims index 0", (0..steps.len()).map(|_| steps[0].clone()).collect()));
+  let mut swapped = steps.clone();
+  swapped.swap(0, 1);
+  variants.push(("two indices transposed", swapped));
+  let mut dropped = steps.clone();
+  let last = dropped.len() - 1;
+  dropped[last] = steps[0].clone();
+  variants.push(("the last index replaced by a duplicate of the first", dropped));
+
+  for (name, bad_steps) in variants {
+    match mc::prove(&keys.pk, &bad_steps, &core) {
+      Err(_) => println!("MC-01 [{name}]: proving refused outright"),
+      Ok(bad) => {
+        assert!(
+          mc::verify_age(&bad, &keys.vk, &expected).is_err(),
+          "MC-01 [{name}]: a malformed folded set was ACCEPTED"
+        );
+        println!("MC-01 [{name}]: proof generated, rejected by the step-index check");
+      }
     }
   }
 }

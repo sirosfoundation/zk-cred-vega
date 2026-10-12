@@ -436,6 +436,7 @@ pub fn select_digest<Scalar, CS>(
   layout: &HashLayout,
   message: usize,
   terminal_block: usize,
+  length_selector: Option<&[AllocatedBit]>,
 ) -> Result<Vec<Boolean>, SynthesisError>
 where
   Scalar: PrimeField,
@@ -448,6 +449,36 @@ where
   }
   let start = layout.message_start(message);
   let sel = one_hot::<Scalar, _>(cs.namespace(|| "terminal block"), budget, terminal_block)?;
+
+  // MC-03. Tie the block selected to the padding boundary.
+  //
+  // Both are witnesses an honest prover derives from one length, but
+  // nothing related them: the padding said block `d` was terminal while
+  // the selection could pick block `t != d`. That was safe only by an
+  // argument about what an earlier block's digest is good for -- a
+  // Merkle-Damgard intermediate needs either an issuer signature over it
+  // or a `valueDigests` entry equal to it. Safe by argument is worse than
+  // safe by construction, and this costs one constraint: both sides are
+  // linear combinations whose coefficients are known at circuit-build
+  // time.
+  if let Some(len_sel) = length_selector {
+    let mut from_selection = LinearCombination::<Scalar>::zero();
+    for (j, s) in sel.iter().enumerate() {
+      from_selection = from_selection + (Scalar::from(j as u64), s.get_variable());
+    }
+    let mut from_padding = LinearCombination::<Scalar>::zero();
+    for (n, s) in len_sel.iter().enumerate() {
+      let block = crate::sha256_var::terminal_block_for_len(n).saturating_sub(1);
+      from_padding = from_padding + (Scalar::from(block as u64), s.get_variable());
+    }
+    cs.enforce(
+      || "selected block is the padding boundary",
+      |lc| lc + &from_selection - &from_padding,
+      |lc| lc + CS::one(),
+      |lc| lc,
+    );
+  }
+
   let mut bits = Vec::with_capacity(256);
   for k in 0..PACKS_PER_DIGEST {
     let p = readout(
@@ -528,7 +559,7 @@ mod tests {
     for (m, (msg, terminal)) in [(&m1[..], 3usize), (&m2[..], 0usize)].into_iter().enumerate() {
       let mut cs = TestConstraintSystem::<S>::new();
       let shared = alloc_shared(&mut cs, &blocks, &digests).unwrap();
-      let bits = select_digest(&mut cs, &shared, &layout, m, terminal).unwrap();
+      let bits = select_digest(&mut cs, &shared, &layout, m, terminal, None).unwrap();
       assert!(cs.is_satisfied(), "selection unsatisfied at {:?}", cs.which_is_unsatisfied());
       let got: Vec<u8> = bits
         .chunks(8)
@@ -604,11 +635,11 @@ mod core_tests {
       .enumerate()
       .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("raw {i}")), Some(b)).map(Boolean::from).unwrap())
       .collect();
-    let (buffer_bits, _, _) =
+    let (buffer_bits, _, len_sel) =
       crate::sha256_var::padded_buffer_bits(&mut cs, &raw_bits, msg.len(), MAXB, BLOCKS).unwrap();
     bind_message_to_shared(&mut cs, &shared, &layout, 0, &buffer_bits).unwrap();
     let terminal = crate::sha256_var::terminal_block_for_len(msg.len()) - 1;
-    let bits = select_digest(&mut cs, &shared, &layout, 0, terminal).unwrap();
+    let bits = select_digest(&mut cs, &shared, &layout, 0, terminal, Some(&len_sel)).unwrap();
     let core_cost = cs.num_constraints() - base;
 
     assert!(cs.is_satisfied(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
