@@ -30,6 +30,8 @@ pub mod onehot_cursor;
 pub mod p256_ecc;
 pub mod mdoc_age;
 pub mod mdoc_age_circuit;
+pub mod mdoc_age_mc;
+pub mod sha256_mc;
 pub mod sha256_var;
 
 #[cfg(feature = "uniffi")]

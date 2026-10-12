@@ -189,3 +189,49 @@ fn artifact_sizes() {
   println!("proof        : {:>9.2} kB", pr as f64 / 1e3);
   println!("public inputs: {}", zk_cred_vega::mdoc_age_circuit::PUBLIC_INPUT_LEN);
 }
+
+// ---- The folded (multi-circuit) arithmetization ---------------------
+
+fn mc_build(name: &str, cutoff: &[u8; 10], session: &[u8; 32])
+  -> (Vec<zk_cred_vega::mdoc_age_mc::StepCircuit<Engine_>>, zk_cred_vega::mdoc_age_mc::CoreCircuit<Engine_>) {
+  let c = circuit(name, cutoff, session, None);
+  zk_cred_vega::mdoc_age_mc::build(&c.witness, &c.ecdsa, c.cutoff, c.now, c.device_auth_digest)
+}
+
+/// The folded form proves and verifies the same statement.
+///
+/// This is the whole point of §4.2: every SHA-256 compression becomes an
+/// instance of one small step circuit, the core keeps none, and setup
+/// therefore encodes one step plus one core instead of an unrolled hash.
+#[test]
+#[ignore = "slow: runs a real folded setup and proof"]
+fn folded_proofs_verify_under_folded_keys() {
+  use zk_cred_vega::mdoc_age_mc as mc;
+  let (steps, core) = mc_build("mdl_iso18013", CUTOFF, SESSION);
+  let t = Instant::now();
+  let keys = mc::setup(&steps[0], &core).expect("setup");
+  println!("MC setup: {:?}", t.elapsed());
+
+  let t = Instant::now();
+  let proof = mc::prove(&keys.pk, &steps, &core).expect("prove");
+  println!("MC prove: {:?}", t.elapsed());
+
+  let expected = ExpectedContext { device_auth_digest: *SESSION, cutoff: *CUTOFF, now: *NOW };
+  let ok = mc::verify_age(&proof, &keys.vk, &expected).expect("honest folded proof must verify");
+  assert_eq!(ok.doc_type, "org.iso.18013.5.1.mDL");
+  assert_eq!(ok.namespace, "org.iso.18013.5.1");
+
+  // Same obligations as the single-circuit path.
+  assert!(
+    mc::verify_age(&proof, &keys.vk, &ExpectedContext { device_auth_digest: *OTHER_SESSION, cutoff: *CUTOFF, now: *NOW }).is_err(),
+    "a folded proof must not replay to another session"
+  );
+
+  let pk = bincode::serialize(&keys.pk).map(|v| v.len()).unwrap_or(0);
+  let vk = bincode::serialize(&keys.vk).map(|v| v.len()).unwrap_or(0);
+  let pr = bincode::serialize(&proof).map(|v| v.len()).unwrap_or(0);
+  println!("MC prover key   : {:>9.2} MB", pk as f64 / 1e6);
+  println!("MC verifier key : {:>9.2} MB", vk as f64 / 1e6);
+  println!("MC proof        : {:>9.2} kB", pr as f64 / 1e3);
+  println!("  single-circuit was 614.44 MB / 614.44 MB / 111.83 kB");
+}

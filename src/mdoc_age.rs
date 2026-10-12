@@ -531,6 +531,54 @@ impl MdocAgeWitness {
   }
 }
 
+/// Where a message's SHA-256 compressions happen.
+///
+/// The statement is identical either way; what differs is whether the
+/// compressions are unrolled into this circuit or proven by folded step
+/// instances against a shared witness. Keeping both behind one enum means
+/// the credential half is written once — the two paths cannot drift into
+/// proving subtly different things, which is exactly the failure mode a
+/// second copy of this logic would invite.
+pub enum Hasher<'a, Scalar: ff::PrimeField> {
+  /// Unroll every compression here. Sets up a key sized by the whole
+  /// message; see [`crate::sha256_mc`] for why that is expensive.
+  SingleCircuit,
+  /// Bind the padded message to a shared witness the step circuits hash,
+  /// and select the canonical digest. No compression in this circuit.
+  Folded {
+    shared: &'a [AllocatedNum<Scalar>],
+    layout: &'a crate::sha256_mc::HashLayout,
+    message: usize,
+  },
+}
+
+impl<Scalar: PrimeFieldBits> Hasher<'_, Scalar> {
+  /// Returns `(digest_bits, msg_active_bits)` for a witnessed-length
+  /// message, matching [`crate::sha256_var::sha256_var_sized`]'s contract.
+  pub fn hash<CS: ConstraintSystem<Scalar>>(
+    &self,
+    cs: &mut CS,
+    raw_bits: &[Boolean],
+    real_len: usize,
+    max_bytes: usize,
+    blocks: usize,
+  ) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError> {
+    match self {
+      Hasher::SingleCircuit => {
+        crate::sha256_var::sha256_var_sized(cs.namespace(|| "hash"), raw_bits, real_len, max_bytes, blocks)
+      }
+      Hasher::Folded { shared, layout, message } => {
+        let (buffer_bits, active, _) =
+          crate::sha256_var::padded_buffer_bits(cs, raw_bits, real_len, max_bytes, blocks)?;
+        crate::sha256_mc::bind_message_to_shared(cs, shared, layout, *message, &buffer_bits)?;
+        let terminal = crate::sha256_var::terminal_block_for_len(real_len) - 1;
+        let digest = crate::sha256_mc::select_digest(cs, shared, layout, *message, terminal)?;
+        Ok((digest, active))
+      }
+    }
+  }
+}
+
 /// What the credential half of the circuit establishes, handed to the
 /// session half.
 ///
@@ -562,6 +610,8 @@ pub fn synthesize_credential<Scalar, CS>(
   cs: &mut CS,
   witness: &MdocAgeWitness,
   ecdsa: &crate::ecdsa::EcdsaP256Witness<Scalar>,
+  sig_hasher: &Hasher<'_, Scalar>,
+  item_hasher: &Hasher<'_, Scalar>,
 ) -> Result<CredentialBinding<Scalar>, SynthesisError>
 where
   Scalar: PrimeFieldBits,
@@ -593,8 +643,8 @@ where
   let mut padded = witness.sig_structure.clone();
   padded.resize(MAX_SIG_STRUCTURE_BYTES, 0);
   let sig_bits = alloc_bits(cs, &padded, "sig")?;
-  let (z_bits, _) = crate::sha256_var::sha256_var_sized(
-    cs.namespace(|| "mso hash"),
+  let (z_bits, _) = sig_hasher.hash(
+    &mut cs.namespace(|| "mso hash"),
     &sig_bits,
     witness.sig_structure.len(),
     MAX_SIG_STRUCTURE_BYTES,
@@ -661,8 +711,13 @@ where
   let mut item_padded = witness.item_bytes.clone();
   item_padded.resize(crate::MAX_CLAIM_BYTES_V1, 0);
   let item_bits = alloc_bits(cs, &item_padded, "item")?;
-  let (item_digest_bits, item_active) =
-    crate::sha256_var::sha256_var(cs.namespace(|| "item hash"), &item_bits, witness.item_bytes.len())?;
+  let (item_digest_bits, item_active) = item_hasher.hash(
+    &mut cs.namespace(|| "item hash"),
+    &item_bits,
+    witness.item_bytes.len(),
+    crate::MAX_CLAIM_BYTES_V1,
+    crate::sha256_var::NUM_BLOCKS,
+  )?;
   for (p, pack) in located.packs.iter().enumerate() {
     let mut lc = LinearCombination::<Scalar>::zero();
     for i in 0..offset_bind::BYTES_PER_PACK {
@@ -850,7 +905,7 @@ where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
 {
-  let cred = synthesize_credential(cs, witness, ecdsa)?;
+  let cred = synthesize_credential(cs, witness, ecdsa, &Hasher::SingleCircuit, &Hasher::SingleCircuit)?;
   let sess = synthesize_session(
     cs,
     &cred.device_key,

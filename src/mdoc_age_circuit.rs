@@ -152,7 +152,13 @@ where
     cs: &mut CS,
     _shared: &[AllocatedNum<E::Scalar>],
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-    let cred = mdoc_age::synthesize_credential(cs, &self.witness, &self.ecdsa)?;
+    let cred = mdoc_age::synthesize_credential(
+      cs,
+      &self.witness,
+      &self.ecdsa,
+      &mdoc_age::Hasher::SingleCircuit,
+      &mdoc_age::Hasher::SingleCircuit,
+    )?;
 
     // Returned, not inputized — see this module's note on why. The
     // first `PUBLIC_FROM_PRECOMMITTED` are published by `synthesize`;
@@ -317,10 +323,21 @@ pub fn verify_age(
   vk: &VegaVerifierKey<crate::Engine_>,
   expected: &ExpectedContext,
 ) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
-  type S = <crate::Engine_ as Engine>::Scalar;
-  let reject = || crate::VegaMdocError::Circuit(SynthesisError::Unsatisfiable);
 
   let v = proof.verify(vk)?;
+  check_public_values(&v, expected)
+}
+
+/// Decodes a verified proof's public values and enforces every caller
+/// obligation. Shared by both arithmetizations — the single-circuit form
+/// and the folded one in [`crate::mdoc_age_mc`] accept the same
+/// statement, so they must not drift into checking it differently.
+pub fn check_public_values(
+  v: &[<crate::Engine_ as Engine>::Scalar],
+  expected: &ExpectedContext,
+) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
+  type S = <crate::Engine_ as Engine>::Scalar;
+  let reject = || crate::VegaMdocError::Circuit(SynthesisError::Unsatisfiable);
   if v.len() != PUBLIC_INPUT_LEN {
     return Err(reject());
   }

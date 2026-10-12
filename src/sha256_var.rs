@@ -194,13 +194,28 @@ pub fn native_padded_buffer(message: &[u8], real_len: usize) -> [u8; BUFFER_BYTE
 /// rather than recomputing "is this byte real" a second, independent
 /// way — see this function's own internal comment on why.
 #[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
-pub fn sha256_var_sized<Scalar, CS>(
-  mut cs: CS,
+/// A padded buffer and the two by-products both hashing designs need:
+/// the per-byte "real content" mask, and the one-hot over the witnessed
+/// length that pins the padding boundary.
+pub type PaddedBuffer = (Vec<Boolean>, Vec<Boolean>, Vec<AllocatedBit>);
+
+/// Builds the canonically padded buffer for a witnessed-length message,
+/// plus the per-byte "this position is real message content" mask.
+///
+/// Split out of [`sha256_var_sized`] so the multi-circuit path
+/// ([`crate::sha256_mc`]) reuses exactly this padding logic rather than
+/// reimplementing it. What differs between the single- and multi-circuit
+/// designs is where the compressions happen; how a message is padded and
+/// how its length is hidden is identical, and duplicating it would be
+/// two things that must agree silently drifting apart.
+#[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`byte_idx`/`bit_idx` the formulas reason about
+pub fn padded_buffer_bits<Scalar, CS>(
+  cs: &mut CS,
   raw_bits: &[Boolean],
   real_len: usize,
   max_message_bytes: usize,
   num_blocks: usize,
-) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+) -> Result<PaddedBuffer, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -313,6 +328,24 @@ where
       buffer_bits.push(Boolean::from(out_bit));
     }
   }
+
+  Ok((buffer_bits, msg_active_bits, len_selector))
+}
+
+#[allow(clippy::needless_range_loop)] // indices double as the numeric `n`/`bit_idx` the formulas reason about
+pub fn sha256_var_sized<Scalar, CS>(
+  mut cs: CS,
+  raw_bits: &[Boolean],
+  real_len: usize,
+  max_message_bytes: usize,
+  num_blocks: usize,
+) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  let (buffer_bits, msg_active_bits, len_selector) =
+    padded_buffer_bits(&mut cs, raw_bits, real_len, max_message_bytes, num_blocks)?;
 
   // 3. Run the fixed num_blocks compression rounds unconditionally,
   // recording the state after each block.
