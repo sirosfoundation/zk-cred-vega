@@ -13,6 +13,9 @@
 use std::time::Instant;
 use tracing_subscriber::fmt::time::uptime;
 
+#[path = "common/r12_fixture.rs"]
+mod r12_fixture;
+
 fn main() {
   tracing_subscriber::fmt()
     .with_timer(uptime())
@@ -20,41 +23,7 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .init();
 
-  let fixture = std::fs::read_to_string("test-vectors/mdl_4claims_mixed_disclosure.json")
-    .expect("fixture (run `cargo run --release --example gen_test_mdocs` first)");
-  let f: serde_json::Value = serde_json::from_str(&fixture).unwrap();
-  let hexb = |s: &str| hex::decode(s).unwrap();
-
-  let claims: Vec<zk_cred_vega::ClaimWitness> = f["claims"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|c| zk_cred_vega::ClaimWitness {
-      issuer_signed_item_bytes: hexb(c["issuer_signed_item_bytes_hex"].as_str().unwrap()),
-      disclose: c["disclose"].as_bool().unwrap(),
-      digest_id: c["digest_id"].as_u64().unwrap() as u32,
-    })
-    .collect();
-
-  let w = &f["ecdsa_witness"];
-  use num_bigint::{BigInt, Sign};
-  let ecdsa = zk_cred_vega::MdocEcdsaWitness {
-    qx: zk_cred_vega::nonnative::util::nat_to_f(&BigInt::from_bytes_be(Sign::Plus, &hexb(w["qx_hex"].as_str().unwrap()))).unwrap(),
-    qy: zk_cred_vega::nonnative::util::nat_to_f(&BigInt::from_bytes_be(Sign::Plus, &hexb(w["qy_hex"].as_str().unwrap()))).unwrap(),
-    r: BigInt::from_bytes_be(Sign::Plus, &hexb(w["r_hex"].as_str().unwrap())),
-    s: BigInt::from_bytes_be(Sign::Plus, &hexb(w["s_hex"].as_str().unwrap())),
-    s_inv: BigInt::from_bytes_be(Sign::Plus, &hexb(w["s_inv_hex"].as_str().unwrap())),
-  };
-  let m = &f["mso_body"];
-  let fx = |s: &str| -> [u8; 32] { hexb(s).try_into().unwrap() };
-  let body = zk_cred_vega::mso::MsoBodyWitness {
-    device_x: fx(m["device_x_hex"].as_str().unwrap()),
-    device_y: fx(m["device_y_hex"].as_str().unwrap()),
-    signed_ts: m["signed_ts"].as_str().unwrap().as_bytes().try_into().unwrap(),
-    valid_from_ts: m["valid_from_ts"].as_str().unwrap().as_bytes().try_into().unwrap(),
-    valid_until_ts: m["valid_until_ts"].as_str().unwrap().as_bytes().try_into().unwrap(),
-  };
-  let nonce = [0x5Au8; zk_cred_vega::BLIND_NONCE_BYTES];
+  let r12_fixture::Presentation { claims, ecdsa, body, nonce } = r12_fixture::load();
 
   eprintln!("=== available parallelism: {:?} ===", std::thread::available_parallelism());
 
