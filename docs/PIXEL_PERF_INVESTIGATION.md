@@ -21,12 +21,13 @@ once, show cheaply many times") suggested it should be much faster.
    show (88-243:1) - a real signal, though see §5 for why this does not by
    itself prove a specific root cause.
 4. Decomposing the originally-observed ~9x gap (measured through the real
-   Kotlin/JNI SDK path) into independently-measured factors: ~4.2x is a
-   whole-run compute gap against the Pixel's best cluster, ~1.2x is the
-   scheduling penalty from finding #2, and ~1.35x is JNI/UniFFI marshaling
-   overhead specific to the Android integration layer - multiplying out to
-   the originally observed range. The 4.2x compares runs with different
-   worker counts; see §6 for what that is worth.
+   Kotlin/JNI SDK path) into factors measured over one interval,
+   `prep_prove + prove`: ~5.25x is a whole-run compute gap against the
+   Pixel's best cluster, ~1.25x is the fast-cluster/fewer-workers effect
+   from finding #2, and ~1.35x is JNI/UniFFI marshaling overhead specific
+   to the Android integration layer. They multiply to ~8.9x. The first two
+   each vary more than one thing at a time - see §6 for exactly what they
+   do and do not establish.
 
 ---
 
@@ -294,7 +295,11 @@ Raw results:
 | **Fast-only** (cores 4-7, 4 threads) | 0.83s | 2.19s | **4.79s** |
 | Little-only (cores 0-3, 4 threads) | 1.81s | 3.94s | 12.22s |
 
-**Using only 4 of the 8 cores is faster than using all 8.** `rayon`'s
+**Using only 4 of the 8 cores is faster than using all 8** - though note
+that this comparison moves two variables together, affinity *and* worker
+count (rayon's default 8 against an explicit 4), so it establishes the
+win without isolating its cause. The missing control is `taskset -c 0-7
+env RAYON_NUM_THREADS=4`. See §6. `rayon`'s
 default thread pool (one worker per logical CPU) hands equal-sized chunks
 of work to all 8 threads; on a heterogeneous SoC, every one of the ~29
 `par_iter` call sites in `vega_mc_zkp.rs` then has to wait on whichever
@@ -414,41 +419,65 @@ instrumented run gave:
 prep_prove=1338ms, prove(cold)=3782ms, cold_total=5120ms
 ```
 
-Decomposing the gap against the x86_64 native baseline (1.08s):
+Decomposing the gap against the x86_64 native baseline, **over one
+interval throughout**: `prep_prove + prove`, the two calls the SDK
+actually makes per presentation. An earlier version of this table mixed
+intervals - two rows over `setup + prep_prove + prove` and one over
+`prep_prove + prove` - so its factors did not telescope: 4.2 x 1.19 x
+1.35 is 6.75x, which does not reach the ~9x it claimed to explain.
 
-| Factor | Multiplier | Evidence |
+| Factor | Multiplier | Evidence (`prep_prove + prove`) |
 |---|---:|---|
-| Whole-run gap, Pixel's *best* cluster vs. x86_64 | ~4.2x | §4 fast-only (4.79s) vs. §3a (1.08s) |
-| Naive scheduling onto weak efficiency cores | ~1.19x | §4 default (5.68s) vs. fast-only (4.79s) |
-| JNI/UniFFI/Kotlin marshaling overhead | ~1.35x | SDK-measured (5.12s for prep+prove) vs. §3b native (3.78s for the same two calls) |
-| **Combined** | **~7-9x** | matches the originally observed range |
+| Whole-run gap, Pixel's *best* cluster vs. x86_64 | ~5.25x | §4 fast-only (0.83 + 2.19 = 3.02s) vs. §3a (181.73 + 393.06 = 0.575s) |
+| Fewer, faster workers vs. rayon's default pool | ~1.25x | §4 default (1.00 + 2.78 = 3.78s) vs. fast-only (3.02s) |
+| JNI/UniFFI/Kotlin marshaling overhead | ~1.35x | SDK-measured (5.12s) vs. §3b native (3.78s) |
+| **Combined** | **~8.9x** | and directly: 5.12s / 0.575s = 8.90x |
 
-About 35% of the gap (the scheduling and JNI factors, multiplicatively)
+Now it telescopes, and it lands on the originally observed range rather
+than near it.
+
+About 40% of the gap - the second and third factors, multiplicatively -
 is addressable without touching the circuit at all.
 
-**The ~4.2x is a whole-run comparison, not a per-core one**, and an
-earlier version of this document called it "per-core". The two runs do
-not use the same number of workers: the Pixel figure is
-`RAYON_NUM_THREADS=4` pinned to four performance cores, while the x86_64
-baseline uses the default pool on a 6-core/12-thread host. Three times
-the workers is in the ratio alongside whatever per-core difference
-exists.
+### What these two factors are *not* measurements of
 
-Controlling the half that can be controlled here - the x86_64 side,
-re-run on the same machine - the workload turns out to scale poorly with
-threads anyway, so the confound is smaller than three times:
+Both of the first two rows change more than one variable, and neither
+can be tightened without a device to re-run.
+
+**The 5.25x is a whole-run gap, not a per-core one.** An earlier version
+called it "per-core". The Pixel figure is `RAYON_NUM_THREADS=4` pinned
+to four performance cores; the x86_64 baseline uses the default pool on
+a 6-core/12-thread host. Three times the workers is in that ratio
+alongside whatever per-core difference exists.
+
+**The 1.25x is not isolated to heterogeneous scheduling.** The §4
+comparison changes affinity *and* worker count at once - all 8 cores
+with rayon's default 8 workers, against cores 4-7 with 4. Lower
+per-worker overhead could account for some of it, and the document's
+original reading - that this is specifically the cost of scheduling onto
+the efficiency cores - is not what the experiment establishes.
+
+Controlling the half that can be controlled here, by re-running the
+x86_64 side at four workers on the same machine:
 
 | x86_64 workers | prep_prove | prove | prep+prove |
 |---|---:|---:|---:|
 | default (12) | 187.05ms | 418.97ms | 606ms |
-| 4 (matched to the Pixel run) | 215.41ms | 459.89ms | 675ms |
+| 4 | 215.41ms | 459.89ms | 675ms |
 
-**1.11x** for a third of the workers. So matching worker counts moves the
-figure to roughly 3.8x rather than collapsing it, and a real per-core gap
-remains. But it is an estimate with a known uncontrolled variable on the
-device side, which no number here can fix without a Pixel to re-run; the
-"silicon-capability, not software-fixable" reading should be held that
-loosely.
+**1.11x** for a third of the workers. This workload scales poorly with
+threads, which cuts both ways: it means the 5.25x survives worker
+matching largely intact (roughly 4.7x), and it means a meaningful part
+of the 1.25x may be worker count rather than core quality.
+
+The missing control is one command on a device - `taskset -c 0-7 env
+RAYON_NUM_THREADS=4 ./perf_profile`, all cores with four workers. Until
+someone runs it, read the first factor as a real but imprecisely
+attributed hardware gap, the second as "fewer workers on the fast
+cluster is ~25% faster, for reasons not fully separated", and treat the
+"silicon-capability, not software-fixable" conclusion as a lead rather
+than a finding.
+
 
 ---
 

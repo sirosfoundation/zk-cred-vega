@@ -51,8 +51,22 @@ mod r12_fixture;
 /// still to send - each waiting on the other. Confirmed by hitting this
 /// exact hang with a stdin-piped version of this function.
 fn compressed_size(tool: &str, args: &[&str], data: &[u8]) -> Option<u64> {
-  let tmp = std::env::temp_dir().join(format!("compressibility_probe_{}.bin", std::process::id()));
-  std::fs::write(&tmp, data).ok()?;
+  // `create_new` rather than `fs::write`, and a random name rather than
+  // the pid. `fs::write` follows an existing symlink and truncates its
+  // target, so a predictable path in a world-writable directory lets any
+  // local process point this at a file of theirs and have the probe
+  // destroy it. `O_CREAT | O_EXCL` refuses to follow a symlink and fails
+  // if anything is already there, which turns the race into an error.
+  let mut seed = [0u8; 16];
+  getrandom::getrandom(&mut seed).ok()?;
+  let tmp = std::env::temp_dir().join(format!("compressibility_probe_{}.bin", hex::encode(seed)));
+  let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).ok()?;
+  use std::io::Write;
+  if file.write_all(data).is_err() {
+    let _ = std::fs::remove_file(&tmp);
+    return None;
+  }
+  drop(file);
   // `args` then `arg(&tmp)` rather than building a `Vec<&str>`: `Command`
   // takes `OsStr`, so converting the path to UTF-8 buys nothing and the
   // `?` on that conversion used to return *after* writing 100+ MB and
