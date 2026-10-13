@@ -236,6 +236,32 @@ pub struct DeviceAuthWitness {
   pub s_inv: num_bigint::BigInt,
 }
 
+impl DeviceAuthWitness {
+  /// Builds the witness from a raw ECDSA-P256 signature over the
+  /// verifier's `DeviceAuthentication` digest.
+  ///
+  /// Takes `(r, s)` rather than a private key, because in the deployment
+  /// this circuit is for, the key never leaves the secure element: the
+  /// wallet hands the SE a digest and gets back exactly these 64 bytes.
+  /// A helper that signed for you would be a helper no wallet could use.
+  ///
+  /// What it does carry is the part worth not reimplementing — `s_inv`
+  /// is `s^(n-2) mod n` by Fermat, and the circuit checks the hint
+  /// rather than trusting it, so getting it wrong fails as an
+  /// unsatisfiable constraint a long way from its cause. Three callers
+  /// in this repository had their own copy of that line.
+  pub fn from_signature(r: &[u8; 32], s: &[u8; 32]) -> Self {
+    use num_bigint::{BigInt, Sign};
+    let n = crate::p256_ecc::p256_order();
+    let s = BigInt::from_bytes_be(Sign::Plus, s);
+    Self {
+      r: BigInt::from_bytes_be(Sign::Plus, r),
+      s_inv: s.modpow(&(n.clone() - BigInt::from(2)), &n),
+      s,
+    }
+  }
+}
+
 /// Everything the prover holds.
 #[derive(Clone, Debug)]
 pub struct MdocAgeWitness {
