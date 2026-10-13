@@ -30,12 +30,13 @@
 //! For both arithmetizations, on a real `setup` + `prove`:
 //!
 //! * every secret the circuit is supposed to hide is absent from the
-//!   serialized proof, searched in nine encodings — raw bytes both
+//!   serialized proof, searched in ten encodings — raw bytes both
 //!   endiannesses, one byte per field element, one bit per field element
 //!   in both bit orders and both field encodings, one bit per byte;
 //! * the longest run of 0/1 field cells, which is the structural
-//!   property the r12 attack relies on. r12 offers 2,328 of them in a
-//!   row; r13 offers single digits.
+//!   property the r12 attack relies on. Measured: r12 offers **2,328**
+//!   in a row — exactly the `CORE_BITS` the reported script asks for —
+//!   and r13 offers **1**.
 //!
 //! # The positive control
 //!
@@ -53,9 +54,9 @@
 //!
 //! | | entry point | size | longest 0/1 cell run |
 //! |---|---|---|---|
-//! | r12 | `ffi_api::prove` -> `mdoc_core` | ~233 kB | **2328** |
-//! | r13 single | `mdoc_age_circuit::prove` | ~112 kB | single digits |
-//! | r13 folded | `mdoc_age_mc::prove` | ~453 kB | single digits |
+//! | r12 | `ffi_api::prove` -> `mdoc_core` | 232,697 B | **2328** |
+//! | r13 single | `mdoc_age_circuit::prove` | 111,640 B | 1 |
+//! | r13 folded | `mdoc_age_mc::prove` | 452,646 B | 1 |
 //!
 //! The run length is the decisive one: it is r12's public inputs laid
 //! out one bit per field element, and r13 has no such block at all.
@@ -152,19 +153,33 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// The longest run of consecutive 32-byte cells holding exactly 0 or 1.
 ///
-/// Not byte-aligned, because the reported script is not either: it slides
-/// one byte at a time, so a bit vector sitting at any offset is found.
+/// Every byte alignment, each walked in 32-byte strides — which is what
+/// the reported script effectively does, since it slides its start one
+/// byte at a time and then reads cells at a fixed stride from there. A
+/// bit vector sitting at any offset is therefore found.
+///
+/// Sliding one byte at a time *while counting cells* instead measures
+/// overlapping windows and is wrong in both directions: two consecutive
+/// zero cells report 33 rather than 2, and a zero cell followed by a one
+/// cell reports 1 rather than 2. The first inflates a clean proof and
+/// the second deflates a leaking one, so the discriminator this number
+/// exists to be would have been meaningless.
 fn longest_bit_cell_run(data: &[u8]) -> usize {
   let (zero, one) = ([0u8; 32], {
     let mut c = [0u8; 32];
     c[0] = 1;
     c
   });
-  let (mut best, mut cur) = (0usize, 0usize);
-  for off in 0..data.len().saturating_sub(32) {
-    let c = &data[off..off + 32];
-    cur = if c == zero || c == one { cur + 1 } else { 0 };
-    best = best.max(cur);
+  let mut best = 0usize;
+  for align in 0..32 {
+    let mut cur = 0usize;
+    let mut off = align;
+    while off + 32 <= data.len() {
+      let c = &data[off..off + 32];
+      cur = if c == zero || c == one { cur + 1 } else { 0 };
+      best = best.max(cur);
+      off += 32;
+    }
   }
   best
 }
@@ -252,7 +267,13 @@ fn load(name: &str) -> (MdocAgeCircuit<Engine_>, Vec<Secret>, [u8; 32]) {
   let birth_date = circuit.witness.birth_date_bytes().expect("the fixture has a birth_date");
   let secrets = vec![
     Secret { what: "device key x", bytes: sig[x_at..x_at + 32].to_vec() },
-    Secret { what: "device key y", bytes: sig[x_at + 33..x_at + 65].to_vec() },
+    // `y` is at x + 35, not x + 33: COSE puts its own `22 58 20` label
+    // and header between the two coordinates. See `DEVICE_KEY_Y_DELTA`,
+    // which is `DEVICE_KEY_X_DELTA + 32 + 3`. Getting this wrong made
+    // the probe search for `58 20 || y[0..30]` — a string that would be
+    // absent even from a proof carrying `y` in full, so it could report
+    // clean through an actual leak.
+    Secret { what: "device key y", bytes: sig[x_at + 35..x_at + 67].to_vec() },
     Secret { what: "birth_date", bytes: birth_date.to_vec() },
     Secret { what: "the claim digest", bytes: sig[digest_at..digest_at + 32].to_vec() },
     Secret { what: "the IssuerSignedItem", bytes: item },
@@ -350,7 +371,7 @@ fn main() {
 
   println!();
   if clean {
-    println!("No secret found in either proof, and both positive controls fired.");
+    println!("No secret found in either proof, and all three positive controls fired.");
     println!("Evidence, not a proof of zero knowledge — that rests on vega-prover's");
     println!("Spartan and Hyrax internals, which this crate has not inspected.");
   } else {
