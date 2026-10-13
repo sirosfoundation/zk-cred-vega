@@ -189,18 +189,15 @@ struct Secret {
   bytes: Vec<u8>,
 }
 
+/// Stands in for a secure element: signs the verifier's digest with the
+/// fixture's device key and hands the raw `(r, s)` to the library, the
+/// same way a wallet hands over what the SE returns.
 fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
   use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
   let b: [u8; 32] = hex::decode(key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&b.into()).unwrap();
   let sig: Signature = sk.sign_prehash(digest).unwrap();
-  let n = zk_cred_vega::p256_ecc::p256_order();
-  let s = BigInt::from_bytes_be(Sign::Plus, &sig.s().to_bytes());
-  DeviceAuthWitness {
-    r: BigInt::from_bytes_be(Sign::Plus, &sig.r().to_bytes()),
-    s: s.clone(),
-    s_inv: s.modpow(&(n.clone() - BigInt::from(2)), &n),
-  }
+  DeviceAuthWitness::from_signature(&sig.r().to_bytes().into(), &sig.s().to_bytes().into())
 }
 
 fn load(name: &str) -> (MdocAgeCircuit<Engine_>, Vec<Secret>, [u8; 32]) {

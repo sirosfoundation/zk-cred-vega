@@ -48,13 +48,7 @@ fn sign_device_auth(private_key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitne
   let bytes: [u8; 32] = hex::decode(private_key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&bytes.into()).unwrap();
   let sig: Signature = sk.sign_prehash(digest).unwrap();
-  let n = zk_cred_vega::p256_ecc::p256_order();
-  let s_val = BigInt::from_bytes_be(Sign::Plus, &sig.s().to_bytes());
-  DeviceAuthWitness {
-    r: BigInt::from_bytes_be(Sign::Plus, &sig.r().to_bytes()),
-    s: s_val.clone(),
-    s_inv: s_val.modpow(&(n.clone() - BigInt::from(2)), &n),
-  }
+  DeviceAuthWitness::from_signature(&sig.r().to_bytes().into(), &sig.s().to_bytes().into())
 }
 
 struct Loaded {
