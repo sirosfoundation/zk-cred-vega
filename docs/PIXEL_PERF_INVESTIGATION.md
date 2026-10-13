@@ -22,10 +22,11 @@ once, show cheaply many times") suggested it should be much faster.
    itself prove a specific root cause.
 4. Decomposing the originally-observed ~9x gap (measured through the real
    Kotlin/JNI SDK path) into independently-measured factors: ~4.2x is a
-   genuine per-core compute gap, ~1.2x is the scheduling penalty from
-   finding #2, and ~1.35x is JNI/UniFFI marshaling overhead specific to the
-   Android integration layer - multiplying out to the originally observed
-   range.
+   whole-run compute gap against the Pixel's best cluster, ~1.2x is the
+   scheduling penalty from finding #2, and ~1.35x is JNI/UniFFI marshaling
+   overhead specific to the Android integration layer - multiplying out to
+   the originally observed range. The 4.2x compares runs with different
+   worker counts; see §6 for what that is worth.
 
 ---
 
@@ -357,13 +358,29 @@ distinguish between two different explanations:
 
 1. A genuine correctness/completeness gap - e.g. a folding or compaction
    step not actually collapsing what it is supposed to.
-2. A perfectly ordinary, benign property of the data: R1CS constraint
-   matrices are typically extremely sparse (the 2026-08-27 investigation
-   measured one real circuit here at ~733K nonzero entries feeding a
-   1,048,576-slot output vector - roughly 0.07% density). A DENSE
-   serialization of a SPARSE structure compresses enormously well
-   precisely because it is mostly zeros, with no implementation defect
-   implied at all.
+2. A perfectly ordinary, benign property of the data: a DENSE
+   serialization of SPARSE or SMALL values compresses enormously well
+   with no implementation defect implied at all.
+
+The probe now measures the second directly instead of arguing it from a
+remembered figure, and the measurement separates two different causes:
+
+| | zero bytes | all-zero 32-byte field elements |
+|---|---:|---:|
+| Prover key | 79.3% | 0.0% |
+| Verifier key | 79.2% | 0.1% |
+| Prep state | 99.0% | 78.4% |
+
+The keys contain almost no empty slots - their zeros sit *inside* field
+elements, which is what small values stored at full 32-byte width look
+like. The prep state is the other thing entirely: genuinely mostly empty
+slots. Both compress enormously, for different reasons, and neither
+figure is evidence of a defect by itself.
+
+(An earlier draft of this section cited "~733K nonzero entries feeding a
+1,048,576-slot output vector - roughly 0.07% density". That arithmetic is
+69.9%, not 0.07%, so it argued for density while claiming sparsity. The
+table above replaces it with a measurement the tool prints.)
 
 Resolving which of these applies needs inspecting the actual serialization
 format (is the key/prep-state's on-disk layout storing a sparse structure
@@ -401,15 +418,37 @@ Decomposing the gap against the x86_64 native baseline (1.08s):
 
 | Factor | Multiplier | Evidence |
 |---|---:|---|
-| Genuine per-core/IPC/clock gap (Pixel's *best* cluster vs. x86_64) | ~4.2x | §4 fast-only (4.79s) vs. §3a (1.08s) |
+| Whole-run gap, Pixel's *best* cluster vs. x86_64 | ~4.2x | §4 fast-only (4.79s) vs. §3a (1.08s) |
 | Naive scheduling onto weak efficiency cores | ~1.19x | §4 default (5.68s) vs. fast-only (4.79s) |
 | JNI/UniFFI/Kotlin marshaling overhead | ~1.35x | SDK-measured (5.12s for prep+prove) vs. §3b native (3.78s for the same two calls) |
 | **Combined** | **~7-9x** | matches the originally observed range |
 
 About 35% of the gap (the scheduling and JNI factors, multiplicatively)
-is addressable without touching the circuit at all. The remaining ~4.2x
-looks like a genuine silicon-capability gap for this much sustained field
-arithmetic, not something software-fixable from the SDK side.
+is addressable without touching the circuit at all.
+
+**The ~4.2x is a whole-run comparison, not a per-core one**, and an
+earlier version of this document called it "per-core". The two runs do
+not use the same number of workers: the Pixel figure is
+`RAYON_NUM_THREADS=4` pinned to four performance cores, while the x86_64
+baseline uses the default pool on a 6-core/12-thread host. Three times
+the workers is in the ratio alongside whatever per-core difference
+exists.
+
+Controlling the half that can be controlled here - the x86_64 side,
+re-run on the same machine - the workload turns out to scale poorly with
+threads anyway, so the confound is smaller than three times:
+
+| x86_64 workers | prep_prove | prove | prep+prove |
+|---|---:|---:|---:|
+| default (12) | 187.05ms | 418.97ms | 606ms |
+| 4 (matched to the Pixel run) | 215.41ms | 459.89ms | 675ms |
+
+**1.11x** for a third of the workers. So matching worker counts moves the
+figure to roughly 3.8x rather than collapsing it, and a real per-core gap
+remains. But it is an estimate with a known uncontrolled variable on the
+device side, which no number here can fix without a Pixel to re-run; the
+"silicon-capability, not software-fixable" reading should be held that
+loosely.
 
 ---
 
