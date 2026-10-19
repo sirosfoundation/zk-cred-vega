@@ -193,7 +193,7 @@ func DeriveChallenge(origin, nonce, docType string, jwkThumbprint []byte) (e2, s
 	var out [32]byte
 	var p *C.uint8_t
 	var l C.size_t
-	if err := check(C.zk_cred_vega_nymauth_derive_challenge(o, n, d, t, (*C.uint8_t)(unsafe.Pointer(&out[0])), &p, &l)); err != nil {
+	if err := check(C.zk_cred_vega_nymauth_derive_challenge(o, n, d, t, &p, &l, (*C.uint8_t)(unsafe.Pointer(&out[0])))); err != nil {
 		return nil, nil, err
 	}
 	st := C.GoBytes(unsafe.Pointer(p), C.int(l))
@@ -209,6 +209,17 @@ func ChallengeDigest(sessionTranscript []byte, docType string) ([]byte, error) {
 	defer f2()
 	var out [32]byte
 	if err := check(C.zk_cred_vega_nymauth_challenge_digest(s, d, (*C.uint8_t)(unsafe.Pointer(&out[0])))); err != nil {
+		return nil, err
+	}
+	return out[:], nil
+}
+
+// VerifierInput returns SHA-256(clientID), the statement's VerifierInput.
+func VerifierInput(clientID string) ([]byte, error) {
+	c, f := slice([]byte(clientID))
+	defer f()
+	var out [32]byte
+	if err := check(C.zk_cred_vega_nymauth_verifier_input(c, (*C.uint8_t)(unsafe.Pointer(&out[0])))); err != nil {
 		return nil, err
 	}
 	return out[:], nil

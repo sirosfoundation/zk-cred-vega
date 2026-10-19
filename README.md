@@ -61,7 +61,7 @@ make dump-setup        # writes target/setup-artifacts/
 ## nymauth (age range and pseudonym)
 
 `zk_cred_vega::nymauth_vega` (exported through UniFFI as `nymauthVegaLoadKeys`, `nymauthVegaProve`,
-`nymauthVegaVerify`, `nymauthVegaDeriveChallenge`, `nymauthVegaChallengeDigest`) is the native
+`nymauthVegaVerify`, `nymauthDeriveChallenge`, `nymauthChallengeDigest`, `nymauthVerifierInput`, the same names and rules as zk-cred-longfellow) is the native
 prover and verifier of the `vega-nymauth` catalog circuits: from an mdoc of docType
 `eu.europa.ec.eudi.nym_auth.1` the holder proves an age range and reveals a verifier-specific
 pseudonym. It is its own module, separate from the generic mdoc/age entry points above.
@@ -110,11 +110,13 @@ item to that list, and to this table, only on purpose.
 - **Integration contract.** `time`, `challenge_digest` (e2) and `verifier_input` must be computed by
   the verifier (its clock, the request it issued, its own identifier), never taken from the holder
   or the presentation; `issuer_key_*` must be the key the verifier trusts for the issuer.
-- **Deriving e2 and the transcript seed.** `nymauthVegaDeriveChallenge(origin, nonce, docType,
+- **Deriving e2 and the transcript seed.** `nymauthDeriveChallenge(origin, nonce, docType,
   jwkThumbprint?)` returns the SessionTranscript (the transcript seed) and e2 exactly per the
-  circuits' SPEC.md section 3; `nymauthVegaChallengeDigest(sessionTranscript, docType)` gives e2
+  circuits' SPEC.md section 3; `nymauthChallengeDigest(sessionTranscript, docType)` gives e2
   for a transcript already in hand. They refuse an empty origin or docType, a nonce under 16
-  characters, a thumbprint that is not 32 bytes, and an empty or malformed transcript. Shared test
+  characters, any field over 4096 bytes, a thumbprint that is not 32 bytes, and an empty or malformed
+  (not one definite CBOR array of three items, nothing after it) transcript. `nymauthVerifierInput(clientId)`
+  is SHA-256(client_id). Shared test
   vectors, byte-identical in zk-cred-longfellow: `test-vectors/nymauth/challenge-vectors.json`.
 - **Pinned circuit, and adding a circuit version.** Only shapes whose SHA-256 is in
   `nymauth_vega::engine::statement::APPROVED_SHAPES` load (`UnknownCircuit` otherwise). The table

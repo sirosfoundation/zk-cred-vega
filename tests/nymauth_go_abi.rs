@@ -177,9 +177,9 @@ fn derive_challenge_returns_e2_and_an_owned_transcript() {
       s(b"pOA0oqEAhLnqug2r7Ve4tQ"),
       s(b"eu.europa.ec.eudi.nym_auth.1"),
       ZkNymSlice { ptr: null(), len: 0 },
-      e2.as_mut_ptr(),
       &mut t,
       &mut n,
+      e2.as_mut_ptr(),
     )
   };
   assert_eq!(r, ZK_NYM_OK);
@@ -199,9 +199,9 @@ fn derive_challenge_returns_e2_and_an_owned_transcript() {
       s(b"short"),
       s(b"d"),
       ZkNymSlice { ptr: null(), len: 0 },
-      e2.as_mut_ptr(),
       &mut t,
       &mut n,
+      e2.as_mut_ptr(),
     )
   };
   assert_eq!(r, ZK_NYM_INVALID_INPUT);
@@ -210,4 +210,16 @@ fn derive_challenge_returns_e2_and_an_owned_transcript() {
     unsafe { zk_cred_vega_nymauth_challenge_digest(s(&[]), s(b"d"), again.as_mut_ptr()) },
     ZK_NYM_INVALID_INPUT
   );
+}
+
+#[test]
+fn verifier_input_is_sha256_of_the_client_id() {
+  let mut out = [0u8; 32];
+  assert_eq!(
+    unsafe { zk_cred_vega_nymauth_verifier_input(s(b"x509_san_dns:verifier.example"), out.as_mut_ptr()) },
+    ZK_NYM_OK
+  );
+  assert_eq!(hex::encode(out), "6eae85a0b2dfcd7d8b716291e54a004da798f93a26a248c265becd33a04a6bab");
+  assert_eq!(unsafe { zk_cred_vega_nymauth_verifier_input(s(b""), out.as_mut_ptr()) }, ZK_NYM_INVALID_INPUT);
+  assert_eq!(unsafe { zk_cred_vega_nymauth_verifier_input(s(b"x"), null_mut()) }, ZK_NYM_INVALID_ARG);
 }

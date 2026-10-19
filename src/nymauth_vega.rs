@@ -16,7 +16,7 @@
 //! The proof shows the statement for the values it is given, so `time`, `challenge_digest` and
 //! `verifier_input` must come from the verifier (its clock, the request it issued, its own
 //! identifier), never from the holder or the presentation. Derive `challenge_digest` (e2) and the
-//! transcript seed with [`nymauth_vega_derive_challenge`] (or [`nymauth_vega_challenge_digest`] for
+//! transcript seed with [`nymauth_derive_challenge`] (or [`nymauth_challenge_digest`] for
 //! a SessionTranscript already in hand), which follow the circuits' `SPEC.md` section 3 exactly. A
 //! verifier that reads them from the
 //! presentation lets a holder replay or re-target a proof. `issuer_key_*` must be the key the
@@ -151,7 +151,7 @@ fn statement_of(s: &NymAuthVegaStatement) -> Statement<'_> {
 }
 
 /// Proves the statement for the verifier's values (`statement.challenge_digest` comes from
-/// [`nymauth_vega_derive_challenge`]). `holder.secret_seed` is zeroed before this
+/// [`nymauth_derive_challenge`]). `holder.secret_seed` is zeroed before this
 /// returns, on every path. Refuses (`Refused`, naming the first broken rule) rather than make a
 /// proof no verifier would accept.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -184,7 +184,7 @@ pub fn prove_zeroing(keys: &NymAuthVegaKeys, statement: &NymAuthVegaStatement, h
 }
 
 /// Accepts a proof for the values the verifier named, which the verifier derives itself:
-/// `challenge_digest` with [`nymauth_vega_derive_challenge`], `verifier_input` as
+/// `challenge_digest` with [`nymauth_derive_challenge`], `verifier_input` as
 /// SHA-256(its client_id), `time` from its clock. Returns the pseudonym it reveals (32 bytes).
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn nymauth_vega_verify(keys: &NymAuthVegaKeys, statement: NymAuthVegaStatement, proof: Vec<u8>) -> Result<Vec<u8>, NymAuthVegaError> {
@@ -194,7 +194,7 @@ pub fn nymauth_vega_verify(keys: &NymAuthVegaKeys, statement: NymAuthVegaStateme
 /// e2 and the transcript seed of one presentation request (`SPEC.md` section 3).
 #[derive(Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct NymAuthVegaChallenge {
+pub struct NymAuthChallenge {
   /// The SessionTranscript bytes: the transcript seed (Longfellow's Fiat-Shamir seed).
   pub session_transcript: Vec<u8>,
   /// e2: SHA-256 of the COSE `Signature1` message the device key signs, 32 bytes. This is the
@@ -208,14 +208,14 @@ pub struct NymAuthVegaChallenge {
 /// JWK thumbprint of the response key; `None` for CBOR null). Refuses an empty origin or docType,
 /// a nonce shorter than 16 characters and a thumbprint that is not 32 bytes.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-pub fn nymauth_vega_derive_challenge(
+pub fn nymauth_derive_challenge(
   origin: String,
   nonce: String,
   doc_type: String,
   jwk_thumbprint: Option<Vec<u8>>,
-) -> Result<NymAuthVegaChallenge, NymAuthVegaError> {
+) -> Result<NymAuthChallenge, NymAuthVegaError> {
   let c = engine::challenge::derive(&origin, &nonce, &doc_type, jwk_thumbprint.as_deref()).map_err(|message| NymAuthVegaError::InvalidInput { message })?;
-  Ok(NymAuthVegaChallenge {
+  Ok(NymAuthChallenge {
     session_transcript: c.session_transcript,
     challenge_digest: c.digest.to_vec(),
   })
@@ -224,8 +224,17 @@ pub fn nymauth_vega_derive_challenge(
 /// e2 for a SessionTranscript already in hand (a definite CBOR array of three items, nothing
 /// after it) and the credential's docType; refuses an empty or malformed transcript.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-pub fn nymauth_vega_challenge_digest(session_transcript: Vec<u8>, doc_type: String) -> Result<Vec<u8>, NymAuthVegaError> {
+pub fn nymauth_challenge_digest(session_transcript: Vec<u8>, doc_type: String) -> Result<Vec<u8>, NymAuthVegaError> {
   engine::challenge::digest_of_transcript(&session_transcript, &doc_type)
+    .map(|d| d.to_vec())
+    .map_err(|message| NymAuthVegaError::InvalidInput { message })
+}
+
+/// `verifier_input = SHA-256(client_id)`, the value a verifier names in its statement
+/// (`NymAuthVegaStatement::verifier_input`); refuses an empty or over-long client_id.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn nymauth_verifier_input(client_id: String) -> Result<Vec<u8>, NymAuthVegaError> {
+  engine::challenge::verifier_input(&client_id)
     .map(|d| d.to_vec())
     .map_err(|message| NymAuthVegaError::InvalidInput { message })
 }

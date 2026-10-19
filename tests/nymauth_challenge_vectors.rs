@@ -3,7 +3,7 @@
 //! zk-cred-vega and zk-cred-longfellow): e2 and the transcript seed per `SPEC.md` section 3.
 
 use serde_json::Value as Json;
-use zk_cred_vega::nymauth_vega::{NymAuthVegaError, nymauth_vega_challenge_digest, nymauth_vega_derive_challenge};
+use zk_cred_vega::nymauth_vega::{NymAuthVegaError, nymauth_challenge_digest, nymauth_derive_challenge};
 
 fn vectors() -> Json {
   let path = concat!(env!("CARGO_MANIFEST_DIR"), "/test-vectors/nymauth/challenge-vectors.json");
@@ -24,11 +24,11 @@ fn derive_matches_every_shared_vector() {
   let all = v["derive"].as_array().unwrap();
   assert!(all.len() >= 4);
   for case in all {
-    let c = nymauth_vega_derive_challenge(s(case, "origin"), s(case, "nonce"), s(case, "doc_type"), thumb(case)).unwrap();
+    let c = nymauth_derive_challenge(s(case, "origin"), s(case, "nonce"), s(case, "doc_type"), thumb(case)).unwrap();
     assert_eq!(hex::encode(&c.session_transcript), s(case, "session_transcript_hex"), "{}", s(case, "name"));
     assert_eq!(hex::encode(&c.challenge_digest), s(case, "challenge_digest_hex"), "{}", s(case, "name"));
     // the digest of the transcript alone agrees
-    let d = nymauth_vega_challenge_digest(c.session_transcript, s(case, "doc_type")).unwrap();
+    let d = nymauth_challenge_digest(c.session_transcript, s(case, "doc_type")).unwrap();
     assert_eq!(hex::encode(d), s(case, "challenge_digest_hex"));
   }
 }
@@ -47,7 +47,7 @@ fn the_kotlin_fixture_transcript_gives_the_red_team_e2() {
   let v = vectors();
   let case = &v["digest"][0];
   let st = hex::decode(s(case, "session_transcript_hex")).unwrap();
-  let d = nymauth_vega_challenge_digest(st, s(case, "doc_type")).unwrap();
+  let d = nymauth_challenge_digest(st, s(case, "doc_type")).unwrap();
   let d = hex::encode(d);
   assert_eq!(d, s(case, "challenge_digest_hex"));
   assert!(d.starts_with("205f2280") && d.ends_with("d1a0"));
@@ -60,8 +60,8 @@ fn every_shared_reject_vector_is_refused() {
   assert!(rejects.len() >= 8);
   for case in rejects {
     let r = match s(case, "op").as_str() {
-      "derive" => nymauth_vega_derive_challenge(s(case, "origin"), s(case, "nonce"), s(case, "doc_type"), thumb(case)).map(|_| ()),
-      "digest" => nymauth_vega_challenge_digest(hex::decode(s(case, "session_transcript_hex")).unwrap(), s(case, "doc_type")).map(|_| ()),
+      "derive" => nymauth_derive_challenge(s(case, "origin"), s(case, "nonce"), s(case, "doc_type"), thumb(case)).map(|_| ()),
+      "digest" => nymauth_challenge_digest(hex::decode(s(case, "session_transcript_hex")).unwrap(), s(case, "doc_type")).map(|_| ()),
       other => panic!("unknown op {other}"),
     };
     assert!(
@@ -73,5 +73,19 @@ fn every_shared_reject_vector_is_refused() {
   // and the shortest accepted nonce is exactly min_nonce_chars
   let min = v["min_nonce_chars"].as_u64().unwrap() as usize;
   let nonce: String = "a".repeat(min);
-  assert!(nymauth_vega_derive_challenge("https://verifier.example".into(), nonce, "x".into(), None).is_ok());
+  assert!(nymauth_derive_challenge("https://verifier.example".into(), nonce, "x".into(), None).is_ok());
+}
+
+#[test]
+fn verifier_input_is_the_sha256_of_the_client_id_and_fields_are_capped() {
+  use zk_cred_vega::nymauth_vega::nymauth_verifier_input;
+  let nym: Json = serde_json::from_slice(&std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/test-vectors/nymauth/pseudonym.json")).unwrap()).unwrap();
+  let v = &nym["verifiers"][0];
+  let vi = nymauth_verifier_input(v["client_id"].as_str().unwrap().to_string()).unwrap();
+  assert_eq!(hex::encode(vi), v["verifier_input"].as_str().unwrap());
+  assert!(nymauth_verifier_input(String::new()).is_err());
+  assert!(nymauth_verifier_input("x".repeat(4097)).is_err());
+  assert!(nymauth_verifier_input("x".repeat(4096)).is_ok());
+  let long = "o".repeat(4097);
+  assert!(nymauth_derive_challenge(long, "pOA0oqEAhLnqug2r7Ve4tQ".into(), "d".into(), None).is_err());
 }

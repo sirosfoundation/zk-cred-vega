@@ -89,6 +89,26 @@ pub fn dc_api_session_transcript(origin: &str, nonce: &str, jwk_thumbprint: Opti
 /// The shortest nonce [`derive`] accepts, in characters (96 bits at six bits a character).
 pub const MIN_NONCE_CHARS: usize = 16;
 
+/// The longest origin, nonce, docType or client_id accepted, in bytes.
+pub const MAX_FIELD_BYTES: usize = 4096;
+
+fn field(name: &str, v: &str) -> Result<(), String> {
+  if v.is_empty() {
+    return Err(format!("the {name} is empty"));
+  }
+  if v.len() > MAX_FIELD_BYTES {
+    return Err(format!("the {name} is longer than {MAX_FIELD_BYTES} bytes"));
+  }
+  Ok(())
+}
+
+/// `verifier_input = SHA-256(client_id)`, the value the verifier names; refuses an empty or
+/// over-long client_id.
+pub fn verifier_input(client_id: &str) -> Result<[u8; 32], String> {
+  field("client_id", client_id)?;
+  Ok(sha256(client_id.as_bytes()))
+}
+
 /// The e2 and the transcript seed of one presentation request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
@@ -106,12 +126,9 @@ pub struct Challenge {
 /// [`MIN_NONCE_CHARS`] and a thumbprint that is not 32 bytes: a verifier that derives e2 from a
 /// predictable request lets a proof be replayed.
 pub fn derive(origin: &str, nonce: &str, doc_type: &str, jwk_thumbprint: Option<&[u8]>) -> Result<Challenge, String> {
-  if origin.is_empty() {
-    return Err("the origin is empty".into());
-  }
-  if doc_type.is_empty() {
-    return Err("the docType is empty".into());
-  }
+  field("origin", origin)?;
+  field("nonce", nonce)?;
+  field("docType", doc_type)?;
   if nonce.chars().count() < MIN_NONCE_CHARS {
     return Err(format!("the nonce is shorter than {MIN_NONCE_CHARS} characters"));
   }
@@ -129,9 +146,7 @@ pub fn derive(origin: &str, nonce: &str, doc_type: &str, jwk_thumbprint: Option<
 /// empty, then returns the digest of the device-authentication message.
 pub fn digest_of_transcript(session_transcript: &[u8], doc_type: &str) -> Result<[u8; 32], String> {
   use crate::nymauth_vega::engine::fixtures::cbor::Item;
-  if doc_type.is_empty() {
-    return Err("the docType is empty".into());
-  }
+  field("docType", doc_type)?;
   let item = Item::read(session_transcript).map_err(|e| format!("the SessionTranscript: {e}"))?;
   if item.bytes.len() != session_transcript.len() {
     return Err("the SessionTranscript has bytes after its end".into());

@@ -272,3 +272,14 @@ func TestSharedChallengeVectors(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifierInput(t *testing.T) {
+	f := load(t)
+	vi, err := VerifierInput("x509_san_dns:verifier.example")
+	if err != nil || !bytes.Equal(vi, f.st.VerifierInput) {
+		t.Fatalf("%x %v", vi, err)
+	}
+	if _, err := VerifierInput(""); err == nil {
+		t.Fatal("an empty client_id was accepted")
+	}
+}

@@ -181,7 +181,9 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_free_keys(keys: *mut ZkNymKeys) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zk_cred_vega_nymauth_free_buffer(ptr: *mut u8, len: usize) {
   if !ptr.is_null() {
-    let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) })));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+      drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) })
+    }));
   }
 }
 
@@ -306,9 +308,9 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_derive_challenge(
   nonce: ZkNymSlice,
   doc_type: ZkNymSlice,
   jwk_thumbprint: ZkNymSlice,
-  e2_out: *mut u8,
   transcript_out: *mut *mut u8,
   transcript_len_out: *mut usize,
+  e2_out: *mut u8,
 ) -> i32 {
   guarded(|| {
     if e2_out.is_null() || transcript_out.is_null() || transcript_len_out.is_null() {
@@ -355,6 +357,29 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_challenge_digest(session_transcrip
     match challenge::digest_of_transcript(st, doc_type) {
       Ok(d) => {
         unsafe { slice::from_raw_parts_mut(e2_out, 32).copy_from_slice(&d) };
+        ZK_NYM_OK
+      }
+      Err(_) => ZK_NYM_INVALID_INPUT,
+    }
+  })
+}
+
+/// `verifier_input = SHA-256(client_id)` (32 bytes to `out`); refuses an empty or over-long client_id.
+///
+/// # Safety
+/// `client_id` must be valid for its length; `out` for 32 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zk_cred_vega_nymauth_verifier_input(client_id: ZkNymSlice, out: *mut u8) -> i32 {
+  guarded(|| {
+    if out.is_null() {
+      return ZK_NYM_INVALID_ARG;
+    }
+    let Some(id) = (unsafe { text(client_id) }) else {
+      return ZK_NYM_INVALID_ARG;
+    };
+    match challenge::verifier_input(id) {
+      Ok(d) => {
+        unsafe { slice::from_raw_parts_mut(out, 32).copy_from_slice(&d) };
         ZK_NYM_OK
       }
       Err(_) => ZK_NYM_INVALID_INPUT,

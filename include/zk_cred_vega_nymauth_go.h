@@ -93,12 +93,15 @@ int32_t zk_cred_vega_nymauth_prove(const ZkNymKeys *keys, const ZkNymStatement *
  * per the circuits' SPEC.md section 3. jwk_thumbprint: {NULL, 0} for none, or 32 bytes. */
 int32_t zk_cred_vega_nymauth_derive_challenge(ZkNymSlice origin, ZkNymSlice nonce,
                                               ZkNymSlice doc_type, ZkNymSlice jwk_thumbprint,
-                                              uint8_t *e2_out, uint8_t **transcript_out,
-                                              size_t *transcript_len_out);
+                                              uint8_t **transcript_out,
+                                              size_t *transcript_len_out, uint8_t *e2_out);
 
 /* e2 (32 bytes to e2_out) for a SessionTranscript in hand and the credential's docType. */
 int32_t zk_cred_vega_nymauth_challenge_digest(ZkNymSlice session_transcript, ZkNymSlice doc_type,
                                               uint8_t *e2_out);
+
+/* SHA-256(client_id) (32 bytes to out): the statement's verifier_input. */
+int32_t zk_cred_vega_nymauth_verifier_input(ZkNymSlice client_id, uint8_t *out);
 
 #ifdef __cplusplus
 }
