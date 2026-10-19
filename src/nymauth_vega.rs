@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 //! The `nymauth` prover and verifier for the Vega proving system: the narrow call the SDKs' native
 //! `NymAuthNativeProver` seam expects, as its own module. It is separate from the generic mdoc/age
 //! entry points of [`crate::ffi_api`] on purpose: the nymauth circuits (age range and a
@@ -9,6 +10,18 @@
 //! [`nymauth_vega_load_keys`] once with the decompressed shapes (setup, about a second on a
 //! desktop, see the README), keep the handle (it is the resident circuit), and pass it to
 //! [`nymauth_vega_prove`] and [`nymauth_vega_verify`].
+//!
+//! # Integration contract
+//!
+//! The proof shows the statement for the values it is given, so `time`, `challenge_digest` and
+//! `verifier_input` must come from the verifier (its clock, the request it issued, its own
+//! identifier), never from the holder or the presentation: a verifier that reads them from the
+//! presentation lets a holder replay or re-target a proof. `issuer_key_*` must be the key the
+//! verifier trusts for the issuer. The key set is pinned: only shapes approved in the
+//! prover fork (`vega_nymauth::statement::APPROVED_SHAPES`) are accepted. The age range follows
+//! the rulebook (both bounds given: at least 365 days, `le >= ge`). Credentials must follow the
+//! nym_auth issuance profile (unique attribute names). The circuit does not check that the issuer
+//! key is a P-256 point; the library does on the host.
 //!
 //! mdoc only. SD-JWT VC is not exposed: its challenge needs the request's nonce, client_id and
 //! origin, which the seam does not carry.
@@ -32,8 +45,11 @@ pub enum NymAuthVegaError {
   /// The shapes are unreadable or past the circuit budget.
   #[error("invalid circuit shapes: {message}")]
   InvalidShapes { message: String },
-  /// The inputs break a rule of the circuit (wrong secret_seed, signature, issuer key, ...); the
-  /// message names the first broken rule. No proof was made.
+  /// The shapes are well formed but are not an approved circuit; `message` is their SHA-256.
+  #[error("circuit not approved: {message}")]
+  UnknownCircuit { message: String },
+  /// The inputs break a rule of the circuit. `message` is a coarse code (`SeedMismatch`,
+  /// `IssuerSignature`, `DeviceSignature` or `Credential`), never the rule. No proof was made.
   #[error("inputs refused: {message}")]
   Refused { message: String },
   /// The prover failed.
@@ -55,7 +71,8 @@ impl From<Error> for NymAuthVegaError {
     match e {
       Error::Input(message) => Self::InvalidInput { message },
       Error::Shapes(message) => Self::InvalidShapes { message },
-      Error::Witness(message) => Self::Refused { message },
+      Error::UnknownCircuit(message) => Self::UnknownCircuit { message },
+      Error::Refused(r) => Self::Refused { message: format!("{:?}", r.code) },
       Error::Prover(message) => Self::ProverFailed { message },
       Error::ProofInvalid(message) => Self::ProofInvalid { message },
       Error::Mismatch(message) => Self::Mismatch { message },
@@ -135,16 +152,26 @@ pub fn nymauth_vega_prove(
   statement: NymAuthVegaStatement,
   mut holder: NymAuthVegaHolder,
 ) -> Result<NymAuthVegaProof, NymAuthVegaError> {
+  prove_zeroing(keys, &statement, &mut holder)
+}
+
+/// The body of [`nymauth_vega_prove`]: zeroes `holder.secret_seed` on every path.
+pub fn prove_zeroing(
+  keys: &NymAuthVegaKeys,
+  statement: &NymAuthVegaStatement,
+  holder: &mut NymAuthVegaHolder,
+) -> Result<NymAuthVegaProof, NymAuthVegaError> {
   let result = statement::prove(
     &keys.0,
-    &statement_of(&statement),
+    &statement_of(statement),
     &Holder {
       issuer_signed: &holder.issuer_signed,
       secret_seed: &holder.secret_seed,
       device_signature: &holder.device_signature,
     },
   );
-  holder.secret_seed.zeroize();
+  // In place, keeping the length (Vec::zeroize would also truncate it).
+  holder.secret_seed[..].zeroize();
   let proved = result?;
   Ok(NymAuthVegaProof { proof: proved.proof, pseudonym: proved.pseudonym.to_vec() })
 }

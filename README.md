@@ -65,7 +65,8 @@ make dump-setup        # writes target/setup-artifacts/
 catalog circuits: from an mdoc of docType `eu.europa.ec.eudi.nym_auth.1` the holder proves an
 age range and reveals a verifier-specific pseudonym. It is its own module, separate from the
 generic mdoc/age entry points above. The statement, circuits and witness live in the prover fork
-(`vega-nymauth`, `nymauth/` of `sirosfoundation/vega-prover`); this crate is the typed FFI layer.
+(`vega-nymauth`, `nymauth/` of `sirosfoundation/vega-prover`, ported from our own `nym-auth-circuits`
+archive); this crate is the typed FFI layer. Licence: BSD-2-Clause, as the rest of this crate.
 
 - The catalog artifact is the circuit's *shapes*, not keys: `nymauthVegaLoadKeys(shapes)` runs setup
   once (about 0.1 s on 12 threads, 0.5 s on one) and returns the resident handle.
@@ -73,6 +74,19 @@ generic mdoc/age entry points above. The statement, circuits and witness live in
   refuses with the first broken rule instead of making a proof no verifier would accept, and zeroes
   its copy of `secret_seed`.
 - `nymauthVegaVerify(keys, statement, proof)` returns the pseudonym or a typed error.
+- **Integration contract.** `time`, `challenge_digest` (e2) and `verifier_input` must be computed by
+  the verifier (its clock, the request it issued, its own identifier), never taken from the holder
+  or the presentation; `issuer_key_*` must be the key the verifier trusts for the issuer.
+- **Pinned circuit.** `nymauthVegaLoadKeys` accepts only shapes approved in the prover fork
+  (`vega_nymauth::statement::APPROVED_SHAPES`, SHA-256 of the decompressed shapes); others fail
+  with `UnknownCircuit`. A new circuit version is a one-line addition there.
+- **Rulebook range.** With both age bounds given the window must be at least 365 days and
+  `le >= ge`; otherwise `InvalidInput`.
+- **Coarse refusals.** `Refused` carries `SeedMismatch`, `IssuerSignature`, `DeviceSignature` or
+  `Credential`, never the broken rule.
+- **Issuer profile and key.** Attribute names are unique under the nym_auth issuance profile. The
+  circuit does not check that the issuer key is a P-256 point (a gap for the circuit authors); the
+  library checks it on the host.
 - mdoc only; SD-JWT VC is out of scope (its challenge needs the request's nonce, client_id and
   origin).
 - Tests: `tests/nymauth_vega_e2e.rs` over `test-vectors/nymauth/` (the reference credential, the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 //! The `nymauth` binding end to end, over the reference credential of the nym_auth circuits
 //! archive (`test-vectors/nymauth/`) and the PUBLISHED shapes (`shapes.zst`, the catalog's
 //! `vega-nymauth` mdoc artifact, decompressed here as the SDK does): a real proof verifies, the
@@ -123,7 +124,7 @@ fn wrong_seed_is_refused() {
   let mut f = Fixture::load();
   f.seed[3] ^= 0x10;
   match nymauth_vega_prove(keys(), f.statement.clone(), f.holder()) {
-    Err(NymAuthVegaError::Refused { message }) => assert!(message.contains("seed"), "{message}"),
+    Err(NymAuthVegaError::Refused { message }) => assert_eq!(message, "SeedMismatch"),
     other => panic!("expected Refused, got {:?}", other.map(|p| p.proof.len())),
   }
 }
@@ -140,12 +141,17 @@ fn wrong_device_signature_is_refused() {
 
 #[test]
 fn wrong_issuer_key_is_refused_by_the_prover_and_the_verifier() {
+  // A real P-256 key that did not sign the credential: refused by the circuit's rules.
+  use p256::ecdsa::SigningKey;
+  let other = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+  let point = other.verifying_key().to_encoded_point(false);
   let mut f = Fixture::load();
-  f.statement.issuer_key_x[0] ^= 1;
-  assert!(matches!(
-    nymauth_vega_prove(keys(), f.statement.clone(), f.holder()),
-    Err(NymAuthVegaError::Refused { .. })
-  ));
+  f.statement.issuer_key_x = point.x().unwrap().to_vec();
+  f.statement.issuer_key_y = point.y().unwrap().to_vec();
+  match nymauth_vega_prove(keys(), f.statement.clone(), f.holder()) {
+    Err(NymAuthVegaError::Refused { message }) => assert_eq!(message, "IssuerSignature"),
+    other => panic!("expected a refusal, got {:?}", other.map(|p| p.proof.len())),
+  }
   let (_, proof) = honest();
   assert!(nymauth_vega_verify(keys(), f.statement.clone(), proof.proof.clone()).is_err());
 }
@@ -199,6 +205,70 @@ fn malformed_input_is_a_typed_error() {
   ));
   assert!(matches!(
     nymauth_vega_load_keys(vec![1, 2, 3]),
-    Err(NymAuthVegaError::InvalidShapes { .. })
+    Err(NymAuthVegaError::UnknownCircuit { .. })
   ));
+}
+
+#[test]
+fn unapproved_shapes_are_refused() {
+  let mut shapes =
+    zstd::stream::decode_all(&std::fs::read(dir().join("shapes.zst")).unwrap()[..]).unwrap();
+  let mid = shapes.len() / 2;
+  shapes[mid] ^= 1;
+  assert!(matches!(
+    nymauth_vega_load_keys(shapes),
+    Err(NymAuthVegaError::UnknownCircuit { .. })
+  ));
+}
+
+#[test]
+fn the_rulebook_range_rule_is_enforced() {
+  let (f, proof) = honest();
+  let mut st = f.statement.clone();
+  st.earliest = "1990-05-17".into();
+  st.cutoff = "1990-05-17".into();
+  assert!(matches!(
+    nymauth_vega_prove(keys(), st.clone(), f.holder()),
+    Err(NymAuthVegaError::InvalidInput { .. })
+  ));
+  assert!(matches!(
+    nymauth_vega_verify(keys(), st, proof.proof.clone()),
+    Err(NymAuthVegaError::InvalidInput { .. })
+  ));
+}
+
+#[test]
+fn an_issuer_key_off_the_curve_and_trailing_proof_bytes_are_refused() {
+  let (f, proof) = honest();
+  let mut st = f.statement.clone();
+  st.issuer_key_y[31] ^= 1;
+  assert!(matches!(
+    nymauth_vega_verify(keys(), st, proof.proof.clone()),
+    Err(NymAuthVegaError::InvalidInput { .. })
+  ));
+  let mut longer = proof.proof.clone();
+  longer.push(0);
+  assert!(matches!(
+    nymauth_vega_verify(keys(), f.statement.clone(), longer),
+    Err(NymAuthVegaError::InvalidInput { .. })
+  ));
+}
+
+#[test]
+fn the_seed_buffer_is_zeroed_on_success_and_on_every_error_path() {
+  let f = Fixture::load();
+  // success
+  let mut h = f.holder();
+  assert!(zk_cred_vega::nymauth_vega::prove_zeroing(keys(), &f.statement, &mut h).is_ok());
+  assert!(h.secret_seed.iter().all(|b| *b == 0) && h.secret_seed.len() == 16);
+  // a refusal by the circuit (wrong device signature)
+  let mut h = f.holder();
+  h.device_signature[1] ^= 1;
+  assert!(zk_cred_vega::nymauth_vega::prove_zeroing(keys(), &f.statement, &mut h).is_err());
+  assert!(h.secret_seed.iter().all(|b| *b == 0));
+  // an input error (malformed credential)
+  let mut h = f.holder();
+  h.issuer_signed = vec![0xff];
+  assert!(zk_cred_vega::nymauth_vega::prove_zeroing(keys(), &f.statement, &mut h).is_err());
+  assert!(h.secret_seed.iter().all(|b| *b == 0));
 }
