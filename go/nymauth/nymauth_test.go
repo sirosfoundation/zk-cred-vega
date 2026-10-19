@@ -95,7 +95,7 @@ func load(t testing.TB) fixture {
 			VerifierInput:   unhex(t, v["verifier_input"].(string)),
 		},
 		issuer:    cred,
-		seed:      unhex(t, nym["holder"].(map[string]any)["secret_seed"].(string)),
+		seed:      unhex(t, nym["holder"].(map[string]any)["test_seed"].(string)),
 		devSig:    unhex(t, vm["device_signature"].(string)),
 		pseudonym: unhex(t, v["pseudonym"].(string)),
 		refProof:  read(t, "reference-proof.bin"),

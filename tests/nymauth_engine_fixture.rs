@@ -57,7 +57,7 @@ impl Inputs {
       challenge: unhex(s(v, &["mdoc", "challenge_digest"])),
       verifier_input: unhex(s(v, &["verifier_input"])),
       issuer_signed: b64url(text.trim()),
-      seed: unhex(s(&nym, &["holder", "secret_seed"])),
+      seed: unhex(s(&nym, &["holder", "test_seed"])),
       device_signature: unhex(s(v, &["mdoc", "device_signature"])),
       pseudonym: unhex(s(v, &["pseudonym"])),
     }

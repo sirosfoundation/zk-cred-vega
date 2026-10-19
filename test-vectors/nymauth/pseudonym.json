@@ -4,7 +4,7 @@
   "dst": "nym_auth/v1/known-offender-matching-ssc",
   "prover_input": "0000000000000000000000000000000000000000000000000000000000000000",
   "holder": {
-    "secret_seed": "4a8f9c1d2e3f4a5b6c7d8e9f0a1b2c3d"
+    "test_seed": "4a8f9c1d2e3f4a5b6c7d8e9f0a1b2c3d"
   },
   "verifiers": [
     {

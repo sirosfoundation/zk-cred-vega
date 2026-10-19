@@ -63,7 +63,7 @@ impl Fixture {
         verifier_input: hex::decode(s(v, &["verifier_input"])).unwrap(),
       },
       issuer_signed: b64url(&std::fs::read_to_string(dir().join("nym-auth-mdoc.txt")).unwrap()),
-      seed: hex::decode(s(&nym, &["holder", "secret_seed"])).unwrap(),
+      seed: hex::decode(s(&nym, &["holder", "test_seed"])).unwrap(),
       device_signature: hex::decode(s(v, &["mdoc", "device_signature"])).unwrap(),
       pseudonym: hex::decode(s(v, &["pseudonym"])).unwrap(),
     }
