@@ -41,7 +41,14 @@ codegen-units = 1
 # before/after measurement. Upstream PRs (both this and the prep-state
 # fix) planned once verified on real hardware - see this repo's own
 # commit history for the exact diffs.
-vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "2a7dcb3" }
+# rev ca6b049 = 2a7dcb3 plus the new `nymauth/` crate (nothing else changed), so the prover
+# below and the one `vega-nymauth` builds on are one package. SSH, like every git remote of this org.
+# NOTE: this pins an unmerged feature-branch commit (sirosfoundation/vega-prover, branch
+# feat/nymauth); move it to a merged commit or tag before any release.
+vega-prover = { git = "ssh://git@github.com/sirosfoundation/vega-prover.git", rev = "ca6b0497103a9ecf8c6aa23ec60577142da99980" }
+# The nym_auth statement (circuits, witness, prove/verify) for mdoc; see src/nymauth_vega.rs.
+vega-nymauth = { git = "ssh://git@github.com/sirosfoundation/vega-prover.git", rev = "ca6b0497103a9ecf8c6aa23ec60577142da99980" }
+zeroize = "1"
 bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }
@@ -65,6 +72,8 @@ getrandom = "0.2"
 
 [dev-dependencies]
 hex = "0.4.3"
+# The published nymauth shapes are zstd-compressed (tests only).
+zstd = "0.13"
 rand = "0.8"
 serde_json = "1.0"
 # For examples/perf_profile_traced.rs only - surfaces vega-prover's own

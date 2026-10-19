@@ -58,6 +58,28 @@ Proving/verifying keys are produced by a one-off setup run:
 make dump-setup        # writes target/setup-artifacts/
 ```
 
+## nymauth (age range and pseudonym)
+
+`zk_cred_vega::nymauth_vega` (exported through UniFFI as `nymauthVegaLoadKeys`,
+`nymauthVegaProve`, `nymauthVegaVerify`) is the native prover and verifier of the `vega-nymauth`
+catalog circuits: from an mdoc of docType `eu.europa.ec.eudi.nym_auth.1` the holder proves an
+age range and reveals a verifier-specific pseudonym. It is its own module, separate from the
+generic mdoc/age entry points above. The statement, circuits and witness live in the prover fork
+(`vega-nymauth`, `nymauth/` of `sirosfoundation/vega-prover`); this crate is the typed FFI layer.
+
+- The catalog artifact is the circuit's *shapes*, not keys: `nymauthVegaLoadKeys(shapes)` runs setup
+  once (about 0.1 s on 12 threads, 0.5 s on one) and returns the resident handle.
+- `nymauthVegaProve(keys, statement, holder)` returns the proof (96,079 bytes) and the pseudonym; it
+  refuses with the first broken rule instead of making a proof no verifier would accept, and zeroes
+  its copy of `secret_seed`.
+- `nymauthVegaVerify(keys, statement, proof)` returns the pseudonym or a typed error.
+- mdoc only; SD-JWT VC is out of scope (its challenge needs the request's nonce, client_id and
+  origin).
+- Tests: `tests/nymauth_vega_e2e.rs` over `test-vectors/nymauth/` (the reference credential, the
+  published shapes and the archive's own proof).
+- The dependency pins an unmerged commit of the fork; move it to a merged commit or tag before any
+  release.
+
 ## License
 
 [BSD-2-Clause](LICENSE).
