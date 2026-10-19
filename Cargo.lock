@@ -1723,7 +1723,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vega-nymauth"
 version = "0.1.0"
-source = "git+ssh://git@github.com/sirosfoundation/vega-prover.git?rev=ca6b0497103a9ecf8c6aa23ec60577142da99980#ca6b0497103a9ecf8c6aa23ec60577142da99980"
+source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=ca6b0497103a9ecf8c6aa23ec60577142da99980#ca6b0497103a9ecf8c6aa23ec60577142da99980"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
@@ -1741,7 +1741,7 @@ dependencies = [
 [[package]]
 name = "vega-prover"
 version = "0.1.0"
-source = "git+ssh://git@github.com/sirosfoundation/vega-prover.git?rev=ca6b0497103a9ecf8c6aa23ec60577142da99980#ca6b0497103a9ecf8c6aa23ec60577142da99980"
+source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=ca6b0497103a9ecf8c6aa23ec60577142da99980#ca6b0497103a9ecf8c6aa23ec60577142da99980"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
