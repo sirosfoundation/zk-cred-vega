@@ -102,7 +102,7 @@ type Statement struct {
 // slice pins b for the call by copying it into C memory; free with the returned func.
 func slice(b []byte) (C.ZkNymSlice, func()) {
 	if len(b) == 0 {
-		return C.ZkNymSlice{}, func() {}
+		return C.ZkNymSlice{}, func() { /* nothing was allocated */ }
 	}
 	p := C.CBytes(b)
 	return C.ZkNymSlice{ptr: (*C.uint8_t)(p), len: C.size_t(len(b))}, func() { C.free(p) }

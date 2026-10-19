@@ -202,73 +202,60 @@ func TestUnapprovedShapesAndBadArguments(t *testing.T) {
 	want(t, err, InvalidInput)
 }
 
-func TestSharedChallengeVectors(t *testing.T) {
-	var v struct {
-		Derive []struct {
-			Origin, Nonce, DocType string
-			Thumb                  *string `json:"jwk_thumbprint_hex"`
-			Transcript             string  `json:"session_transcript_hex"`
-			Digest                 string  `json:"challenge_digest_hex"`
-		} `json:"derive"`
-		Digest []struct {
-			Transcript string `json:"session_transcript_hex"`
-			DocType    string `json:"doc_type"`
-			Digest     string `json:"challenge_digest_hex"`
-		} `json:"digest"`
-		Rejects []struct {
-			Name       string
-			Op         string
-			Origin     string
-			Nonce      string
-			DocType    string  `json:"doc_type"`
-			Thumb      *string `json:"jwk_thumbprint_hex"`
-			Transcript string  `json:"session_transcript_hex"`
-		} `json:"rejects"`
-	}
-	raw := read(t, "challenge-vectors.json")
-	if err := json.Unmarshal(raw, &v); err != nil {
+type vectorSet struct {
+	Derive  []map[string]any `json:"derive"`
+	Digest  []map[string]any `json:"digest"`
+	Rejects []map[string]any `json:"rejects"`
+}
+
+func vectorsOf(t *testing.T) vectorSet {
+	t.Helper()
+	var v vectorSet
+	if err := json.Unmarshal(read(t, "challenge-vectors.json"), &v); err != nil {
 		t.Fatal(err)
 	}
-	// the JSON keys origin/nonce/doc_type are lower case; decode them explicitly
-	var generic struct {
-		Derive []map[string]any `json:"derive"`
+	return v
+}
+
+func thumbOf(t *testing.T, c map[string]any) []byte {
+	t.Helper()
+	if s, ok := c["jwk_thumbprint_hex"].(string); ok {
+		return unhex(t, s)
 	}
-	if err := json.Unmarshal(raw, &generic); err != nil {
-		t.Fatal(err)
-	}
-	for i, c := range generic.Derive {
-		var thumb []byte
-		if s, ok := c["jwk_thumbprint_hex"].(string); ok {
-			thumb = unhex(t, s)
-		}
-		e2, st, err := DeriveChallenge(c["origin"].(string), c["nonce"].(string), c["doc_type"].(string), thumb)
+	return nil
+}
+
+func TestSharedChallengeVectorsDerive(t *testing.T) {
+	for _, c := range vectorsOf(t).Derive {
+		e2, st, err := DeriveChallenge(c["origin"].(string), c["nonce"].(string), c["doc_type"].(string), thumbOf(t, c))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hex.EncodeToString(e2) != v.Derive[i].Digest || hex.EncodeToString(st) != v.Derive[i].Transcript {
-			t.Fatalf("vector %d: e2 %x transcript %x", i, e2, st)
+		if hex.EncodeToString(e2) != c["challenge_digest_hex"] || hex.EncodeToString(st) != c["session_transcript_hex"] {
+			t.Fatalf("%v: e2 %x transcript %x", c["name"], e2, st)
 		}
 	}
-	for _, c := range v.Digest {
-		d, err := ChallengeDigest(unhex(t, c.Transcript), c.DocType)
-		if err != nil || hex.EncodeToString(d) != c.Digest {
-			t.Fatalf("digest vector: %x %v", d, err)
+}
+
+func TestSharedChallengeVectorsDigest(t *testing.T) {
+	for _, c := range vectorsOf(t).Digest {
+		d, err := ChallengeDigest(unhex(t, c["session_transcript_hex"].(string)), c["doc_type"].(string))
+		if err != nil || hex.EncodeToString(d) != c["challenge_digest_hex"] {
+			t.Fatalf("%v: %x %v", c["name"], d, err)
 		}
 	}
-	for _, c := range v.Rejects {
+}
+
+func TestSharedChallengeVectorsRejects(t *testing.T) {
+	for _, c := range vectorsOf(t).Rejects {
 		var err error
-		switch c.Op {
-		case "derive":
-			var thumb []byte
-			if c.Thumb != nil {
-				thumb = unhex(t, *c.Thumb)
-			}
-			_, _, err = DeriveChallenge(c.Origin, c.Nonce, c.DocType, thumb)
-		default:
-			_, err = ChallengeDigest(unhex(t, c.Transcript), c.DocType)
+		if c["op"] == "derive" {
+			_, _, err = DeriveChallenge(c["origin"].(string), c["nonce"].(string), c["doc_type"].(string), thumbOf(t, c))
+		} else {
+			_, err = ChallengeDigest(unhex(t, c["session_transcript_hex"].(string)), c["doc_type"].(string))
 		}
 		if err == nil {
-			t.Fatalf("reject vector %q was accepted", c.Name)
+			t.Fatalf("reject vector %v was accepted", c["name"])
 		}
 	}
 }
