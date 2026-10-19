@@ -1721,27 +1721,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "vega-nymauth"
-version = "0.1.0"
-source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=eab4c2f1d6956e8008c9ddb52d75278b99b65b3c#eab4c2f1d6956e8008c9ddb52d75278b99b65b3c"
-dependencies = [
- "bellpepper",
- "bellpepper-core",
- "bincode",
- "ff",
- "group",
- "halo2curves",
- "rayon",
- "serde",
- "sha2",
- "vega-prover",
- "zeroize",
-]
-
-[[package]]
 name = "vega-prover"
 version = "0.1.0"
-source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=eab4c2f1d6956e8008c9ddb52d75278b99b65b3c#eab4c2f1d6956e8008c9ddb52d75278b99b65b3c"
+source = "git+https://github.com/sirosfoundation/vega-prover.git?rev=2a7dcb3#2a7dcb31371bbfb92b59380e1f2e0faf8050ca52"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
@@ -1908,12 +1890,14 @@ dependencies = [
  "ecdsa",
  "ff",
  "getrandom 0.2.17",
+ "group",
  "halo2curves",
  "hex",
  "num-bigint 0.4.8",
  "num-traits",
  "p256",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
@@ -1921,7 +1905,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing-subscriber",
  "uniffi",
- "vega-nymauth",
  "vega-prover",
  "zeroize",
  "zstd",

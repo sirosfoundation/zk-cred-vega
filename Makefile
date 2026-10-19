@@ -59,7 +59,7 @@ export IPHONEOS_DEPLOYMENT_TARGET ?= 16.0
 # Android targets (via cargo-ndk)
 ANDROID_TARGETS := aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-.PHONY: all bindings bindings-swift bindings-kotlin ios android xcframework aar pom publish-local clean check-bindings dump-setup go-cabi
+.PHONY: all bindings bindings-swift bindings-kotlin ios android xcframework aar pom publish-local clean check-bindings dump-setup go-cabi go-test-nymauth
 
 all: bindings
 
@@ -100,7 +100,7 @@ $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT):
 # UniFFI's scaffolding and its extra dependency graph, which Go/cgo callers
 # have no use for. Mirrors zk-cred-longfellow's own go-cabi target exactly.
 
-go-cabi: $(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/$(LIB_NAME).a $(GO_CABI_DIR)/zk_cred_vega_go.h
+go-cabi: $(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/$(LIB_NAME).a $(GO_CABI_DIR)/zk_cred_vega_go.h $(GO_CABI_DIR)/zk_cred_vega_nymauth_go.h
 	@echo "Go C-ABI library + header staged in $(GO_CABI_DIR)"
 
 $(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT): $(GO_CABI_DIR)/zk_cred_vega_go.h
@@ -116,6 +116,15 @@ $(GO_CABI_DIR)/$(LIB_NAME).a: $(GO_CABI_DIR)/zk_cred_vega_go.h
 $(GO_CABI_DIR)/zk_cred_vega_go.h: include/zk_cred_vega_go.h
 	@mkdir -p $(GO_CABI_DIR)
 	cp include/zk_cred_vega_go.h $(GO_CABI_DIR)/
+
+$(GO_CABI_DIR)/zk_cred_vega_nymauth_go.h: include/zk_cred_vega_nymauth_go.h
+	@mkdir -p $(GO_CABI_DIR)
+	cp include/zk_cred_vega_nymauth_go.h $(GO_CABI_DIR)/
+
+# cgo smoke test of the nymauth C ABI over the credential fixtures (needs go and zstd).
+go-test-nymauth:
+	cargo build --release
+	cd go/nymauth && GOWORK=off go test -count=1 .
 
 # ── iOS cross-compilation (must run on macOS with Xcode toolchains) ─
 

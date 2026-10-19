@@ -81,8 +81,7 @@ impl Fixture {
 fn keys() -> &'static Arc<NymAuthVegaKeys> {
   static KEYS: OnceLock<Arc<NymAuthVegaKeys>> = OnceLock::new();
   KEYS.get_or_init(|| {
-    let shapes =
-      zstd::stream::decode_all(&std::fs::read(dir().join("shapes.zst")).unwrap()[..]).unwrap();
+    let shapes = zstd::stream::decode_all(&std::fs::read(dir().join("shapes.zst")).unwrap()[..]).unwrap();
     let t = Instant::now();
     let keys = nymauth_vega_load_keys(shapes).unwrap();
     eprintln!("nymauth key setup from shapes: {:?}", t.elapsed());
@@ -199,26 +198,16 @@ fn malformed_input_is_a_typed_error() {
   ));
   let mut st = f.statement.clone();
   st.time = "yesterday".into();
-  assert!(matches!(
-    nymauth_vega_verify(keys(), st, vec![]),
-    Err(NymAuthVegaError::InvalidInput { .. })
-  ));
-  assert!(matches!(
-    nymauth_vega_load_keys(vec![1, 2, 3]),
-    Err(NymAuthVegaError::UnknownCircuit { .. })
-  ));
+  assert!(matches!(nymauth_vega_verify(keys(), st, vec![]), Err(NymAuthVegaError::InvalidInput { .. })));
+  assert!(matches!(nymauth_vega_load_keys(vec![1, 2, 3]), Err(NymAuthVegaError::UnknownCircuit { .. })));
 }
 
 #[test]
 fn unapproved_shapes_are_refused() {
-  let mut shapes =
-    zstd::stream::decode_all(&std::fs::read(dir().join("shapes.zst")).unwrap()[..]).unwrap();
+  let mut shapes = zstd::stream::decode_all(&std::fs::read(dir().join("shapes.zst")).unwrap()[..]).unwrap();
   let mid = shapes.len() / 2;
   shapes[mid] ^= 1;
-  assert!(matches!(
-    nymauth_vega_load_keys(shapes),
-    Err(NymAuthVegaError::UnknownCircuit { .. })
-  ));
+  assert!(matches!(nymauth_vega_load_keys(shapes), Err(NymAuthVegaError::UnknownCircuit { .. })));
 }
 
 #[test]

@@ -22,6 +22,7 @@ pub mod ffi_api;
 pub mod gadget_utils;
 pub mod go_ffi;
 pub mod mdoc_core;
+pub mod nymauth_go_ffi;
 pub mod nymauth_vega;
 pub mod mso;
 pub mod mso_splice;

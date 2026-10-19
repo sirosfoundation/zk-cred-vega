@@ -3,8 +3,8 @@
 //! `NymAuthNativeProver` seam expects, as its own module. It is separate from the generic mdoc/age
 //! entry points of [`crate::ffi_api`] on purpose: the nymauth circuits (age range and a
 //! verifier-specific pseudonym, `known-offender-matching-ssc`) have their own shapes, witness and
-//! public values. The statement itself lives in the prover fork (`vega-nymauth`); this file is
-//! only the typed, FFI-safe layer over it.
+//! public values. The statement itself is [`engine`] (ported from our own `nym-auth-circuits`
+//! archive, on top of the public API of `vega-prover`); this file is the typed, FFI-safe layer over it.
 //!
 //! The catalog artifact of a `vega-nymauth` circuit is the circuit's SHAPES, not keys: call
 //! [`nymauth_vega_load_keys`] once with the decompressed shapes (setup, about a second on a
@@ -15,10 +15,13 @@
 //!
 //! The proof shows the statement for the values it is given, so `time`, `challenge_digest` and
 //! `verifier_input` must come from the verifier (its clock, the request it issued, its own
-//! identifier), never from the holder or the presentation: a verifier that reads them from the
+//! identifier), never from the holder or the presentation. Derive `challenge_digest` (e2) and the
+//! transcript seed with [`nymauth_vega_derive_challenge`] (or [`nymauth_vega_challenge_digest`] for
+//! a SessionTranscript already in hand), which follow the circuits' `SPEC.md` section 3 exactly. A
+//! verifier that reads them from the
 //! presentation lets a holder replay or re-target a proof. `issuer_key_*` must be the key the
-//! verifier trusts for the issuer. The key set is pinned: only shapes approved in the
-//! prover fork (`vega_nymauth::statement::APPROVED_SHAPES`) are accepted. The age range follows
+//! verifier trusts for the issuer. The key set is pinned: only shapes approved in
+//! [`engine::statement::APPROVED_SHAPES`] are accepted. The age range follows
 //! the rulebook (both bounds given: at least 365 days, `le >= ge`). Credentials must follow the
 //! nym_auth issuance profile (unique attribute names). The circuit does not check that the issuer
 //! key is a P-256 point; the library does on the host.
@@ -32,7 +35,9 @@
 
 use std::sync::Arc;
 
-use vega_nymauth::statement::{self, Error, Holder, Keys, Statement};
+pub mod engine;
+
+use engine::statement::{self, Error, Holder, Keys, Statement};
 use zeroize::Zeroize;
 
 /// Why a proof could not be made or was not accepted.
@@ -72,7 +77,9 @@ impl From<Error> for NymAuthVegaError {
       Error::Input(message) => Self::InvalidInput { message },
       Error::Shapes(message) => Self::InvalidShapes { message },
       Error::UnknownCircuit(message) => Self::UnknownCircuit { message },
-      Error::Refused(r) => Self::Refused { message: format!("{:?}", r.code) },
+      Error::Refused(r) => Self::Refused {
+        message: format!("{:?}", r.code),
+      },
       Error::Prover(message) => Self::ProverFailed { message },
       Error::ProofInvalid(message) => Self::ProofInvalid { message },
       Error::Mismatch(message) => Self::Mismatch { message },
@@ -143,7 +150,8 @@ fn statement_of(s: &NymAuthVegaStatement) -> Statement<'_> {
   }
 }
 
-/// Proves the statement for the verifier's values. `holder.secret_seed` is zeroed before this
+/// Proves the statement for the verifier's values (`statement.challenge_digest` comes from
+/// [`nymauth_vega_derive_challenge`]). `holder.secret_seed` is zeroed before this
 /// returns, on every path. Refuses (`Refused`, naming the first broken rule) rather than make a
 /// proof no verifier would accept.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -156,11 +164,7 @@ pub fn nymauth_vega_prove(
 }
 
 /// The body of [`nymauth_vega_prove`]: zeroes `holder.secret_seed` on every path.
-pub fn prove_zeroing(
-  keys: &NymAuthVegaKeys,
-  statement: &NymAuthVegaStatement,
-  holder: &mut NymAuthVegaHolder,
-) -> Result<NymAuthVegaProof, NymAuthVegaError> {
+pub fn prove_zeroing(keys: &NymAuthVegaKeys, statement: &NymAuthVegaStatement, holder: &mut NymAuthVegaHolder) -> Result<NymAuthVegaProof, NymAuthVegaError> {
   let result = statement::prove(
     &keys.0,
     &statement_of(statement),
@@ -173,15 +177,55 @@ pub fn prove_zeroing(
   // In place, keeping the length (Vec::zeroize would also truncate it).
   holder.secret_seed[..].zeroize();
   let proved = result?;
-  Ok(NymAuthVegaProof { proof: proved.proof, pseudonym: proved.pseudonym.to_vec() })
+  Ok(NymAuthVegaProof {
+    proof: proved.proof,
+    pseudonym: proved.pseudonym.to_vec(),
+  })
 }
 
-/// Accepts a proof for the values the verifier named; returns the pseudonym it reveals (32 bytes).
+/// Accepts a proof for the values the verifier named, which the verifier derives itself:
+/// `challenge_digest` with [`nymauth_vega_derive_challenge`], `verifier_input` as
+/// SHA-256(its client_id), `time` from its clock. Returns the pseudonym it reveals (32 bytes).
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-pub fn nymauth_vega_verify(
-  keys: &NymAuthVegaKeys,
-  statement: NymAuthVegaStatement,
-  proof: Vec<u8>,
-) -> Result<Vec<u8>, NymAuthVegaError> {
+pub fn nymauth_vega_verify(keys: &NymAuthVegaKeys, statement: NymAuthVegaStatement, proof: Vec<u8>) -> Result<Vec<u8>, NymAuthVegaError> {
   Ok(statement::verify(&keys.0, &statement_of(&statement), &proof)?.to_vec())
+}
+
+/// e2 and the transcript seed of one presentation request (`SPEC.md` section 3).
+#[derive(Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NymAuthVegaChallenge {
+  /// The SessionTranscript bytes: the transcript seed (Longfellow's Fiat-Shamir seed).
+  pub session_transcript: Vec<u8>,
+  /// e2: SHA-256 of the COSE `Signature1` message the device key signs, 32 bytes. This is the
+  /// `challenge_digest` of [`NymAuthVegaStatement`].
+  pub challenge_digest: Vec<u8>,
+}
+
+/// Derives e2 and the transcript seed for an mdoc presentation over the Digital Credentials API:
+/// the way a verifier computes `NymAuthVegaStatement::challenge_digest` from its own request
+/// (`origin`, `nonce`, the credential's `doc_type` and, for an encrypted response, the 32-byte
+/// JWK thumbprint of the response key; `None` for CBOR null). Refuses an empty origin or docType,
+/// a nonce shorter than 16 characters and a thumbprint that is not 32 bytes.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn nymauth_vega_derive_challenge(
+  origin: String,
+  nonce: String,
+  doc_type: String,
+  jwk_thumbprint: Option<Vec<u8>>,
+) -> Result<NymAuthVegaChallenge, NymAuthVegaError> {
+  let c = engine::challenge::derive(&origin, &nonce, &doc_type, jwk_thumbprint.as_deref()).map_err(|message| NymAuthVegaError::InvalidInput { message })?;
+  Ok(NymAuthVegaChallenge {
+    session_transcript: c.session_transcript,
+    challenge_digest: c.digest.to_vec(),
+  })
+}
+
+/// e2 for a SessionTranscript already in hand (a definite CBOR array of three items, nothing
+/// after it) and the credential's docType; refuses an empty or malformed transcript.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn nymauth_vega_challenge_digest(session_transcript: Vec<u8>, doc_type: String) -> Result<Vec<u8>, NymAuthVegaError> {
+  engine::challenge::digest_of_transcript(&session_transcript, &doc_type)
+    .map(|d| d.to_vec())
+    .map_err(|message| NymAuthVegaError::InvalidInput { message })
 }

@@ -57,3 +57,16 @@ jobs:
       # repos vendor their own copy), so there is nothing committed to diff
       # against.
       - run: make bindings
+
+  go-nymauth:
+    name: Go cgo smoke test (nymauth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: sudo apt-get install -y zstd
+      - run: make go-test-nymauth
