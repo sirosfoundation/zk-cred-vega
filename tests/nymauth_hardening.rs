@@ -223,6 +223,9 @@ fn inconsistent_shapes_are_refused_before_any_allocation() {
   );
   shape_refused(|s| s.c.indices.pop().map(|_| ()).unwrap_or(()), "indices shorter than data");
   shape_refused(|s| s.a.cols += 1, "wrong column count");
+  // sizes whose sums or successors overflow usize
+  shape_refused(|s| s.num_cons = usize::MAX, "constraint count at usize::MAX");
+  shape_refused(|s| s.num_rest = usize::MAX, "padded rest count at usize::MAX");
   // and the honest shapes pass the same validation
   assert!(app::setup_from_shapes_in(&FULL_MDOC, shapes()).is_ok());
 }
@@ -591,7 +594,7 @@ fn the_keys_know_their_circuit_and_odd_name_spaces_are_refused() {
     device_signature: &c.dev_rs,
   };
   match statement::prove(keys(), &c.statement(), &h) {
-    Err(Error::Input(m)) => assert!(m.contains("odd nameSpaces"), "{m}"),
+    Err(Error::Input(m)) => assert!(m.contains("nameSpaces is not a map"), "{m}"),
     other => panic!("{:?}", other.map(|_| ())),
   }
 }
@@ -602,4 +605,138 @@ fn request_patterns_refuse_what_the_circuit_cannot_compare() {
   assert!(Request::mdoc(&"d".repeat(300), "birth_date").is_err());
   assert!(Request::mdoc(&"d".repeat(120), "birth_date").is_err());
   assert!(Request::mdoc(APPROVED_SHAPES[0].doc_type, "birth_date").is_ok());
+}
+
+// ---- review findings: hostile CBOR shapes, and the seed in temporaries ---------------------------
+
+#[test]
+fn declared_lengths_are_checked_before_any_arithmetic_or_work() {
+  // The exact input of the review: a three-item transcript ending in a map of 2^63 entries.
+  let bomb = hex::decode("83f6f6bb8000000000000000").unwrap();
+  assert!(Item::read(&bomb).is_err());
+  assert!(zk_cred_vega::nymauth_vega::engine::challenge::digest_of_transcript(&bomb, "d").is_err());
+  // Boundary values of the declared count: 2^63 (2 * n overflows), 2^63 - 1, u64::MAX, and a count
+  // one past the bytes that remain.
+  for head in [
+    vec![0xbb, 0x80, 0, 0, 0, 0, 0, 0, 0],
+    vec![0xbb, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    vec![0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    vec![0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    vec![0x82, 0xf6],
+    vec![0xa1, 0xf6],
+    vec![0xa2, 0xf6, 0xf6, 0xf6],
+  ] {
+    assert!(Item::read(&head).is_err(), "{head:02x?}");
+  }
+  // Counts that the input meets are fine.
+  assert!(Item::read(&[0x82, 0xf6, 0xf6]).is_ok());
+  assert!(Item::read(&[0xa1, 0xf6, 0xf6]).is_ok());
+}
+
+#[test]
+fn a_credential_of_any_other_root_type_is_a_typed_error() {
+  let (c, _) = honest();
+  let roots = [
+    ("an array holding the key", Value::Array(vec![text("issuerAuth")]).encode()),
+    ("a tag", Value::Tag(24, Box::new(Value::Bytes(vec![1]))).encode()),
+    (
+      "a tag over a map",
+      Value::Tag(55, Box::new(record(vec![("nameSpaces", Value::Unsigned(1))]))).encode(),
+    ),
+    ("a text string", text("issuerAuth").encode()),
+    ("a byte string", Value::Bytes(vec![1, 2, 3]).encode()),
+    ("an unsigned integer", Value::Unsigned(7).encode()),
+    ("an empty map", Value::Map(vec![]).encode()),
+    ("an empty array", Value::Array(vec![]).encode()),
+  ];
+  for (what, bytes) in roots {
+    let h = Holder {
+      issuer_signed: &bytes,
+      secret_seed: &c.seed,
+      device_signature: &c.dev_rs,
+    };
+    assert!(matches!(statement::prove(keys(), &c.statement(), &h), Err(Error::Input(_))), "{what}");
+  }
+  // nameSpaces that is not a map, and a name space that does not hold an array
+  let auth = || {
+    Value::Array(vec![
+      Value::Bytes(vec![0xa1, 1, 0x26]),
+      Value::Map(vec![]),
+      Value::Bytes(vec![0]),
+      Value::Bytes(vec![0; 64]),
+    ])
+  };
+  for (what, ns, want) in [
+    ("nameSpaces an array", Value::Array(vec![Value::Unsigned(1), Value::Unsigned(2)]), "not a map"),
+    (
+      "a name space a map",
+      Value::Map(vec![(text("x"), Value::Map(vec![]))]),
+      "does not hold an array",
+    ),
+  ] {
+    let bytes = record(vec![("nameSpaces", ns), ("issuerAuth", auth())]).encode();
+    let h = Holder {
+      issuer_signed: &bytes,
+      secret_seed: &c.seed,
+      device_signature: &c.dev_rs,
+    };
+    match statement::prove(keys(), &c.statement(), &h) {
+      Err(Error::Input(m)) => assert!(m.contains(want), "{what}: {m}"),
+      other => panic!("{what}: {:?}", other.map(|_| ())),
+    }
+  }
+}
+
+#[test]
+fn item_lookups_never_panic_for_any_container_kind() {
+  let key = text("k");
+  let array = Value::Array(vec![text("k"), Value::Unsigned(1)]).encode();
+  let map = record(vec![("k", Value::Unsigned(1))]).encode();
+  let tag = Value::Tag(24, Box::new(Value::Unsigned(1))).encode();
+  let scalar = Value::Unsigned(1).encode();
+  let (array, map, tag, scalar) = (
+    Item::read(&array).unwrap(),
+    Item::read(&map).unwrap(),
+    Item::read(&tag).unwrap(),
+    Item::read(&scalar).unwrap(),
+  );
+  for item in [array, tag, scalar] {
+    assert!(item.get(&key).is_err());
+  }
+  assert!(map.get(&key).is_ok());
+  for item in [map, tag, scalar] {
+    assert!(item.at(0).is_err());
+  }
+  assert!(array.at(0).is_ok() && array.at(1).is_ok() && array.at(2).is_err());
+  assert!(scalar.children().is_empty() && scalar.try_children().is_err());
+  assert_eq!(array.children().len(), 2);
+  // tag 24 must wrap a byte string
+  assert!(tag.embedded().is_err());
+  // a text string whose bytes happen to be valid CBOR is not a byte string
+  let text_tag = Value::Tag(24, Box::new(text("\u{1}"))).encode();
+  assert!(Item::read(&text_tag).unwrap().embedded().is_err());
+  let bytes_tag = Value::Tag(24, Box::new(Value::Bytes(vec![1]))).encode();
+  assert!(Item::read(&bytes_tag).unwrap().embedded().is_ok());
+  assert!(scalar.embedded().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pseudonym_of_leaves_no_copy_of_the_seed_behind() {
+  let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+  let needle: Vec<u8> = sha256(&(nanos + 1).to_le_bytes())[..16].to_vec();
+  let mut buffer = vec![0u8; 16];
+  let control = scan(&needle);
+  buffer.copy_from_slice(&needle);
+  let during = scan(&needle);
+  let mut last = [0u8; 32];
+  for _ in 0..64 {
+    last = statement::pseudonym_of(&buffer, &VI).unwrap();
+  }
+  buffer.fill(0);
+  std::hint::black_box(&buffer);
+  let after = scan(&needle);
+  assert_ne!(last, [0u8; 32]);
+  eprintln!("seed copies: control {control}, with the caller's buffer {during}, after 64 pseudonym_of calls {after}");
+  assert!(after <= control, "pseudonym_of left {} copies of the seed behind", after - control);
 }

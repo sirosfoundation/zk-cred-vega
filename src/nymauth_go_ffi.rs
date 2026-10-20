@@ -252,22 +252,23 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_prove(
   pseudonym_out: *mut u8,
 ) -> i32 {
   guarded(|| {
-    if keys.is_null() || holder.is_null() || proof_out.is_null() || proof_len_out.is_null() || pseudonym_out.is_null() {
-      return ZK_NYM_INVALID_ARG;
-    }
-    unsafe {
-      *proof_out = std::ptr::null_mut();
-      *proof_len_out = 0;
-    }
-    let h = unsafe { *holder };
-    // The seed buffer: zeroed below whatever else happens.
-    let seed = if h.secret_seed.is_null() || h.secret_seed_len > MAX_SMALL {
-      None
-    } else {
-      Some(unsafe { slice::from_raw_parts_mut(h.secret_seed, h.secret_seed_len) })
-    };
-    let result = (|| {
-      let seed_view: &[u8] = seed.as_deref().ok_or(ZK_NYM_INVALID_ARG)?;
+    // The seed buffer comes first: it is zeroed on EVERY way out, argument checks and panics
+    // included, whenever the holder carries a writable seed of a sane length.
+    let h = if holder.is_null() { None } else { Some(unsafe { *holder }) };
+    let seed = h
+      .filter(|h| !h.secret_seed.is_null() && h.secret_seed_len <= MAX_SMALL)
+      .map(|h| unsafe { slice::from_raw_parts_mut(h.secret_seed, h.secret_seed_len) });
+    let status = catch_unwind(AssertUnwindSafe(|| -> Result<statement::Proved, i32> {
+      let (Some(h), Some(seed_view)) = (h, seed.as_deref()) else {
+        return Err(ZK_NYM_INVALID_ARG);
+      };
+      if keys.is_null() || proof_out.is_null() || proof_len_out.is_null() || pseudonym_out.is_null() {
+        return Err(ZK_NYM_INVALID_ARG);
+      }
+      unsafe {
+        *proof_out = std::ptr::null_mut();
+        *proof_len_out = 0;
+      }
       let st = unsafe { statement_of(statement) }.ok_or(ZK_NYM_INVALID_ARG)?;
       let issuer_signed = unsafe { bytes(h.issuer_signed, statement::MAX_ISSUER_SIGNED + 1) }.ok_or(ZK_NYM_INVALID_ARG)?;
       let device_signature = unsafe { bytes(h.device_signature, MAX_SMALL) }.ok_or(ZK_NYM_INVALID_ARG)?;
@@ -281,11 +282,12 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_prove(
         },
       )
       .map_err(|e| code(&e))
-    })();
+    }))
+    .unwrap_or(Err(ZK_NYM_INTERNAL));
     if let Some(seed) = seed {
       seed.zeroize();
     }
-    match result {
+    match status {
       Ok(proved) => {
         unsafe { slice::from_raw_parts_mut(pseudonym_out, 32).copy_from_slice(&proved.pseudonym) };
         give(proved.proof, proof_out, proof_len_out);

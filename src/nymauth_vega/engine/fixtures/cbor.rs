@@ -154,9 +154,14 @@ impl<'a> Item<'a> {
       4..=6 => {
         let children = match major {
           4 => argument,
-          5 => 2 * argument,
+          5 => argument.checked_mul(2).ok_or("a map with more entries than any input holds")?,
           _ => 1,
         };
+        // Every item takes at least one byte: a declared count past the rest of the input cannot
+        // be met, and is refused before any work is done for it.
+        if children > (bytes.len() - content) as u64 {
+          return Err("more items declared than the input has bytes".into());
+        }
         let mut end = content;
         for _ in 0..children {
           end += Item::read_at(bytes.get(end..).ok_or("an item cut short")?, depth + 1)?.bytes.len();
@@ -179,7 +184,8 @@ impl<'a> Item<'a> {
     &self.bytes[self.content..]
   }
 
-  /// [`Item::children`], or an error for an item that is not an array, a map or a tag.
+  /// The children of an array, a map (keys and values in turn) or a tag, or an error for any
+  /// other item.
   pub fn try_children(&self) -> Result<Vec<Item<'a>>, String> {
     if !(4..=6).contains(&self.major) {
       return Err("not an array, a map or a tag".into());
@@ -187,14 +193,16 @@ impl<'a> Item<'a> {
     Ok(self.children())
   }
 
-  /// The elements of an array, the keys and values of a map in turn, or the item a tag wraps.
-  /// Panics on another item; [`Item::try_children`] is the checked form.
+  /// The elements of an array, the keys and values of a map in turn, or the item a tag wraps;
+  /// nothing for any other item. Never panics.
   pub fn children(&self) -> Vec<Item<'a>> {
-    assert!((4..=6).contains(&self.major), "only arrays, maps and tags have children");
     let mut children = Vec::new();
+    if !(4..=6).contains(&self.major) {
+      return children;
+    }
     let mut at = self.content;
     while at < self.bytes.len() {
-      let child = Item::read_at(&self.bytes[at..], 0).expect("read checked the children");
+      let Ok(child) = Item::read_at(&self.bytes[at..], 0) else { break };
       at += child.bytes.len();
       children.push(child);
     }
@@ -203,15 +211,26 @@ impl<'a> Item<'a> {
 
   /// Element `i` of an array.
   pub fn at(&self, i: usize) -> Result<Item<'a>, String> {
-    self.try_children()?.get(i).copied().ok_or_else(|| format!("no element {i}"))
+    if self.major != 4 {
+      return Err("not an array".into());
+    }
+    self.children().get(i).copied().ok_or_else(|| format!("no element {i}"))
   }
 
   /// The value of the map entry whose key encodes as `key` does.
   pub fn get(&self, key: &Value) -> Result<Item<'a>, String> {
+    if self.major != 5 {
+      return Err("not a map".into());
+    }
     let key = key.encode();
-    let children = self.try_children()?;
-    let entry = children.chunks(2).find(|entry| entry[0].bytes == key);
-    entry.map(|entry| entry[1]).ok_or_else(|| format!("no key {key:02x?}"))
+    let children = self.children();
+    children
+      .as_chunks::<2>()
+      .0
+      .iter()
+      .find(|entry| entry[0].bytes == key)
+      .map(|entry| entry[1])
+      .ok_or_else(|| format!("no key {key:02x?}"))
   }
 
   /// The data item that a byte string under tag 24 encodes (RFC 8949, clause 3.4.5.1).
@@ -219,6 +238,10 @@ impl<'a> Item<'a> {
     if self.major != 6 || self.argument != 24 {
       return Err("not tag 24".to_string());
     }
-    Item::read(self.at(0)?.content())
+    let inner = *self.children().first().ok_or("an empty tag")?;
+    if inner.major != 2 {
+      return Err("tag 24 does not wrap a byte string".into());
+    }
+    Item::read(inner.content())
   }
 }

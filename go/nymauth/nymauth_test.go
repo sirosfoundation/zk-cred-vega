@@ -270,3 +270,13 @@ func TestVerifierInput(t *testing.T) {
 		t.Fatal("an empty client_id was accepted")
 	}
 }
+
+func TestProveWithBadArgumentsStillZeroesTheSeed(t *testing.T) {
+	f := load(t)
+	h := &Holder{IssuerSigned: f.issuer, SecretSeed: append([]byte(nil), f.seed...), DeviceSignature: f.devSig}
+	_, _, err := (&Keys{}).Prove(&f.st, h) // a nil handle
+	want(t, err, InvalidArg)
+	if !bytes.Equal(h.SecretSeed, make([]byte, len(f.seed))) {
+		t.Fatal("the seed survived an argument failure")
+	}
+}

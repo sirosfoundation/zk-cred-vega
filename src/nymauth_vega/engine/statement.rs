@@ -461,11 +461,16 @@ fn mdoc(issuer_signed: &[u8]) -> Result<Mdoc, Error> {
   .encode();
   let signature: [u8; 64] = fixed(signature, "the issuer signature")?;
   let mut items = Vec::new();
-  for entry in root.get(&text("nameSpaces")).map_err(take)?.try_children().map_err(take)?.chunks(2) {
-    let [_, entries] = entry else {
-      return Err(Error::Input("IssuerSigned: odd nameSpaces".into()));
-    };
-    for item in entries.try_children().map_err(take)? {
+  let name_spaces = root.get(&text("nameSpaces")).map_err(take)?;
+  if name_spaces.major != 5 {
+    return Err(Error::Input("IssuerSigned: nameSpaces is not a map".into()));
+  }
+  for entry in name_spaces.children().as_chunks::<2>().0 {
+    let entries = entry[1];
+    if entries.major != 4 {
+      return Err(Error::Input("IssuerSigned: a name space does not hold an array of items".into()));
+    }
+    for item in entries.children() {
       let id = item.embedded().map_err(take)?.get(&text("elementIdentifier")).map_err(take)?;
       let id = String::from_utf8(id.content().to_vec()).map_err(|_| Error::Input("IssuerSigned: elementIdentifier is not UTF-8".into()))?;
       items.push((id, item.bytes.to_vec()));

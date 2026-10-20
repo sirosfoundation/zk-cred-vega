@@ -168,8 +168,8 @@ impl StoredMatrix {
     if self.indices.len() != entries {
       return Err(format!("{name} has {} indices for {entries} entries", self.indices.len()));
     }
-    if self.indptr.len() != rows + 1 {
-      return Err(format!("{name} has {} row pointers, not {}", self.indptr.len(), rows + 1));
+    if rows.checked_add(1) != Some(self.indptr.len()) {
+      return Err(format!("{name} has {} row pointers for {rows} rows", self.indptr.len()));
     }
     if self.indptr.first() != Some(&0) || self.indptr.last() != Some(&entries) {
       return Err(format!("{name}'s row pointers do not span its entries"));

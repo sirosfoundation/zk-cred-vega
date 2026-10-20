@@ -77,8 +77,8 @@ pub const MDOC_VALUE: &[u8] = b"\x6celementValue\x58\x20";
 pub const VALUES: usize = 5;
 
 /// The pseudonym's message, 119 bytes: DST, the seed, prover_input and verifier_input.
-pub fn message(seed: &[u8; 16], verifier_input: &[u8; 32]) -> Vec<u8> {
-  [DST, seed, &PROVER_INPUT, verifier_input].concat()
+pub fn message(seed: &[u8; 16], verifier_input: &[u8; 32]) -> Zeroizing<Vec<u8>> {
+  Zeroizing::new([DST, seed, &PROVER_INPUT, verifier_input].concat())
 }
 
 /// The pseudonym of `seed` for `verifier_input`.
@@ -109,7 +109,7 @@ impl NymMessages<'_> {
     [
       (regions.ssc, Zeroizing::new(self.ssc.to_vec())),
       (regions.seed, Zeroizing::new(self.secret_seed.to_vec())),
-      (regions.nym, Zeroizing::new(message(self.secret_seed, self.verifier_input))),
+      (regions.nym, message(self.secret_seed, self.verifier_input)),
     ]
   }
 }
