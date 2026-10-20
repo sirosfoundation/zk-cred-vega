@@ -123,7 +123,7 @@ fn wrong_seed_is_refused() {
   let mut f = Fixture::load();
   f.seed[3] ^= 0x10;
   match nymauth_vega_prove(keys(), f.statement.clone(), f.holder()) {
-    Err(NymAuthVegaError::Refused { message }) => assert_eq!(message, "SeedMismatch"),
+    Err(NymAuthVegaError::Refused { detail }) => assert_eq!(detail, "SeedMismatch"),
     other => panic!("expected Refused, got {:?}", other.map(|p| p.proof.len())),
   }
 }
@@ -148,7 +148,7 @@ fn wrong_issuer_key_is_refused_by_the_prover_and_the_verifier() {
   f.statement.issuer_key_x = point.x().unwrap().to_vec();
   f.statement.issuer_key_y = point.y().unwrap().to_vec();
   match nymauth_vega_prove(keys(), f.statement.clone(), f.holder()) {
-    Err(NymAuthVegaError::Refused { message }) => assert_eq!(message, "IssuerSignature"),
+    Err(NymAuthVegaError::Refused { detail }) => assert_eq!(detail, "IssuerSignature"),
     other => panic!("expected a refusal, got {:?}", other.map(|p| p.proof.len())),
   }
   let (_, proof) = honest();

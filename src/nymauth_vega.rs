@@ -45,45 +45,45 @@ use zeroize::Zeroize;
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum NymAuthVegaError {
   /// An input has the wrong length, format or structure.
-  #[error("invalid input: {message}")]
-  InvalidInput { message: String },
+  #[error("invalid input: {detail}")]
+  InvalidInput { detail: String },
   /// The shapes are unreadable or past the circuit budget.
-  #[error("invalid circuit shapes: {message}")]
-  InvalidShapes { message: String },
-  /// The shapes are well formed but are not an approved circuit; `message` is their SHA-256.
-  #[error("circuit not approved: {message}")]
-  UnknownCircuit { message: String },
-  /// The inputs break a rule of the circuit. `message` is a coarse code (`SeedMismatch`,
+  #[error("invalid circuit shapes: {detail}")]
+  InvalidShapes { detail: String },
+  /// The shapes are well formed but are not an approved circuit; `detail` is their SHA-256.
+  #[error("circuit not approved: {detail}")]
+  UnknownCircuit { detail: String },
+  /// The inputs break a rule of the circuit. `detail` is a coarse code (`SeedMismatch`,
   /// `IssuerSignature`, `DeviceSignature` or `Credential`), never the rule. No proof was made.
-  #[error("inputs refused: {message}")]
-  Refused { message: String },
+  #[error("inputs refused: {detail}")]
+  Refused { detail: String },
   /// The prover failed.
-  #[error("prover failed: {message}")]
-  ProverFailed { message: String },
+  #[error("prover failed: {detail}")]
+  ProverFailed { detail: String },
   /// The proof does not verify.
-  #[error("proof invalid: {message}")]
-  ProofInvalid { message: String },
+  #[error("proof invalid: {detail}")]
+  ProofInvalid { detail: String },
   /// The proof verifies but not for the values the verifier named.
-  #[error("proof does not match the named values: {message}")]
-  Mismatch { message: String },
+  #[error("proof does not match the named values: {detail}")]
+  Mismatch { detail: String },
   /// A bug: a panic was caught.
-  #[error("internal error: {message}")]
-  Internal { message: String },
+  #[error("internal error: {detail}")]
+  Internal { detail: String },
 }
 
 impl From<Error> for NymAuthVegaError {
   fn from(e: Error) -> Self {
     match e {
-      Error::Input(message) => Self::InvalidInput { message },
-      Error::Shapes(message) => Self::InvalidShapes { message },
-      Error::UnknownCircuit(message) => Self::UnknownCircuit { message },
+      Error::Input(detail) => Self::InvalidInput { detail },
+      Error::Shapes(detail) => Self::InvalidShapes { detail },
+      Error::UnknownCircuit(detail) => Self::UnknownCircuit { detail },
       Error::Refused(r) => Self::Refused {
-        message: format!("{:?}", r.code),
+        detail: format!("{:?}", r.code),
       },
-      Error::Prover(message) => Self::ProverFailed { message },
-      Error::ProofInvalid(message) => Self::ProofInvalid { message },
-      Error::Mismatch(message) => Self::Mismatch { message },
-      Error::Internal(message) => Self::Internal { message },
+      Error::Prover(detail) => Self::ProverFailed { detail },
+      Error::ProofInvalid(detail) => Self::ProofInvalid { detail },
+      Error::Mismatch(detail) => Self::Mismatch { detail },
+      Error::Internal(detail) => Self::Internal { detail },
     }
   }
 }
@@ -214,7 +214,7 @@ pub fn nymauth_derive_challenge(
   doc_type: String,
   jwk_thumbprint: Option<Vec<u8>>,
 ) -> Result<NymAuthChallenge, NymAuthVegaError> {
-  let c = engine::challenge::derive(&origin, &nonce, &doc_type, jwk_thumbprint.as_deref()).map_err(|message| NymAuthVegaError::InvalidInput { message })?;
+  let c = engine::challenge::derive(&origin, &nonce, &doc_type, jwk_thumbprint.as_deref()).map_err(|detail| NymAuthVegaError::InvalidInput { detail })?;
   Ok(NymAuthChallenge {
     session_transcript: c.session_transcript,
     challenge_digest: c.digest.to_vec(),
@@ -227,7 +227,7 @@ pub fn nymauth_derive_challenge(
 pub fn nymauth_challenge_digest(session_transcript: Vec<u8>, doc_type: String) -> Result<Vec<u8>, NymAuthVegaError> {
   engine::challenge::digest_of_transcript(&session_transcript, &doc_type)
     .map(|d| d.to_vec())
-    .map_err(|message| NymAuthVegaError::InvalidInput { message })
+    .map_err(|detail| NymAuthVegaError::InvalidInput { detail })
 }
 
 /// `verifier_input = SHA-256(client_id)`, the value a verifier names in its statement
@@ -236,5 +236,5 @@ pub fn nymauth_challenge_digest(session_transcript: Vec<u8>, doc_type: String) -
 pub fn nymauth_verifier_input(client_id: String) -> Result<Vec<u8>, NymAuthVegaError> {
   engine::challenge::verifier_input(&client_id)
     .map(|d| d.to_vec())
-    .map_err(|message| NymAuthVegaError::InvalidInput { message })
+    .map_err(|detail| NymAuthVegaError::InvalidInput { detail })
 }
