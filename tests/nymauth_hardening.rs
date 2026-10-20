@@ -783,3 +783,18 @@ fn text_strings_must_be_valid_utf8() {
   };
   assert!(matches!(statement::prove(keys(), &c.statement(), &h), Err(Error::Input(_))));
 }
+
+#[test]
+fn non_canonical_simple_values_are_refused() {
+  use zk_cred_vega::nymauth_vega::engine::challenge::digest_of_transcript;
+  for bad in ["83f6f6f800", "83f6f6f818", "83f6f6f81f"] {
+    let bytes = hex::decode(bad).unwrap();
+    assert!(Item::read(&bytes).is_err(), "{bad}");
+    assert!(digest_of_transcript(&bytes, "d").is_err(), "{bad}");
+  }
+  // the long form is fine from 32 up, and the short forms are fine
+  for good in ["83f6f6f820", "83f6f6f4", "83f6f6f5", "83f6f6f7"] {
+    let bytes = hex::decode(good).unwrap();
+    assert!(Item::read(&bytes).is_ok(), "{good}");
+  }
+}

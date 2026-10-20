@@ -329,3 +329,28 @@ func TestCloseWhileOperationsRunIsSafeAndOperationsOnClosedKeysAreRefused(t *tes
 	want(t, err, InvalidArg)
 	k.Close() // a further Close is a no-op
 }
+
+func TestOversizedArgumentsAreRefusedBeforeTheyAreCopied(t *testing.T) {
+	k := loaded(t)
+	f := load(t)
+	_, err := k.Verify(&f.st, make([]byte, maxProof+1))
+	want(t, err, InvalidArg)
+	big := f.st
+	big.Time = strings.Repeat("x", maxSmall+1)
+	_, err = k.Verify(&big, f.refProof)
+	want(t, err, InvalidArg)
+	h := &Holder{IssuerSigned: make([]byte, maxIssuerSigned+1), SecretSeed: append([]byte(nil), f.seed...), DeviceSignature: f.devSig}
+	_, _, err = k.Prove(&f.st, h)
+	want(t, err, InvalidArg)
+	if !bytes.Equal(h.SecretSeed, make([]byte, len(f.seed))) {
+		t.Fatal("the seed survived an oversized argument")
+	}
+	_, err = LoadKeys(make([]byte, maxShapes+1))
+	want(t, err, InvalidArg)
+	_, _, err = DeriveChallenge(strings.Repeat("o", maxSmall+1), "pOA0oqEAhLnqug2r7Ve4tQ", "d", nil)
+	want(t, err, InvalidArg)
+	_, err = ChallengeDigest(make([]byte, maxSmall+1), "d")
+	want(t, err, InvalidArg)
+	_, err = VerifierInput(strings.Repeat("c", maxSmall+1))
+	want(t, err, InvalidArg)
+}

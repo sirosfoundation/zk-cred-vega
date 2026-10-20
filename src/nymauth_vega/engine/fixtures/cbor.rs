@@ -146,6 +146,10 @@ impl<'a> Item<'a> {
       }
       _ => return Err(format!("the head {initial:#04x}, which has no definite length")),
     };
+    // RFC 8949, 3.3: a simple value below 32 must use the one-byte form of the head, not 0xf8.
+    if major == 7 && info == 24 && bytes.get(1).is_some_and(|&v| v < 32) {
+      return Err("a simple value encoded in the long form below 32".into());
+    }
     let end = match major {
       2 | 3 => usize::try_from(argument)
         .ok()

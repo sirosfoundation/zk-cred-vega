@@ -67,6 +67,24 @@ func check(s C.int32_t) error {
 	return &Error{Status(s)}
 }
 
+// The limits of the C ABI (src/nymauth_go_ffi.rs). Arguments past them are refused here, with the
+// status the ABI would return, before anything is copied into C memory.
+const (
+	maxShapes       = 64 << 20
+	maxProof        = 512<<10 + 1
+	maxIssuerSigned = 64<<10 + 1
+	maxSmall        = 4096
+)
+
+func tooLong(max int, parts ...[]byte) bool {
+	for _, p := range parts {
+		if len(p) > max {
+			return true
+		}
+	}
+	return false
+}
+
 // Keys is the resident circuit. Close it when done. Verify and Prove hold a read lock for the whole
 // native call and Close the write lock, so a Close during an operation waits for it, a second
 // Close is a no-op, and an operation on closed keys returns InvalidArg.
@@ -77,6 +95,9 @@ type Keys struct {
 
 // LoadKeys builds the keys from the decompressed shapes; only approved shapes are accepted.
 func LoadKeys(shapes []byte) (*Keys, error) {
+	if tooLong(maxShapes, shapes) {
+		return nil, &Error{InvalidArg}
+	}
 	var p *C.ZkNymKeys
 	var ptr *C.uint8_t
 	if len(shapes) > 0 {
@@ -117,6 +138,10 @@ func slice(b []byte) (C.ZkNymSlice, func()) {
 	return C.ZkNymSlice{ptr: (*C.uint8_t)(p), len: C.size_t(len(b))}, func() { C.free(p) }
 }
 
+func (s *Statement) withinLimits() bool {
+	return !tooLong(maxSmall, s.IssuerKeyX, s.IssuerKeyY, []byte(s.Time), []byte(s.Earliest), []byte(s.Cutoff), s.ChallengeDigest, s.VerifierInput)
+}
+
 func (s *Statement) c() (C.ZkNymStatement, func()) {
 	var st C.ZkNymStatement
 	var frees []func()
@@ -141,6 +166,9 @@ func (s *Statement) c() (C.ZkNymStatement, func()) {
 
 // Verify accepts proof for the statement and returns the 32-byte pseudonym it reveals.
 func (k *Keys) Verify(s *Statement, proof []byte) ([]byte, error) {
+	if tooLong(maxProof, proof) || !s.withinLimits() {
+		return nil, &Error{InvalidArg}
+	}
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	st, free := s.c()
@@ -165,6 +193,12 @@ type Holder struct {
 
 // Prove makes a proof and returns it with the pseudonym.
 func (k *Keys) Prove(s *Statement, h *Holder) (proof, pseudonym []byte, err error) {
+	if tooLong(maxIssuerSigned, h.IssuerSigned) || tooLong(maxSmall, h.SecretSeed, h.DeviceSignature) || !s.withinLimits() {
+		for i := range h.SecretSeed { // still zeroed, as on every other path
+			h.SecretSeed[i] = 0
+		}
+		return nil, nil, &Error{InvalidArg}
+	}
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	st, free := s.c()
@@ -197,6 +231,9 @@ func (k *Keys) Prove(s *Statement, h *Holder) (proof, pseudonym []byte, err erro
 // DeriveChallenge returns e2 and the transcript seed (the SessionTranscript) for the verifier's
 // request, per the circuits' SPEC.md section 3. jwkThumbprint is nil for an unencrypted response.
 func DeriveChallenge(origin, nonce, docType string, jwkThumbprint []byte) (e2, sessionTranscript []byte, err error) {
+	if len(origin) > maxSmall || len(nonce) > maxSmall || len(docType) > maxSmall || tooLong(maxSmall, jwkThumbprint) {
+		return nil, nil, &Error{InvalidArg}
+	}
 	o, f1 := slice([]byte(origin))
 	defer f1()
 	n, f2 := slice([]byte(nonce))
@@ -218,6 +255,9 @@ func DeriveChallenge(origin, nonce, docType string, jwkThumbprint []byte) (e2, s
 
 // ChallengeDigest returns e2 for a SessionTranscript in hand.
 func ChallengeDigest(sessionTranscript []byte, docType string) ([]byte, error) {
+	if tooLong(maxSmall, sessionTranscript) || len(docType) > maxSmall {
+		return nil, &Error{InvalidArg}
+	}
 	s, f1 := slice(sessionTranscript)
 	defer f1()
 	d, f2 := slice([]byte(docType))
@@ -231,6 +271,9 @@ func ChallengeDigest(sessionTranscript []byte, docType string) ([]byte, error) {
 
 // VerifierInput returns SHA-256(clientID), the statement's VerifierInput.
 func VerifierInput(clientID string) ([]byte, error) {
+	if len(clientID) > maxSmall {
+		return nil, &Error{InvalidArg}
+	}
 	c, f := slice([]byte(clientID))
 	defer f()
 	var out [32]byte
