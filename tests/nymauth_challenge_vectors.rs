@@ -147,9 +147,16 @@ fn every_redirect_reject_vector_breaks_a_rule_and_the_digest_refuses_what_it_can
     // the one rule the existing code enforces: an empty docType is refused by the digest
     if s(case, "doc_type").is_empty() {
       let st = redirect_transcript_from_info(b"x");
-      assert!(matches!(nymauth_challenge_digest(st, String::new()), Err(NymAuthVegaError::InvalidInput { .. })), "{name}");
+      assert!(
+        matches!(nymauth_challenge_digest(st, String::new()), Err(NymAuthVegaError::InvalidInput { .. })),
+        "{name}"
+      );
     }
   }
   // the null thumbprint is a reject over redirects, and carries its reason
-  assert!(rejects.iter().any(|c| c["jwk_thumbprint_hex"].is_null() && c["reason"].as_str().is_some_and(|r| r.contains("encrypted"))));
+  assert!(
+    rejects
+      .iter()
+      .any(|c| c["jwk_thumbprint_hex"].is_null() && c["reason"].as_str().is_some_and(|r| r.contains("encrypted")))
+  );
 }
