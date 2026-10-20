@@ -20,6 +20,33 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Coverage for SonarCloud's new-code gate. Rust: cargo-llvm-cov over the nymauth tests (the
+      # long mdoc_age suites are not instrumented; they cover code this change does not touch).
+      # Go: the cgo smoke test of go/nymauth.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+      - run: sudo apt-get install -y zstd
+      - name: Rust coverage (lcov)
+        env:
+          # fat LTO and one codegen unit (the release profile) make an instrumented build very slow
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: >
+          cargo llvm-cov --locked --release --all-features --lcov --output-path lcov.info
+          --lib --test 'nymauth_*'
+      - name: Go coverage
+        run: |
+          cargo build --locked --release
+          cd go/nymauth && GOWORK=off go test -count=1 -coverprofile=coverage.out .
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
         env:
@@ -28,3 +55,6 @@ jobs:
           args: >
             -Dsonar.organization=${{ github.repository_owner }}
             -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            -Dsonar.rust.lcov.reportPaths=lcov.info
+            -Dsonar.go.coverage.reportPaths=go/nymauth/coverage.out
+            -Dsonar.coverage.exclusions=tests/**,examples/**,src/bin/**,**/*_test.go,src/nymauth_vega/engine/fixtures/**
