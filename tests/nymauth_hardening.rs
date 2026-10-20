@@ -418,6 +418,9 @@ fn scan(needle: &[u8]) -> usize {
   let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
   let mut mem = std::fs::File::open("/proc/self/mem").unwrap();
   let mut hits = 0;
+  // One buffer for every region, wiped at the end: the scan must not leave copies of the memory it
+  // read behind, which the next scan would count.
+  let mut buf = vec![0u8; 1 << 20];
   for line in maps.lines() {
     let mut it = line.split_whitespace();
     let (range, perms) = (it.next().unwrap(), it.next().unwrap());
@@ -427,7 +430,7 @@ fn scan(needle: &[u8]) -> usize {
     }
     let (a, b) = range.split_once('-').unwrap();
     let (a, b) = (u64::from_str_radix(a, 16).unwrap(), u64::from_str_radix(b, 16).unwrap());
-    let (mut off, mut buf) = (a, vec![0u8; 1 << 20]);
+    let mut off = a;
     while off < b {
       let n = ((b - off) as usize).min(buf.len());
       if mem.seek(SeekFrom::Start(off)).is_err() || mem.read_exact(&mut buf[..n]).is_err() {
@@ -437,6 +440,8 @@ fn scan(needle: &[u8]) -> usize {
       off += n as u64;
     }
   }
+  buf.fill(0);
+  std::hint::black_box(&buf);
   hits
 }
 
@@ -752,4 +757,29 @@ fn values_transfer_their_buffer_and_print_nothing() {
   let vec = w.into_vec();
   assert_eq!(vec.len(), 2);
   assert_eq!(vec[1], x);
+}
+
+#[test]
+fn text_strings_must_be_valid_utf8() {
+  use zk_cred_vega::nymauth_vega::engine::challenge::digest_of_transcript;
+  // the exact transcript of the review: [null, null, h'61ff'-as-text]
+  let bad = hex::decode("83f6f661ff").unwrap();
+  assert!(Item::read(&bad).is_err());
+  assert!(digest_of_transcript(&bad, "d").is_err());
+  let good = hex::decode("83f6f66161").unwrap();
+  assert!(Item::read(&good).is_ok() && digest_of_transcript(&good, "d").is_ok());
+  // inside a credential too
+  let (c, _) = honest();
+  let bytes = record(vec![
+    ("nameSpaces", Value::Map(vec![])),
+    ("issuerAuth", Value::Array(vec![Value::Encoded(vec![0x61, 0xff])])),
+  ])
+  .encode();
+  assert!(Item::read(&bytes).is_err());
+  let h = Holder {
+    issuer_signed: &bytes,
+    secret_seed: &c.seed,
+    device_signature: &c.dev_rs,
+  };
+  assert!(matches!(statement::prove(keys(), &c.statement(), &h), Err(Error::Input(_))));
 }

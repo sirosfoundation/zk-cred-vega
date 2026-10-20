@@ -293,3 +293,39 @@ func TestTheCCopyOfTheSeedIsWipedBeforeItIsFreed(t *testing.T) {
 	}
 	freeSeed(p, len(seed))
 }
+
+func TestCloseWhileOperationsRunIsSafeAndOperationsOnClosedKeysAreRefused(t *testing.T) {
+	loaded(t)
+	k, err := LoadKeys(shapes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := load(t)
+	var wg sync.WaitGroup
+	results := make(chan error, 16)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := k.Verify(&f.st, f.refProof)
+			results <- err
+		}()
+	}
+	for i := 0; i < 4; i++ { // concurrent Closes: no double free
+		wg.Add(1)
+		go func() { defer wg.Done(); k.Close() }()
+	}
+	wg.Wait()
+	close(results)
+	for err := range results {
+		// either the operation finished before the Close, or it found the keys closed
+		if err != nil && StatusOf(err) != InvalidArg {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	_, err = k.Verify(&f.st, f.refProof)
+	want(t, err, InvalidArg)
+	_, _, err = k.Prove(&f.st, &Holder{IssuerSigned: f.issuer, SecretSeed: append([]byte(nil), f.seed...), DeviceSignature: f.devSig})
+	want(t, err, InvalidArg)
+	k.Close() // a further Close is a no-op
+}

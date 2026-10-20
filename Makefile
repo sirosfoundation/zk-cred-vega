@@ -103,12 +103,12 @@ $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT):
 go-cabi: $(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/$(LIB_NAME).a $(GO_CABI_DIR)/zk_cred_vega_go.h $(GO_CABI_DIR)/zk_cred_vega_nymauth_go.h
 	@echo "Go C-ABI library + header staged in $(GO_CABI_DIR)"
 
-$(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT): $(GO_CABI_DIR)/zk_cred_vega_go.h
+$(GO_CABI_DIR)/$(LIB_NAME).$(HOST_LIB_EXT): $(GO_CABI_DIR)/zk_cred_vega_go.h $(GO_CABI_DIR)/zk_cred_vega_nymauth_go.h
 	cargo build --release
 	@mkdir -p $(GO_CABI_DIR)
 	cp $(BUILD_DIR)/release/$(LIB_NAME).$(HOST_LIB_EXT) $(GO_CABI_DIR)/
 
-$(GO_CABI_DIR)/$(LIB_NAME).a: $(GO_CABI_DIR)/zk_cred_vega_go.h
+$(GO_CABI_DIR)/$(LIB_NAME).a: $(GO_CABI_DIR)/zk_cred_vega_go.h $(GO_CABI_DIR)/zk_cred_vega_nymauth_go.h
 	cargo build --release
 	@mkdir -p $(GO_CABI_DIR)
 	cp $(BUILD_DIR)/release/$(LIB_NAME).a $(GO_CABI_DIR)/

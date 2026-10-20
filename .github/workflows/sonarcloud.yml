@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: stable
@@ -40,11 +40,11 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: >
-          cargo llvm-cov --release --all-features --lcov --output-path lcov.info
+          cargo llvm-cov --locked --release --all-features --lcov --output-path lcov.info
           --lib --test 'nymauth_*'
       - name: Go coverage
         run: |
-          cargo build --release
+          cargo build --locked --release
           cd go/nymauth && GOWORK=off go test -count=1 -coverprofile=coverage.out .
 
       - name: SonarCloud Scan

@@ -171,6 +171,9 @@ impl<'a> Item<'a> {
       _ => content,
     };
     let bytes = bytes.get(..end).ok_or("an item cut short")?;
+    if major == 3 && std::str::from_utf8(&bytes[content..]).is_err() {
+      return Err("a text string that is not valid UTF-8".into());
+    }
     Ok(Item {
       bytes,
       major,

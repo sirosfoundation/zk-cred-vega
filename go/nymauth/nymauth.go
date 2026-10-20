@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -66,8 +67,13 @@ func check(s C.int32_t) error {
 	return &Error{Status(s)}
 }
 
-// Keys is the resident circuit. Close it when done.
-type Keys struct{ p *C.ZkNymKeys }
+// Keys is the resident circuit. Close it when done. Verify and Prove hold a read lock for the whole
+// native call and Close the write lock, so a Close during an operation waits for it, a second
+// Close is a no-op, and an operation on closed keys returns InvalidArg.
+type Keys struct {
+	mu sync.RWMutex
+	p  *C.ZkNymKeys
+}
 
 // LoadKeys builds the keys from the decompressed shapes; only approved shapes are accepted.
 func LoadKeys(shapes []byte) (*Keys, error) {
@@ -79,13 +85,15 @@ func LoadKeys(shapes []byte) (*Keys, error) {
 	if err := check(C.zk_cred_vega_nymauth_load_keys(ptr, C.size_t(len(shapes)), &p)); err != nil {
 		return nil, err
 	}
-	k := &Keys{p}
+	k := &Keys{p: p}
 	runtime.SetFinalizer(k, func(k *Keys) { k.Close() })
 	return k, nil
 }
 
 // Close releases the keys; it is safe to call twice.
 func (k *Keys) Close() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	if k.p != nil {
 		C.zk_cred_vega_nymauth_free_keys(k.p)
 		k.p = nil
@@ -133,6 +141,8 @@ func (s *Statement) c() (C.ZkNymStatement, func()) {
 
 // Verify accepts proof for the statement and returns the 32-byte pseudonym it reveals.
 func (k *Keys) Verify(s *Statement, proof []byte) ([]byte, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
 	st, free := s.c()
 	defer free()
 	pr, freeProof := slice(proof)
@@ -155,6 +165,8 @@ type Holder struct {
 
 // Prove makes a proof and returns it with the pseudonym.
 func (k *Keys) Prove(s *Statement, h *Holder) (proof, pseudonym []byte, err error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
 	st, free := s.c()
 	defer free()
 	is, f1 := slice(h.IssuerSigned)

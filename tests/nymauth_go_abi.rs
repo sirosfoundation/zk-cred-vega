@@ -394,14 +394,23 @@ fn prove_zeroes_the_seed_on_every_argument_failure() {
   let (mut p, mut n, mut pseud) = (null_mut::<u8>(), 0usize, [0u8; 32]);
   let cred = [0xffu8];
   let sig = [0u8; 64];
-  let run = |keys_ptr: *const ZkNymKeys,
-             st_ptr: *const ZkNymStatement,
-             mutate: &dyn Fn(&mut ZkNymHolder),
-             out: *mut *mut u8,
-             len_out: *mut usize,
-             ps: *mut u8,
-             want: i32,
-             what: &str| {
+  /// The pointers a call is given; each case changes one of them.
+  #[derive(Clone, Copy)]
+  struct Args {
+    keys: *const ZkNymKeys,
+    st: *const ZkNymStatement,
+    out: *mut *mut u8,
+    len_out: *mut usize,
+    ps: *mut u8,
+  }
+  let good = Args {
+    keys: keys(),
+    st: &st,
+    out: &mut p,
+    len_out: &mut n,
+    ps: pseud.as_mut_ptr(),
+  };
+  let run = |args: Args, mutate: &dyn Fn(&mut ZkNymHolder), want: i32, what: &str| {
     let mut seed = [0x5au8; 16];
     let mut holder = ZkNymHolder {
       issuer_signed: s(&cred),
@@ -410,61 +419,40 @@ fn prove_zeroes_the_seed_on_every_argument_failure() {
       device_signature: s(&sig),
     };
     mutate(&mut holder);
-    let r = unsafe { zk_cred_vega_nymauth_prove(keys_ptr, st_ptr, &holder, out, len_out, ps) };
+    let r = unsafe { zk_cred_vega_nymauth_prove(args.keys, args.st, &holder, args.out, args.len_out, args.ps) };
     assert_eq!(r, want, "{what}");
     assert_eq!(seed, [0u8; 16], "{what}: the seed was not zeroed");
   };
   let none: &dyn Fn(&mut ZkNymHolder) = &|_| {};
-  run(null(), &st, none, &mut p, &mut n, pseud.as_mut_ptr(), ZK_NYM_INVALID_ARG, "null keys");
-  run(keys(), &st, none, null_mut(), &mut n, pseud.as_mut_ptr(), ZK_NYM_INVALID_ARG, "null proof out");
-  run(keys(), &st, none, &mut p, null_mut(), pseud.as_mut_ptr(), ZK_NYM_INVALID_ARG, "null length out");
-  run(keys(), &st, none, &mut p, &mut n, null_mut(), ZK_NYM_INVALID_ARG, "null pseudonym out");
-  run(keys(), null(), none, &mut p, &mut n, pseud.as_mut_ptr(), ZK_NYM_INVALID_ARG, "null statement");
+  run(Args { keys: null(), ..good }, none, ZK_NYM_INVALID_ARG, "null keys");
+  run(Args { out: null_mut(), ..good }, none, ZK_NYM_INVALID_ARG, "null proof out");
+  run(Args { len_out: null_mut(), ..good }, none, ZK_NYM_INVALID_ARG, "null length out");
+  run(Args { ps: null_mut(), ..good }, none, ZK_NYM_INVALID_ARG, "null pseudonym out");
+  run(Args { st: null(), ..good }, none, ZK_NYM_INVALID_ARG, "null statement");
   run(
-    keys(),
-    &st,
+    good,
     &|h| h.issuer_signed = ZkNymSlice { ptr: null(), len: 3 },
-    &mut p,
-    &mut n,
-    pseud.as_mut_ptr(),
     ZK_NYM_INVALID_ARG,
     "null credential with a length",
   );
   run(
-    keys(),
-    &st,
+    good,
     &|h| {
       h.issuer_signed = ZkNymSlice {
         ptr: cred.as_ptr(),
         len: usize::MAX,
       }
     },
-    &mut p,
-    &mut n,
-    pseud.as_mut_ptr(),
     ZK_NYM_INVALID_ARG,
     "credential length past its cap",
   );
   run(
-    keys(),
-    &st,
+    good,
     &|h| h.device_signature = ZkNymSlice { ptr: null(), len: 3 },
-    &mut p,
-    &mut n,
-    pseud.as_mut_ptr(),
     ZK_NYM_INVALID_ARG,
     "null device signature with a length",
   );
-  run(
-    keys(),
-    &st,
-    none,
-    &mut p,
-    &mut n,
-    pseud.as_mut_ptr(),
-    ZK_NYM_INVALID_INPUT,
-    "malformed credential",
-  );
+  run(good, none, ZK_NYM_INVALID_INPUT, "malformed credential");
   // a seed of the wrong length is an input error and is zeroed too
   let mut seed = [0x5au8; 8];
   let holder = ZkNymHolder {

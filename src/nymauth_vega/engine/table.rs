@@ -232,6 +232,25 @@ pub struct Table {
   pub layout: Layout,
 }
 
+/// The blocks of a table while it is built: wiped when dropped, so a message rejected after an
+/// earlier one was copied in leaves nothing behind. A finished table takes the blocks out.
+struct Blocks(Vec<[u8; 64]>);
+
+#[cfg(test)]
+thread_local! {
+  /// The number of blocks wiped on this thread, for tests (a dropped buffer cannot be read back).
+  static BLOCKS_WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Drop for Blocks {
+  fn drop(&mut self) {
+    use zeroize::Zeroize;
+    #[cfg(test)]
+    BLOCKS_WIPED.with(|w| w.set(w.get() + self.0.len()));
+    self.0.zeroize();
+  }
+}
+
 impl Drop for Table {
   /// The blocks hold the credential's attribute, the secret seed and the pseudonym's message:
   /// wiped when dropped.
@@ -257,7 +276,8 @@ impl Table {
     let (before, kept) = signed.split_at((64 * skipped).min(signed.len()));
     let mut start = IV;
     compress(&mut start, before);
-    let mut blocks = vec![[0u8; 64]; POSITIONS];
+    // Wiped on every way out, a rejected message included: the blocks hold the credential.
+    let mut blocks = Blocks(vec![[0u8; 64]; POSITIONS]);
     let padded: Vec<(Region, zeroize::Zeroizing<Vec<u8>>)> = std::iter::once((layout.signed, zeroize::Zeroizing::new(kept.to_vec())))
       .chain(messages.iter().map(|(region, message)| (*region, zeroize::Zeroizing::new(pad(message)))))
       .collect();
@@ -266,10 +286,10 @@ impl Table {
         return Err(format!("a message of {} blocks does not fit in {} blocks", padded.len() / 64, region.blocks));
       }
       for (j, block) in padded.chunks(64).enumerate() {
-        blocks[region.first + j].copy_from_slice(block);
+        blocks.0[region.first + j].copy_from_slice(block);
       }
     }
-    Ok(Self::from_blocks_in(layout, blocks, words_to_bytes(&start)))
+    Ok(Self::from_blocks_in(layout, std::mem::take(&mut blocks.0), words_to_bytes(&start)))
   }
 
   /// [`Table::from_blocks`] in `layout`: every region but the signed message's chains from the
@@ -384,5 +404,37 @@ impl Cells<'_> {
     } else {
       self.state(j - 1, h)
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn wiped() -> usize {
+    BLOCKS_WIPED.with(|w| w.get())
+  }
+
+  #[test]
+  fn a_message_rejected_after_another_was_copied_wipes_the_partial_blocks() {
+    let layout = FULL_MDOC;
+    let fits = [7u8; 40];
+    let too_long = vec![9u8; 64 * layout.attribute.blocks + 1];
+    let before = wiped();
+    // The first message fits and is copied into the blocks; the second does not fit its region.
+    let r = Table::with_messages(layout, &[1], 0, &[(layout.attribute, &fits[..]), (layout.attribute, &too_long[..])]);
+    assert!(r.is_err());
+    assert_eq!(wiped() - before, POSITIONS, "every block was wiped on the rejection");
+  }
+
+  #[test]
+  fn a_finished_table_keeps_its_blocks() {
+    let layout = FULL_MDOC;
+    let before = wiped();
+    let table = Table::with_messages(layout, &[1], 0, &[(layout.attribute, &[7u8; 40][..])]).unwrap();
+    assert_eq!(wiped() - before, 0, "the blocks moved into the table, nothing was wiped");
+    assert_eq!(table.blocks.len(), POSITIONS);
+    assert_eq!(table.blocks[layout.attribute.first][0], 7);
+    drop(table);
   }
 }
