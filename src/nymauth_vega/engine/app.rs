@@ -470,7 +470,6 @@ pub struct Segment {
   pub public: Vec<t256::Scalar>,
 }
 
-/// Overwrites field elements with zero, and keeps the compiler from dropping the writes.
 #[cfg(test)]
 thread_local! {
   /// The number of field elements `wipe` was asked to zero on this thread (tests observe wiping
@@ -478,6 +477,7 @@ thread_local! {
   pub(crate) static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Overwrites field elements with zero, and keeps the compiler from dropping the writes.
 pub(crate) fn wipe(values: &mut [t256::Scalar]) {
   #[cfg(test)]
   WIPED.with(|w| w.set(w.get() + values.len()));
