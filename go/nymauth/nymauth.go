@@ -14,6 +14,7 @@ package nymauth
 #cgo CFLAGS: -I${SRCDIR}/../../include
 #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lzk_cred_vega -Wl,-rpath,${SRCDIR}/../../target/release
 #include <stdlib.h>
+#include <string.h>
 #include "zk_cred_vega_nymauth_go.h"
 */
 import "C"
@@ -160,8 +161,10 @@ func (k *Keys) Prove(s *Statement, h *Holder) (proof, pseudonym []byte, err erro
 	defer f1()
 	ds, f2 := slice(h.DeviceSignature)
 	defer f2()
-	seed := C.CBytes(h.SecretSeed)
-	defer C.free(seed)
+	seed := newSeed(h.SecretSeed)
+	// Wiped and freed on every way out, whatever the native call returned (it also zeroes the
+	// buffer, but not when it refuses the arguments before it reaches the seed).
+	defer freeSeed(seed, len(h.SecretSeed))
 	ch := C.ZkNymHolder{issuer_signed: is, secret_seed: (*C.uint8_t)(seed), secret_seed_len: C.size_t(len(h.SecretSeed)), device_signature: ds}
 	var p *C.uint8_t
 	var n C.size_t
@@ -224,3 +227,22 @@ func VerifierInput(clientID string) ([]byte, error) {
 	}
 	return out[:], nil
 }
+
+// newSeed copies the seed into C memory.
+func newSeed(b []byte) unsafe.Pointer { return C.CBytes(b) }
+
+// wipeSeed zeroes n bytes of C memory.
+func wipeSeed(p unsafe.Pointer, n int) {
+	if p != nil && n > 0 {
+		C.memset(p, 0, C.size_t(n))
+	}
+}
+
+// freeSeed wipes the C copy of the seed, then frees it.
+func freeSeed(p unsafe.Pointer, n int) {
+	wipeSeed(p, n)
+	C.free(p)
+}
+
+// peekSeed reads n bytes of C memory (tests).
+func peekSeed(p unsafe.Pointer, n int) []byte { return C.GoBytes(p, C.int(n)) }

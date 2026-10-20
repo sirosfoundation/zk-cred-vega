@@ -280,3 +280,16 @@ func TestProveWithBadArgumentsStillZeroesTheSeed(t *testing.T) {
 		t.Fatal("the seed survived an argument failure")
 	}
 }
+
+func TestTheCCopyOfTheSeedIsWipedBeforeItIsFreed(t *testing.T) {
+	seed := []byte("0123456789abcdef")
+	p := newSeed(seed)
+	if !bytes.Equal(peekSeed(p, len(seed)), seed) {
+		t.Fatal("the C copy is not the seed")
+	}
+	wipeSeed(p, len(seed))
+	if !bytes.Equal(peekSeed(p, len(seed)), make([]byte, len(seed))) {
+		t.Fatal("the C copy survived the wipe")
+	}
+	freeSeed(p, len(seed))
+}

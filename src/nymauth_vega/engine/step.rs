@@ -70,7 +70,7 @@ impl Step {
   /// segment is empty.
   pub fn assignment(&self) -> Result<Instance, SynthesisError> {
     let position = t256::Scalar::from(self.position as u64);
-    let private = self.precommitted_values()?.0;
+    let private = self.precommitted_values()?.into_vec();
     Ok(Instance {
       precommitted: Segment {
         private,

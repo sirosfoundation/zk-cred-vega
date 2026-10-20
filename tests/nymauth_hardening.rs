@@ -740,3 +740,16 @@ fn pseudonym_of_leaves_no_copy_of_the_seed_behind() {
   eprintln!("seed copies: control {control}, with the caller's buffer {during}, after 64 pseudonym_of calls {after}");
   assert!(after <= control, "pseudonym_of left {} copies of the seed behind", after - control);
 }
+
+#[test]
+fn values_transfer_their_buffer_and_print_nothing() {
+  use zk_cred_vega::nymauth_vega::engine::gadgets::values::Values;
+  let x = t256::Scalar::from(12345u64);
+  let mut w = Values::default();
+  w.bit(true);
+  w.push(x);
+  assert!(format!("{w:?}").contains("redacted"));
+  let vec = w.into_vec();
+  assert_eq!(vec.len(), 2);
+  assert_eq!(vec[1], x);
+}

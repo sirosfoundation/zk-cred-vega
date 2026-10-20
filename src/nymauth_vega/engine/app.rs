@@ -471,7 +471,16 @@ pub struct Segment {
 }
 
 /// Overwrites field elements with zero, and keeps the compiler from dropping the writes.
-fn wipe(values: &mut [t256::Scalar]) {
+#[cfg(test)]
+thread_local! {
+  /// The number of field elements `wipe` was asked to zero on this thread (tests observe wiping
+  /// through it: a dropped buffer cannot be read back).
+  pub(crate) static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn wipe(values: &mut [t256::Scalar]) {
+  #[cfg(test)]
+  WIPED.with(|w| w.set(w.get() + values.len()));
   values.iter_mut().for_each(|v| *v = t256::Scalar::ZERO);
   std::hint::black_box(values);
 }

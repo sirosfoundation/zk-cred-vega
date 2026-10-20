@@ -16,10 +16,31 @@ use ff::{Field, PrimeField};
 use vega_prover::provider::pt256::t256;
 
 /// Values in allocation order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// The values of the shared table's seed blocks pass through here, so the buffer is wiped when it
+/// is dropped (best effort). Moving the values on, as a [`super::super::app::Segment`] does, goes
+/// through [`Values::into_vec`], which hands over the buffer without leaving a copy behind.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Values(pub Vec<t256::Scalar>);
 
+impl Drop for Values {
+  fn drop(&mut self) {
+    crate::nymauth_vega::engine::app::wipe(&mut self.0);
+  }
+}
+
+impl std::fmt::Debug for Values {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Values({} values, redacted)", self.0.len())
+  }
+}
+
 impl Values {
+  /// The values as a vector, transferred: the caller owns (and must wipe) the buffer.
+  pub fn into_vec(mut self) -> Vec<t256::Scalar> {
+    std::mem::take(&mut self.0)
+  }
+
   pub fn with_capacity(capacity: usize) -> Self {
     Values(Vec::with_capacity(capacity))
   }
@@ -67,5 +88,49 @@ impl Values {
         t256::Scalar::ZERO
       }
     }));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::nymauth_vega::engine::app::{Segment, WIPED};
+
+  fn wiped() -> usize {
+    WIPED.with(|w| w.get())
+  }
+
+  #[test]
+  fn dropping_values_wipes_every_value_and_into_vec_hands_the_buffer_over() {
+    let before = wiped();
+    let mut v = Values::with_capacity(16);
+    for _ in 0..8 {
+      v.push(t256::Scalar::from(5u64));
+    }
+    drop(v);
+    assert_eq!(wiped() - before, 8, "the dropped buffer was wiped");
+
+    // Transferred values are not wiped by the transfer, and the emptied shell wipes nothing...
+    let before = wiped();
+    let mut w = Values::default();
+    w.bit(true);
+    w.push(t256::Scalar::from(7u64));
+    let vec = w.into_vec();
+    assert_eq!(wiped() - before, 0);
+    assert_eq!(vec, vec![t256::Scalar::ONE, t256::Scalar::from(7u64)]);
+    // ...because the new owner wipes them: a Segment wipes its values when dropped.
+    let before = wiped();
+    drop(Segment {
+      private: vec,
+      public: vec![t256::Scalar::ONE],
+    });
+    assert_eq!(wiped() - before, 3);
+  }
+
+  #[test]
+  fn values_print_no_numbers() {
+    let mut v = Values::default();
+    v.push(t256::Scalar::from(123456789u64));
+    assert_eq!(format!("{v:?}"), "Values(1 values, redacted)");
   }
 }
