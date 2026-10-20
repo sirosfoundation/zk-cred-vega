@@ -4,6 +4,7 @@ package nymauth
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 var vectors = filepath.Join("..", "..", "test-vectors", "nymauth")
@@ -206,6 +208,10 @@ type vectorSet struct {
 	Derive  []map[string]any `json:"derive"`
 	Digest  []map[string]any `json:"digest"`
 	Rejects []map[string]any `json:"rejects"`
+
+	MinNonceChars   int              `json:"min_nonce_chars"`
+	DeriveRedirect  []map[string]any `json:"derive_redirect"`
+	RejectsRedirect []map[string]any `json:"rejects_redirect"`
 }
 
 func vectorsOf(t *testing.T) vectorSet {
@@ -353,4 +359,67 @@ func TestOversizedArgumentsAreRefusedBeforeTheyAreCopied(t *testing.T) {
 	want(t, err, InvalidArg)
 	_, err = VerifierInput(strings.Repeat("c", maxSmall+1))
 	want(t, err, InvalidArg)
+}
+
+// There is no redirect derive entry point yet, so the redirect (OpenID4VPHandover) vectors run through the
+// channel-agnostic ChallengeDigest.
+
+// redirectTranscript is [null, null, ["OpenID4VPHandover", bstr(SHA-256(info))]] over a given encoded
+// OpenID4VPHandoverInfo (OpenID4VP 1.0 appendix B.2.6.1).
+func redirectTranscript(info []byte) []byte {
+	h := sha256.Sum256(info)
+	st := append([]byte{0x83, 0xf6, 0xf6, 0x82, 0x71}, []byte("OpenID4VPHandover")...)
+	st = append(st, 0x58, 0x20)
+	return append(st, h[:]...)
+}
+
+func TestSharedRedirectVectorsGiveTheirE2(t *testing.T) {
+	all := vectorsOf(t).DeriveRedirect
+	if len(all) < 6 {
+		t.Fatalf("only %d redirect vectors", len(all))
+	}
+	for _, c := range all {
+		st := unhex(t, c["session_transcript_hex"].(string))
+		info := unhex(t, c["handover_info_hex"].(string))
+		if !bytes.Equal(st, redirectTranscript(info)) {
+			t.Fatalf("%v: the transcript is not the handover over handover_info_hex", c["name"])
+		}
+		if len(thumbOf(t, c)) != 32 || info[0] != 0x84 {
+			t.Fatalf("%v: over redirects the thumbprint is 32 bytes and the info a 4-item array", c["name"])
+		}
+		d, err := ChallengeDigest(st, c["doc_type"].(string))
+		if err != nil || hex.EncodeToString(d) != c["challenge_digest_hex"] {
+			t.Fatalf("%v: %x %v", c["name"], d, err)
+		}
+	}
+}
+
+func TestSharedRedirectRejectVectorsBreakARule(t *testing.T) {
+	v := vectorsOf(t)
+	if len(v.RejectsRedirect) < 8 {
+		t.Fatalf("only %d redirect reject vectors", len(v.RejectsRedirect))
+	}
+	nullWithReason := false
+	for _, c := range v.RejectsRedirect {
+		if c["op"] != "derive_redirect" {
+			t.Fatalf("%v: unexpected op %v", c["name"], c["op"])
+		}
+		th := thumbOf(t, c)
+		broken := c["client_id"] == "" || utf8.RuneCountInString(c["nonce"].(string)) < v.MinNonceChars ||
+			c["response_uri"] == "" || c["doc_type"] == "" || len(th) != 32
+		if !broken {
+			t.Fatalf("%v breaks none of the redirect rules: it is not a reject vector", c["name"])
+		}
+		if c["doc_type"] == "" { // the one rule the existing code enforces
+			if _, err := ChallengeDigest(redirectTranscript([]byte("x")), ""); err == nil {
+				t.Fatalf("%v: an empty docType was accepted", c["name"])
+			}
+		}
+		if c["jwk_thumbprint_hex"] == nil && strings.Contains(c["reason"].(string), "encrypted") {
+			nullWithReason = true
+		}
+	}
+	if !nullWithReason {
+		t.Fatal("the null thumbprint reject with its reason is missing")
+	}
 }
