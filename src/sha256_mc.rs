@@ -53,9 +53,9 @@
 
 use bellpepper::gadgets::{sha256::sha256_compression_function, uint32::UInt32};
 use bellpepper_core::{
+  ConstraintSystem, LinearCombination, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, LinearCombination, SynthesisError,
 };
 use ff::PrimeField;
 
@@ -67,9 +67,7 @@ pub const PACKS_PER_BLOCK: usize = 64 / BYTES_PER_PACK;
 pub const PACKS_PER_DIGEST: usize = 32 / BYTES_PER_PACK;
 
 /// SHA-256's initial chaining value.
-pub const IV: [u32; 8] = [
-  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-];
+pub const IV: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
 
 /// SHA-256's compression function, out of circuit.
 ///
@@ -77,14 +75,11 @@ pub const IV: [u32; 8] = [
 /// intermediate digests before it can commit to them.
 pub fn compress_native(mut h: [u32; 8], block: &[u8; 64]) -> [u32; 8] {
   const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74,
+    0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d,
+    0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e,
+    0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ];
   let mut w = [0u32; 64];
   for i in 0..16 {
@@ -95,8 +90,7 @@ pub fn compress_native(mut h: [u32; 8], block: &[u8; 64]) -> [u32; 8] {
     let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
     w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
   }
-  let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-    (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+  let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
   for i in 0..64 {
     let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
     let ch = (e & f) ^ ((!e) & g);
@@ -104,8 +98,14 @@ pub fn compress_native(mut h: [u32; 8], block: &[u8; 64]) -> [u32; 8] {
     let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
     let maj = (a & b) ^ (a & c) ^ (b & c);
     let t2 = s0.wrapping_add(maj);
-    hh = g; g = f; f = e; e = d.wrapping_add(t1);
-    d = c; c = b; b = a; a = t1.wrapping_add(t2);
+    hh = g;
+    g = f;
+    f = e;
+    e = d.wrapping_add(t1);
+    d = c;
+    c = b;
+    b = a;
+    a = t1.wrapping_add(t2);
   }
   for (i, v) in [a, b, c, d, e, f, g, hh].into_iter().enumerate() {
     h[i] = h[i].wrapping_add(v);
@@ -153,11 +153,7 @@ fn pack_be<Scalar: PrimeField>(bytes: &[u8]) -> Scalar {
 /// circuits.** The proof system commits to it once and reuses that
 /// commitment across both, so a layout difference is not a mismatch it
 /// can detect — it is a wrong proof.
-pub fn alloc_shared<Scalar, CS>(
-  cs: &mut CS,
-  blocks: &[[u8; 64]],
-  digests: &[[u8; 32]],
-) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
+pub fn alloc_shared<Scalar, CS>(cs: &mut CS, blocks: &[[u8; 64]], digests: &[[u8; 32]]) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -226,7 +222,11 @@ where
     };
     let live = s.get_value().unwrap_or(false);
     let t = AllocatedNum::alloc(cs.namespace(|| format!("{tag} term {j}")), || {
-      Ok(if live { term_value.ok_or(SynthesisError::AssignmentMissing)? } else { Scalar::ZERO })
+      Ok(if live {
+        term_value.ok_or(SynthesisError::AssignmentMissing)?
+      } else {
+        Scalar::ZERO
+      })
     })?;
     // sel[j] * value(j) == t
     match (index_of(j), constant_for(j)) {
@@ -242,21 +242,14 @@ where
         |lc| lc + shared[idx].get_variable(),
         |lc| lc + t.get_variable(),
       ),
-      (None, None) => cs.enforce(
-        || format!("{tag} select {j}"),
-        |lc| lc + s.get_variable(),
-        |lc| lc,
-        |lc| lc + t.get_variable(),
-      ),
+      (None, None) => cs.enforce(|| format!("{tag} select {j}"), |lc| lc + s.get_variable(), |lc| lc, |lc| lc + t.get_variable()),
     }
     if live {
       value = term_value;
     }
     acc = acc + t.get_variable();
   }
-  let out = AllocatedNum::alloc(cs.namespace(|| format!("{tag} value")), || {
-    value.ok_or(SynthesisError::AssignmentMissing)
-  })?;
+  let out = AllocatedNum::alloc(cs.namespace(|| format!("{tag} value")), || value.ok_or(SynthesisError::AssignmentMissing))?;
   cs.enforce(|| format!("{tag} sums"), |lc| lc + &acc, |lc| lc + CS::one(), |lc| lc + out.get_variable());
   Ok(out)
 }
@@ -275,7 +268,10 @@ where
   let mut bits = Vec::with_capacity(BYTES_PER_PACK * 8);
   let mut recomposed = LinearCombination::<Scalar>::zero();
   for i in 0..BYTES_PER_PACK * 8 {
-    let b = AllocatedBit::alloc(cs.namespace(|| format!("{tag} bit {i}")), native.as_ref().map(|n| (n[i / 8] >> (7 - i % 8)) & 1 == 1))?;
+    let b = AllocatedBit::alloc(
+      cs.namespace(|| format!("{tag} bit {i}")),
+      native.as_ref().map(|n| (n[i / 8] >> (7 - i % 8)) & 1 == 1),
+    )?;
     let mut coeff = Scalar::ONE;
     for _ in 0..(BYTES_PER_PACK * 8 - 1 - i) {
       coeff = coeff.double();
@@ -283,7 +279,12 @@ where
     recomposed = recomposed + (coeff, b.get_variable());
     bits.push(Boolean::from(b));
   }
-  cs.enforce(|| format!("{tag} recomposes"), |lc| lc + &recomposed, |lc| lc + CS::one(), |lc| lc + p.get_variable());
+  cs.enforce(
+    || format!("{tag} recomposes"),
+    |lc| lc + &recomposed,
+    |lc| lc + CS::one(),
+    |lc| lc + p.get_variable(),
+  );
   Ok(bits)
 }
 
@@ -322,12 +323,7 @@ fn repack<Scalar: PrimeField>(bits: &[Boolean], one: bellpepper_core::Variable) 
 /// `Σ j·sel[j] == idx` closes it for one constraint, and doing the
 /// allocation here means a caller cannot reintroduce the gap by
 /// forgetting to bind what it published.
-pub fn synthesize_step<Scalar, CS>(
-  cs: &mut CS,
-  shared: &[AllocatedNum<Scalar>],
-  layout: &HashLayout,
-  step: usize,
-) -> Result<(), SynthesisError>
+pub fn synthesize_step<Scalar, CS>(cs: &mut CS, shared: &[AllocatedNum<Scalar>], layout: &HashLayout, step: usize) -> Result<(), SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -379,7 +375,13 @@ where
       cs.namespace(|| format!("state pack {k}")),
       &sel,
       shared,
-      |j| if layout.is_first_of_message(j) { None } else { Some(digest_pack(n, j - 1, k)) },
+      |j| {
+        if layout.is_first_of_message(j) {
+          None
+        } else {
+          Some(digest_pack(n, j - 1, k))
+        }
+      },
       |j| if layout.is_first_of_message(j) { Some(iv_pack) } else { None },
       &format!("Hin{k}"),
     )?;
@@ -563,8 +565,6 @@ mod tests {
     (blocks, digests)
   }
 
-
-
   /// The published step index is the block that was actually compressed.
   ///
   /// This is the constraint that makes the verifier-side coverage check
@@ -595,14 +595,8 @@ mod tests {
     // the only constraint left to object is the binding one.
     cs.set("public step index/num", S::from(5u64));
     cs.set("inputize step index/input variable", S::from(5u64));
-    assert!(
-      !cs.is_satisfied(),
-      "a step may publish an index it did not compress"
-    );
-    assert_eq!(
-      cs.which_is_unsatisfied(),
-      Some("the published index is the block actually selected")
-    );
+    assert!(!cs.is_satisfied(), "a step may publish an index it did not compress");
+    assert_eq!(cs.which_is_unsatisfied(), Some("the published index is the block actually selected"));
   }
 
   /// Every step verifies, and the core selects a digest equal to the real
@@ -704,8 +698,7 @@ mod core_tests {
       .enumerate()
       .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("raw {i}")), Some(b)).map(Boolean::from).unwrap())
       .collect();
-    let (buffer_bits, _, len_sel) =
-      crate::sha256_var::padded_buffer_bits(&mut cs, &raw_bits, msg.len(), MAXB, BLOCKS).unwrap();
+    let (buffer_bits, _, len_sel) = crate::sha256_var::padded_buffer_bits(&mut cs, &raw_bits, msg.len(), MAXB, BLOCKS).unwrap();
     bind_message_to_shared(&mut cs, &shared, &layout, 0, &buffer_bits).unwrap();
     let terminal = crate::sha256_var::terminal_block_for_len(msg.len()) - 1;
     let bits = select_digest(&mut cs, &shared, &layout, 0, terminal, Some(&len_sel)).unwrap();

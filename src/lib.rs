@@ -21,18 +21,18 @@ pub mod ecdsa;
 pub mod ffi_api;
 pub mod gadget_utils;
 pub mod go_ffi;
-pub mod mdoc_core;
-pub mod nymauth_go_ffi;
-pub mod nymauth_vega;
-pub mod mso;
-pub mod mso_splice;
-pub mod nonnative;
-pub mod offset_bind;
-pub mod onehot_cursor;
-pub mod p256_ecc;
 pub mod mdoc_age;
 pub mod mdoc_age_circuit;
 pub mod mdoc_age_mc;
+pub mod mdoc_core;
+pub mod mso;
+pub mod mso_splice;
+pub mod nonnative;
+pub mod nymauth_go_ffi;
+pub mod nymauth_vega;
+pub mod offset_bind;
+pub mod onehot_cursor;
+pub mod p256_ecc;
 pub mod sha256_mc;
 pub mod sha256_var;
 
@@ -108,7 +108,10 @@ const REAL_LEN_BITS: usize = 8;
 /// blinding value.
 pub const BLIND_NONCE_BYTES: usize = 23;
 const _: () = assert!(32 + BLIND_NONCE_BYTES <= 55, "digest||nonce must fit one SHA-256 block");
-const _: () = assert!(MAX_CLAIM_BYTES_V1 <= u8::MAX as usize, "MAX_CLAIM_BYTES_V1 must fit in a u8 for REAL_LEN_BITS=8");
+const _: () = assert!(
+  MAX_CLAIM_BYTES_V1 <= u8::MAX as usize,
+  "MAX_CLAIM_BYTES_V1 must fit in a u8 for REAL_LEN_BITS=8"
+);
 
 /// Errors from this crate's circuit/proving layer.
 #[derive(Debug, thiserror::Error)]
@@ -344,10 +347,7 @@ where
     Ok(values)
   }
 
-  fn shared<CS: ConstraintSystem<Eng::Scalar>>(
-    &self,
-    _cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
+  fn shared<CS: ConstraintSystem<Eng::Scalar>>(&self, _cs: &mut CS) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
     Ok(vec![])
   }
 
@@ -361,13 +361,10 @@ where
       .iter()
       .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
       .enumerate()
-      .map(|(i, b)| {
-        AllocatedBit::alloc(cs.namespace(|| format!("claim byte-bit {i}")), Some(b)).map(Boolean::from)
-      })
+      .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("claim byte-bit {i}")), Some(b)).map(Boolean::from))
       .collect::<Result<Vec<_>, _>>()?;
 
-    let (digest_bits, msg_active_bits) =
-      sha256_var::sha256_var(cs.namespace(|| "sha256_var(issuer_signed_item)"), &input_bits, self.real_len)?;
+    let (digest_bits, msg_active_bits) = sha256_var::sha256_var(cs.namespace(|| "sha256_var(issuer_signed_item)"), &input_bits, self.real_len)?;
 
     // Blind the digest before exposing it -- NEVER inputize digest_bits
     // directly (see `blind_digest_bytes`'s doc for why the raw digest,
@@ -387,10 +384,7 @@ where
     let blinded_digest_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "blind(digest, nonce)"), &blind_input)?;
     mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, &blinded_digest_bits, "digest")?;
 
-    let disclose_bit = Boolean::from(AllocatedBit::alloc(
-      cs.namespace(|| "disclose"),
-      Some(self.disclose),
-    )?);
+    let disclose_bit = Boolean::from(AllocatedBit::alloc(cs.namespace(|| "disclose"), Some(self.disclose))?);
     mdoc_core::inputize_bits::<Eng::Scalar, CS>(cs, std::slice::from_ref(&disclose_bit), "disclose")?;
 
     // real_len as REAL_LEN_BITS bits — allocated directly (not derived
@@ -482,19 +476,11 @@ fn setup_prototype_ecdsa_witness() -> MdocEcdsaWitness {
   use crate::nonnative::util::nat_to_f;
   let parse = |s: &str| s.parse::<BigInt>().expect("valid decimal constant");
   MdocEcdsaWitness {
-    qx: nat_to_f(&parse(
-      "51206722373641483558790322998827362250192835690568432297698399643535245670501",
-    ))
-    .unwrap(),
-    qy: nat_to_f(&parse(
-      "107332639522564059748513735225121084070027309383763098932131650999881938986788",
-    ))
-    .unwrap(),
+    qx: nat_to_f(&parse("51206722373641483558790322998827362250192835690568432297698399643535245670501")).unwrap(),
+    qy: nat_to_f(&parse("107332639522564059748513735225121084070027309383763098932131650999881938986788")).unwrap(),
     r: parse("111142013211556514970479643709817588854004335857781381385833107319892960023198"),
     s: parse("76862587808802066344087557197401376424252937358072577297572652819487433674663"),
-    s_inv: parse(
-      "78445439557468585260457937215718822506055505801566399563185238095534357761252",
-    ),
+    s_inv: parse("78445439557468585260457937215718822506055505801566399563185238095534357761252"),
   }
 }
 
@@ -648,12 +634,7 @@ impl VegaMdocPrepState {
 /// pass.
 pub(crate) fn core_claim_digests(claims: &[ClaimWitness]) -> Result<Vec<[u8; 32]>, VegaMdocError> {
   let padded = pad_claims(claims)?;
-  Ok(
-    padded
-      .iter()
-      .map(|c| claim_digest_bytes(&c.bytes[..c.real_len]))
-      .collect(),
-  )
+  Ok(padded.iter().map(|c| claim_digest_bytes(&c.bytes[..c.real_len])).collect())
 }
 
 /// Fresh 32 bytes of OS randomness for a presentation's digest blinding —
@@ -742,8 +723,7 @@ pub fn prove(
     mso_body.clone(),
     *nonce,
   );
-  let (proof, next_prep) =
-    VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, false)?;
+  let (proof, next_prep) = VegaMcZkSNARK::<Engine_>::prove(pk, &step_circuits, &core_circuit, prep.0, false)?;
   Ok((proof, VegaMdocPrepState(next_prep)))
 }
 
@@ -751,10 +731,7 @@ pub fn prove(
 pub type VerifiedPublicValues = (Vec<Vec<<Engine_ as Engine>::Scalar>>, Vec<<Engine_ as Engine>::Scalar>);
 
 /// Verifies a proof against the fixed `MAX_CLAIMS_V1` step count.
-pub fn verify(
-  proof: &VegaMcZkSNARK<Engine_>,
-  vk: &VegaMcVerifierKey<Engine_>,
-) -> Result<VerifiedPublicValues, VegaMdocError> {
+pub fn verify(proof: &VegaMcZkSNARK<Engine_>, vk: &VegaMcVerifierKey<Engine_>) -> Result<VerifiedPublicValues, VegaMdocError> {
   Ok(proof.verify(vk, MAX_CLAIMS_V1)?)
 }
 
@@ -878,15 +855,7 @@ pub fn verify_and_check_binding(
   // per-claim digests (256 bits each) — must match
   // MdocCoreCircuit::public_values's exact order.
   const TS_BITS: usize = mso::TIMESTAMP_LEN * 8;
-  const EXPECTED_LEN: usize = 2
-    + BLIND_NONCE_BYTES * 8
-    + 256
-    + 256
-    + TS_BITS
-    + TS_BITS
-    + TS_BITS
-    + MAX_CLAIMS_V1 * 32
-    + MAX_CLAIMS_V1 * 256;
+  const EXPECTED_LEN: usize = 2 + BLIND_NONCE_BYTES * 8 + 256 + 256 + TS_BITS + TS_BITS + TS_BITS + MAX_CLAIMS_V1 * 32 + MAX_CLAIMS_V1 * 256;
   if core_public_values.len() != EXPECTED_LEN {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
   }
@@ -907,8 +876,7 @@ pub fn verify_and_check_binding(
     cursor += len;
     slice
   };
-  let nonce: [u8; BLIND_NONCE_BYTES] =
-    bits_to_bytes(take(BLIND_NONCE_BYTES * 8)).try_into().unwrap();
+  let nonce: [u8; BLIND_NONCE_BYTES] = bits_to_bytes(take(BLIND_NONCE_BYTES * 8)).try_into().unwrap();
   let device_x: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let device_y: [u8; 32] = bits_to_bytes(take(256)).try_into().unwrap();
   let signed_ts: [u8; mso::TIMESTAMP_LEN] = bits_to_bytes(take(TS_BITS)).try_into().unwrap();
@@ -918,8 +886,7 @@ pub fn verify_and_check_binding(
     let bytes = bits_to_bytes(take(32));
     u32::from_be_bytes(bytes.try_into().unwrap())
   });
-  let core_blinded_digests: [[u8; 32]; MAX_CLAIMS_V1] =
-    std::array::from_fn(|_| bits_to_bytes(take(256)).try_into().unwrap());
+  let core_blinded_digests: [[u8; 32]; MAX_CLAIMS_V1] = std::array::from_fn(|_| bits_to_bytes(take(256)).try_into().unwrap());
 
   if step_public_values.len() != MAX_CLAIMS_V1 {
     return Err(VegaMdocError::Circuit(SynthesisError::Unsatisfiable));
@@ -1042,7 +1009,7 @@ mod tests {
   use crate::nonnative::util::nat_to_f;
   use crate::p256_ecc::p256_order;
   use num_bigint::Sign;
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
 
   /// The disclosed-bytes argument `verify_and_check_binding` now takes:
   /// the real bytes for every slot the witness marks disclosed, `None`
@@ -1198,14 +1165,28 @@ mod tests {
     let mut values: Vec<<Engine_ as Engine>::Scalar> = blinded
       .iter()
       .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
-      .map(|b| if b { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO })
+      .map(|b| {
+        if b {
+          <Engine_ as Engine>::Scalar::ONE
+        } else {
+          <Engine_ as Engine>::Scalar::ZERO
+        }
+      })
       .collect();
-    values.push(if disclose { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO });
+    values.push(if disclose {
+      <Engine_ as Engine>::Scalar::ONE
+    } else {
+      <Engine_ as Engine>::Scalar::ZERO
+    });
     // real_len is masked to zero when undisclosed, and the plaintext is
     // no longer a public value at all -- mirrors public_values().
     let len_byte = if disclose { real_len as u8 } else { 0u8 };
     for i in (0..REAL_LEN_BITS).rev() {
-      values.push(if (len_byte >> i) & 1 == 1 { <Engine_ as Engine>::Scalar::ONE } else { <Engine_ as Engine>::Scalar::ZERO });
+      values.push(if (len_byte >> i) & 1 == 1 {
+        <Engine_ as Engine>::Scalar::ONE
+      } else {
+        <Engine_ as Engine>::Scalar::ZERO
+      });
     }
     values.extend(mdoc_core::native_u32_to_bits::<<Engine_ as Engine>::Scalar>(digest_id));
     values
@@ -1239,8 +1220,7 @@ mod tests {
 
     let call_nonce = fresh_nonce().expect("fresh_nonce");
     let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), &call_nonce).expect("prep_prove");
-    let (proof, _next_prep) =
-      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
+    let (proof, _next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
     let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     // Also independently extract the nonce the core circuit publicly
@@ -1248,8 +1228,9 @@ mod tests {
     // `call_nonce` -- not just trust it, so `expected_step_public_values`
     // below blinds with a value confirmed to be what the real proof
     // actually used.
-    let nonce: [u8; BLIND_NONCE_BYTES] =
-      bits_to_bytes(&core_public_values[2..2 + BLIND_NONCE_BYTES * 8]).try_into().expect("nonce bytes");
+    let nonce: [u8; BLIND_NONCE_BYTES] = bits_to_bytes(&core_public_values[2..2 + BLIND_NONCE_BYTES * 8])
+      .try_into()
+      .expect("nonce bytes");
     assert_eq!(nonce, call_nonce, "core circuit must expose exactly the nonce it was given");
 
     // Confirm the circuit is actually constraining the real values, not
@@ -1307,8 +1288,7 @@ mod tests {
 
     let call_nonce = fresh_nonce().expect("fresh_nonce");
     let prep = prep_prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), &call_nonce).expect("prep_prove");
-    let (proof, next_prep) =
-      prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
+    let (proof, next_prep) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), prep, &call_nonce).expect("prove");
     let (step_public_values, core_public_values) = verify(&proof, &keys.vk).expect("verify");
 
     let verified = verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&claims))
@@ -1328,7 +1308,10 @@ mod tests {
         if expected.disclose { expected.real_len } else { 0 },
         "an undisclosed claim's length must not leak"
       );
-      assert_eq!(verified_claim.digest_id, expected.digest_id, "digestID must round-trip through the proof, at every CBOR-uint width class");
+      assert_eq!(
+        verified_claim.digest_id, expected.digest_id,
+        "digestID must round-trip through the proof, at every CBOR-uint width class"
+      );
       if expected.disclose {
         assert_eq!(
           verified_claim.digest,
@@ -1342,8 +1325,7 @@ mod tests {
         );
       } else {
         assert_eq!(
-          verified_claim.digest,
-          [0u8; 32],
+          verified_claim.digest, [0u8; 32],
           "an undisclosed claim's real digest must never be exposed -- masked to all-zero, same as plaintext"
         );
         assert!(
@@ -1359,8 +1341,7 @@ mod tests {
     // MUST reuse `call_nonce`, not a fresh one -- see `fresh_nonce`'s doc
     // for why a nonce is tied to the lifetime of one prep chain, and why
     // that's a real, currently-latent limitation on real freshness.
-    let (proof2, _next_prep2) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), next_prep, &call_nonce)
-      .expect("second prove reusing prep state");
+    let (proof2, _next_prep2) = prove(&keys.pk, &claims, &ecdsa_witness, &test_mso_body(), next_prep, &call_nonce).expect("second prove reusing prep state");
     let (step_public_values2, core_public_values2) = verify(&proof2, &keys.vk).expect("verify 2");
     verify_and_check_binding(&step_public_values2, &core_public_values2, &disclosed_for(&claims))
       .expect("binding check must also pass for the reused-prep-state proof");
@@ -1420,13 +1401,9 @@ mod tests {
       nonce,
     );
 
-    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
-      .expect("prep_prove");
-    let (proof, _next_prep) =
-      VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false)
-        .expect("prove");
-    let (step_public_values, core_public_values) =
-      proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
+    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false).expect("prep_prove");
+    let (proof, _next_prep) = VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false).expect("prove");
+    let (step_public_values, core_public_values) = proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
 
     assert!(
       verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&real_claims)).is_err(),
@@ -1483,13 +1460,9 @@ mod tests {
       nonce,
     );
 
-    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false)
-      .expect("prep_prove");
-    let (proof, _next_prep) =
-      VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false)
-        .expect("prove");
-    let (step_public_values, core_public_values) =
-      proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
+    let prep = VegaMcZkSNARK::<Engine_>::prep_prove(&keys.pk, &step_circuits, &core_circuit, false).expect("prep_prove");
+    let (proof, _next_prep) = VegaMcZkSNARK::<Engine_>::prove(&keys.pk, &step_circuits, &core_circuit, prep, false).expect("prove");
+    let (step_public_values, core_public_values) = proof.verify(&keys.vk, MAX_CLAIMS_V1).expect("verify");
 
     assert!(
       verify_and_check_binding(&step_public_values, &core_public_values, &disclosed_for(&claims)).is_err(),

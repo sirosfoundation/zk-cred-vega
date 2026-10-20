@@ -97,7 +97,24 @@ mod tests {
   use super::*;
 
   fn boundary_values() -> Vec<u32> {
-    vec![0, 1, 22, 23, 24, 25, 254, 255, 256, 257, 65534, 65535, 65536, 65537, MAX_DIGEST_ID - 1, MAX_DIGEST_ID]
+    vec![
+      0,
+      1,
+      22,
+      23,
+      24,
+      25,
+      254,
+      255,
+      256,
+      257,
+      65534,
+      65535,
+      65536,
+      65537,
+      MAX_DIGEST_ID - 1,
+      MAX_DIGEST_ID,
+    ]
   }
 
   #[test]

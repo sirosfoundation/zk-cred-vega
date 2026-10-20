@@ -47,9 +47,9 @@
 //!
 //! **Unreviewed.** See the crate README.
 
-use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::{Field, PrimeFieldBits};
-use vega_prover::traits::{circuit::VegaCircuit, Engine};
+use vega_prover::traits::{Engine, circuit::VegaCircuit};
 
 use crate::mdoc_age::{self, Hasher, MdocAgeWitness};
 use crate::sha256_mc::{self, HashLayout};
@@ -146,10 +146,7 @@ where
     Ok(vec![E::Scalar::from(self.step as u64)])
   }
 
-  fn shared<CS: ConstraintSystem<E::Scalar>>(
-    &self,
-    cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+  fn shared<CS: ConstraintSystem<E::Scalar>>(&self, cs: &mut CS) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     self.hash.check()?;
     sha256_mc::alloc_shared(cs, &self.hash.blocks, &self.hash.digests)
   }
@@ -211,10 +208,7 @@ where
     .public_values()
   }
 
-  fn shared<CS: ConstraintSystem<E::Scalar>>(
-    &self,
-    cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+  fn shared<CS: ConstraintSystem<E::Scalar>>(&self, cs: &mut CS) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     // Byte-for-byte the same allocation as the step circuit's.
     self.hash.check()?;
     sha256_mc::alloc_shared(cs, &self.hash.blocks, &self.hash.digests)
@@ -230,8 +224,16 @@ where
       cs,
       &self.witness,
       &self.ecdsa,
-      &Hasher::Folded { shared, layout: &l, message: SIG_MESSAGE },
-      &Hasher::Folded { shared, layout: &l, message: ITEM_MESSAGE },
+      &Hasher::Folded {
+        shared,
+        layout: &l,
+        message: SIG_MESSAGE,
+      },
+      &Hasher::Folded {
+        shared,
+        layout: &l,
+        message: ITEM_MESSAGE,
+      },
     )?;
     // Same packer as the single-circuit form, deliberately: the two
     // halves of this layout — the order of the values and how many of
@@ -310,7 +312,11 @@ pub fn build(
 ) -> Result<(Vec<StepCircuit<crate::Engine_>>, CoreCircuit<crate::Engine_>), SynthesisError> {
   let hash = HashWitness::from_witness(witness)?;
   let steps = (0..layout().total_blocks())
-    .map(|step| StepCircuit { hash: hash.clone(), step, _marker: std::marker::PhantomData })
+    .map(|step| StepCircuit {
+      hash: hash.clone(),
+      step,
+      _marker: std::marker::PhantomData,
+    })
     .collect();
   let core = CoreCircuit {
     hash,
@@ -335,10 +341,7 @@ pub struct AgeKeys {
 }
 
 /// Runs setup for the folded shape.
-pub fn setup(
-  step_proto: &StepCircuit<crate::Engine_>,
-  core_proto: &CoreCircuit<crate::Engine_>,
-) -> Result<AgeKeys, crate::VegaMdocError> {
+pub fn setup(step_proto: &StepCircuit<crate::Engine_>, core_proto: &CoreCircuit<crate::Engine_>) -> Result<AgeKeys, crate::VegaMdocError> {
   let (pk, vk) = VegaMcZkSNARK::<crate::Engine_>::setup(step_proto, core_proto, layout().total_blocks())?;
   Ok(AgeKeys { pk, vk })
 }

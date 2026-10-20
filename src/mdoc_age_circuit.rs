@@ -72,9 +72,9 @@
 //!
 //! **Unreviewed.** See the crate README.
 
-use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::{Field, PrimeField, PrimeFieldBits};
-use vega_prover::traits::{circuit::VegaCircuit, Engine};
+use vega_prover::traits::{Engine, circuit::VegaCircuit};
 
 use crate::mdoc_age::{self, MdocAgeWitness, NAMESPACE_OUT_PACKS};
 
@@ -96,8 +96,7 @@ pub const PUBLIC_FROM_PRECOMMITTED: usize = 2 + DOC_TYPE_OUT_PACKS + NAMESPACE_O
 /// Everything `precommitted` returns: the public prefix above, then the
 /// device key, the ten birthdate characters and the validity window,
 /// which stay private.
-pub const PRECOMMITTED_LEN: usize =
-  PUBLIC_FROM_PRECOMMITTED + 2 + 10 + 2 * zk_cred_vega_timestamp_len();
+pub const PRECOMMITTED_LEN: usize = PUBLIC_FROM_PRECOMMITTED + 2 + 10 + 2 * zk_cred_vega_timestamp_len();
 
 /// Flattens a [`mdoc_age::CredentialBinding`] into the vector
 /// `precommitted` returns, public prefix first.
@@ -109,9 +108,7 @@ pub const PRECOMMITTED_LEN: usize =
 /// out-of-range panic inside the prover rather than as a verification
 /// failure. The order here and [`PUBLIC_FROM_PRECOMMITTED`] are one
 /// fact, so they live in one place.
-pub fn pack_precommitted<Scalar: PrimeField>(
-  cred: mdoc_age::CredentialBinding<Scalar>,
-) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+pub fn pack_precommitted<Scalar: PrimeField>(cred: mdoc_age::CredentialBinding<Scalar>) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
   let mut out = vec![cred.issuer_qx, cred.issuer_qy];
   out.extend(cred.doc_type);
   out.extend(cred.namespace);
@@ -205,10 +202,7 @@ where
     Ok(v)
   }
 
-  fn shared<CS: ConstraintSystem<E::Scalar>>(
-    &self,
-    _cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+  fn shared<CS: ConstraintSystem<E::Scalar>>(&self, _cs: &mut CS) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     Ok(vec![])
   }
 
@@ -282,7 +276,11 @@ where
       p.inputize(cs.namespace(|| format!("inputize device auth {i}")))?;
     }
     let old = AllocatedNum::alloc(cs.namespace(|| "old_enough"), || {
-      sess.old_enough.get_value().map(|b| if b { E::Scalar::ONE } else { E::Scalar::ZERO }).ok_or(SynthesisError::AssignmentMissing)
+      sess
+        .old_enough
+        .get_value()
+        .map(|b| if b { E::Scalar::ONE } else { E::Scalar::ZERO })
+        .ok_or(SynthesisError::AssignmentMissing)
     })?;
     cs.enforce(
       || "old_enough is the predicate's own result",
@@ -348,10 +346,7 @@ pub fn setup(prototype: MdocAgeCircuit<crate::Engine_>) -> Result<AgeKeys, crate
 pub struct AgeProof(VegaZkSNARK<crate::Engine_>);
 
 /// Produces a proof for one presentation.
-pub fn prove(
-  pk: &VegaProverKey<crate::Engine_>,
-  circuit: MdocAgeCircuit<crate::Engine_>,
-) -> Result<AgeProof, crate::VegaMdocError> {
+pub fn prove(pk: &VegaProverKey<crate::Engine_>, circuit: MdocAgeCircuit<crate::Engine_>) -> Result<AgeProof, crate::VegaMdocError> {
   let prep = VegaZkSNARK::<crate::Engine_>::prep_prove(pk, circuit.clone(), false)?;
   let (proof, _next) = VegaZkSNARK::<crate::Engine_>::prove(pk, circuit, prep, false)?;
   Ok(AgeProof(proof))
@@ -427,13 +422,7 @@ pub enum IssuerPolicy {
 impl ExpectedContext {
   /// The common case: one document type, one namespace, issuer trust
   /// handled by the caller.
-  pub fn new(
-    device_auth_digest: [u8; 32],
-    cutoff: [u8; 10],
-    now: [u8; crate::offset_bind::TIMESTAMP_LEN],
-    doc_type: &str,
-    namespace: &str,
-  ) -> Self {
+  pub fn new(device_auth_digest: [u8; 32], cutoff: [u8; 10], now: [u8; crate::offset_bind::TIMESTAMP_LEN], doc_type: &str, namespace: &str) -> Self {
     Self {
       device_auth_digest,
       cutoff,
@@ -488,12 +477,7 @@ pub struct VerifiedAgeProof {
 ///   same credential.
 ///
 /// There is deliberately no accessor that hands back a raw predicate bit.
-pub fn verify_age(
-  proof: &AgeProof,
-  vk: &VegaVerifierKey<crate::Engine_>,
-  expected: &ExpectedContext,
-) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
-
+pub fn verify_age(proof: &AgeProof, vk: &VegaVerifierKey<crate::Engine_>, expected: &ExpectedContext) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
   let v = proof.0.verify(vk)?;
   check_public_values(&v, expected)
 }
@@ -502,10 +486,7 @@ pub fn verify_age(
 /// obligation. Shared by both arithmetizations — the single-circuit form
 /// and the folded one in [`crate::mdoc_age_mc`] accept the same
 /// statement, so they must not drift into checking it differently.
-pub fn check_public_values(
-  v: &[<crate::Engine_ as Engine>::Scalar],
-  expected: &ExpectedContext,
-) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
+pub fn check_public_values(v: &[<crate::Engine_ as Engine>::Scalar], expected: &ExpectedContext) -> Result<VerifiedAgeProof, crate::VegaMdocError> {
   type S = <crate::Engine_ as Engine>::Scalar;
   let reject = || crate::VegaMdocError::Circuit(SynthesisError::Unsatisfiable);
   if v.len() != PUBLIC_INPUT_LEN {
@@ -635,9 +616,7 @@ pub fn check_public_values(
   // like, and satisfies every other obligation here honestly.
   if let IssuerPolicy::Only(keys) = &expected.issuers {
     let matches = keys.iter().any(|(x, y)| {
-      let to_f = |b: &[u8; 32]| {
-        crate::nonnative::util::nat_to_f::<S>(&num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, b))
-      };
+      let to_f = |b: &[u8; 32]| crate::nonnative::util::nat_to_f::<S>(&num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, b));
       to_f(x) == Some(issuer_qx) && to_f(y) == Some(issuer_qy)
     });
     if !matches {
@@ -645,6 +624,10 @@ pub fn check_public_values(
     }
   }
 
-  Ok(VerifiedAgeProof { issuer_qx, issuer_qy, doc_type, namespace })
+  Ok(VerifiedAgeProof {
+    issuer_qx,
+    issuer_qy,
+    doc_type,
+    namespace,
+  })
 }
-

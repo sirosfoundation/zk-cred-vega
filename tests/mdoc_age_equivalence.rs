@@ -18,11 +18,11 @@
 use bellpepper_core::test_cs::TestConstraintSystem;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
+use zk_cred_vega::Engine_;
 use zk_cred_vega::mdoc_age::{self, DateEncoding, DeviceAuthWitness, Hasher, MdocAgeWitness};
 use zk_cred_vega::mdoc_age_mc::{self, HashWitness};
 use zk_cred_vega::offset_bind::Landmarks;
 use zk_cred_vega::sha256_mc;
-use zk_cred_vega::Engine_;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 const SESSION: &[u8; 32] = b"verifier-session-transcript-0001";
@@ -35,23 +35,30 @@ struct Loaded {
 }
 
 fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+  use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
   let b: [u8; 32] = hex::decode(key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&b.into()).unwrap();
   let sg: Signature = sk.sign_prehash(digest).unwrap();
   let n = zk_cred_vega::p256_ecc::p256_order();
   let s = BigInt::from_bytes_be(Sign::Plus, &sg.s().to_bytes());
-  DeviceAuthWitness { r: BigInt::from_bytes_be(Sign::Plus, &sg.r().to_bytes()), s: s.clone(), s_inv: s.modpow(&(n.clone() - BigInt::from(2)), &n) }
+  DeviceAuthWitness {
+    r: BigInt::from_bytes_be(Sign::Plus, &sg.r().to_bytes()),
+    s: s.clone(),
+    s_inv: s.modpow(&(n.clone() - BigInt::from(2)), &n),
+  }
 }
 
 fn load(name: &str) -> Loaded {
-  let json: serde_json::Value =
-    serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
+  let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
   let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
   let lm = &json["landmarks"];
   let ns = json["namespace"].as_str().unwrap();
-  let t = json["claims"].as_array().unwrap().iter()
-    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns).unwrap();
+  let t = json["claims"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns)
+    .unwrap();
   let w = &json["ecdsa_witness"];
   let hx = |k: &str| hex::decode(w[k].as_str().unwrap()).unwrap();
   let z: [u8; 32] = Sha256::digest(&sig).into();
@@ -72,14 +79,19 @@ fn load(name: &str) -> Loaded {
       item_bytes: hex::decode(t["issuer_signed_item_bytes_hex"].as_str().unwrap()).unwrap(),
       digest_offset: t["digest_offset"].as_u64().unwrap() as usize,
       element_value_key_offset: json["element_value_key_offset"].as_u64().unwrap() as usize,
-      date_encoding: match json["date_encoding"].as_str().unwrap() { "PhotoIdMap" => DateEncoding::PhotoIdMap, _ => DateEncoding::Bare },
+      date_encoding: match json["date_encoding"].as_str().unwrap() {
+        "PhotoIdMap" => DateEncoding::PhotoIdMap,
+        _ => DateEncoding::Bare,
+      },
       device_auth: sign_device_auth(json["device_private_key_hex"].as_str().unwrap(), SESSION),
     },
     e: zk_cred_vega::ecdsa::EcdsaP256Witness::<Scalar> {
       qx: zk_cred_vega::nonnative::util::nat_to_f(&BigInt::from_bytes_be(Sign::Plus, &hx("qx_hex"))).unwrap(),
       qy: zk_cred_vega::nonnative::util::nat_to_f(&BigInt::from_bytes_be(Sign::Plus, &hx("qy_hex"))).unwrap(),
-      r: BigInt::from_bytes_be(Sign::Plus, &hx("r_hex")), s: BigInt::from_bytes_be(Sign::Plus, &hx("s_hex")),
-      s_inv: BigInt::from_bytes_be(Sign::Plus, &hx("s_inv_hex")), z: BigInt::from_bytes_be(Sign::Plus, &z),
+      r: BigInt::from_bytes_be(Sign::Plus, &hx("r_hex")),
+      s: BigInt::from_bytes_be(Sign::Plus, &hx("s_hex")),
+      s_inv: BigInt::from_bytes_be(Sign::Plus, &hx("s_inv_hex")),
+      z: BigInt::from_bytes_be(Sign::Plus, &z),
     },
   }
 }
@@ -102,16 +114,33 @@ fn mc_accepts(l: &Loaded, w: &MdocAgeWitness, hash: &HashWitness, now: &[u8; 20]
     Err(_) => return false,
   };
   let cred = match mdoc_age::synthesize_credential(
-    &mut cs, w, &l.e,
-    &Hasher::Folded { shared: &shared, layout: &layout, message: 0 },
-    &Hasher::Folded { shared: &shared, layout: &layout, message: 1 },
+    &mut cs,
+    w,
+    &l.e,
+    &Hasher::Folded {
+      shared: &shared,
+      layout: &layout,
+      message: 0,
+    },
+    &Hasher::Folded {
+      shared: &shared,
+      layout: &layout,
+      message: 1,
+    },
   ) {
     Ok(c) => c,
     Err(_) => return false,
   };
   if mdoc_age::synthesize_session(
-    &mut cs, &cred.device_key, &cred.birth_date, &cred.valid_from, &cred.valid_until,
-    &w.device_auth, CUTOFF, now, session,
+    &mut cs,
+    &cred.device_key,
+    &cred.birth_date,
+    &cred.valid_from,
+    &cred.valid_until,
+    &w.device_auth,
+    CUTOFF,
+    now,
+    session,
   )
   .is_err()
   {
@@ -138,20 +167,48 @@ type Corruption = (&'static str, Box<dyn Fn(&mut MdocAgeWitness)>, bool);
 fn the_two_arithmetizations_agree_on_every_witness() {
   let cases: Vec<Corruption> = vec![
     ("honest", Box::new(|_: &mut MdocAgeWitness| {}), true),
-    ("wrong device key", Box::new(|w: &mut MdocAgeWitness| {
-      w.device_auth = sign_device_auth(&"11".repeat(32), SESSION);
-    }), false),
-    ("digest offset outside the region", Box::new(|w: &mut MdocAgeWitness| {
-      w.digest_offset = w.landmarks.device_key_info + 4;
-    }), false),
-    ("wrong salt offset", Box::new(|w: &mut MdocAgeWitness| {
-      w.element_value_key_offset = if w.element_value_key_offset == 39 { 56 } else { 39 };
-    }), false),
-    ("wrong namespace", Box::new(|w: &mut MdocAgeWitness| {
-      w.namespace = "org.iso.23220.1".to_string();
-    }), false),
-    ("wrong entry count", Box::new(|w: &mut MdocAgeWitness| { w.num_entries -= 1; }), false),
-    ("truncated item", Box::new(|w: &mut MdocAgeWitness| { w.item_bytes.truncate(64); }), false),
+    (
+      "wrong device key",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.device_auth = sign_device_auth(&"11".repeat(32), SESSION);
+      }),
+      false,
+    ),
+    (
+      "digest offset outside the region",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.digest_offset = w.landmarks.device_key_info + 4;
+      }),
+      false,
+    ),
+    (
+      "wrong salt offset",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.element_value_key_offset = if w.element_value_key_offset == 39 { 56 } else { 39 };
+      }),
+      false,
+    ),
+    (
+      "wrong namespace",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.namespace = "org.iso.23220.1".to_string();
+      }),
+      false,
+    ),
+    (
+      "wrong entry count",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.num_entries -= 1;
+      }),
+      false,
+    ),
+    (
+      "truncated item",
+      Box::new(|w: &mut MdocAgeWitness| {
+        w.item_bytes.truncate(64);
+      }),
+      false,
+    ),
   ];
 
   for (name, mutate, expected) in cases {
@@ -306,8 +363,8 @@ fn mc01_unproven_blocks_leave_the_signed_digest_free() {
 #[test]
 fn both_deployment_circuits_publish_what_they_declare() {
   use vega_prover::traits::circuit::VegaCircuit;
-  use zk_cred_vega::mdoc_age_circuit::{MdocAgeCircuit, PRECOMMITTED_LEN, PUBLIC_INPUT_LEN};
   use zk_cred_vega::Engine_;
+  use zk_cred_vega::mdoc_age_circuit::{MdocAgeCircuit, PRECOMMITTED_LEN, PUBLIC_INPUT_LEN};
 
   for name in ["mdl_iso18013", "pid_arf18", "photo_id_23220"] {
     let l = load(name);
@@ -332,8 +389,7 @@ fn both_deployment_circuits_publish_what_they_declare() {
     assert!(cs.verify(&declared), "{name}: the single circuit published something it did not declare");
 
     // ---- folded core and one step ----
-    let (steps, core) =
-      mdoc_age_mc::build(&l.w, &l.e, *CUTOFF, *NOW, *SESSION).expect("folded build");
+    let (steps, core) = mdoc_age_mc::build(&l.w, &l.e, *CUTOFF, *NOW, *SESSION).expect("folded build");
     let core_declared = core.public_values().expect("core public values");
     assert_eq!(core_declared, declared, "{name}: the two arithmetizations must publish the same statement");
 

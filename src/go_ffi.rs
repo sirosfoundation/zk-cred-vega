@@ -441,9 +441,7 @@ pub unsafe extern "C" fn zk_cred_vega_verify(
       return Err(anyhow::anyhow!("disclosed must not be null"));
     }
     if disclosed_len != MAX_CLAIMS_V1 {
-      return Err(anyhow::anyhow!(
-        "disclosed_len must be exactly {MAX_CLAIMS_V1}, got {disclosed_len}"
-      ));
+      return Err(anyhow::anyhow!("disclosed_len must be exactly {MAX_CLAIMS_V1}, got {disclosed_len}"));
     }
     // SAFETY: forwarded from this function's safety contract -- the caller
     // guarantees `disclosed` points to `disclosed_len` initialised entries.
@@ -576,8 +574,7 @@ mod tests {
 
     let nonce = crate::fresh_nonce().expect("fresh_nonce");
     let prep = crate::prep_prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, &nonce).expect("prep_prove");
-    let (proof, _next_prep) =
-      crate::prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
+    let (proof, _next_prep) = crate::prove(&keys.pk, &claims_witness, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
     let proof_bytes = bincode::serialize(&proof).expect("serialize proof");
 
     GoldenFixture {
@@ -695,7 +692,15 @@ mod tests {
       let mut result = std::mem::MaybeUninit::<CVerifyResult>::uninit();
       let mut error_out: *mut c_char = std::ptr::null_mut();
       let disclosed = disclosed_inputs(b"unused: the proof is garbage");
-      let status = zk_cred_vega_verify(vk_handle, garbage_proof.as_ptr(), garbage_proof.len(), disclosed.as_ptr(), disclosed.len(), result.as_mut_ptr(), &mut error_out);
+      let status = zk_cred_vega_verify(
+        vk_handle,
+        garbage_proof.as_ptr(),
+        garbage_proof.len(),
+        disclosed.as_ptr(),
+        disclosed.len(),
+        result.as_mut_ptr(),
+        &mut error_out,
+      );
       assert_ne!(status, 0, "garbage proof must not verify");
       assert!(!error_out.is_null(), "expected an error message");
       let message = CStr::from_ptr(error_out).to_str().unwrap();

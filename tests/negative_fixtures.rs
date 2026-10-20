@@ -28,7 +28,7 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zk_cred_vega::mso::MsoBodyWitness;
-use zk_cred_vega::{ClaimWitness, MdocEcdsaWitness, MAX_CLAIMS_V1};
+use zk_cred_vega::{ClaimWitness, MAX_CLAIMS_V1, MdocEcdsaWitness};
 
 /// Disclosed bytes now travel beside the proof (see
 /// `verify_and_check_binding`), so callers hand them over explicitly.
@@ -139,9 +139,12 @@ fn fixture_ecdsa_witness(fixture: &Fixture) -> MdocEcdsaWitness {
 /// production `pad_claims`, which only matters for fewer-than-max claim
 /// sets).
 fn fixture_z(fixture: &Fixture) -> [u8; 32] {
-  assert_eq!(fixture.claims.len(), MAX_CLAIMS_V1, "fixture must carry exactly MAX_CLAIMS_V1 claims for this helper");
-  let digest_ids: [u32; MAX_CLAIMS_V1] =
-    std::array::from_fn(|i| u32::try_from(fixture.claims[i].digest_id).expect("fits u32"));
+  assert_eq!(
+    fixture.claims.len(),
+    MAX_CLAIMS_V1,
+    "fixture must carry exactly MAX_CLAIMS_V1 claims for this helper"
+  );
+  let digest_ids: [u32; MAX_CLAIMS_V1] = std::array::from_fn(|i| u32::try_from(fixture.claims[i].digest_id).expect("fits u32"));
   let claim_digests: Vec<[u8; 32]> = fixture
     .claims
     .iter()
@@ -154,9 +157,15 @@ fn fixture_z(fixture: &Fixture) -> [u8; 32] {
 /// Signs `z` with a fresh, random P-256 key and returns the `(qx, qy)` /
 /// `(r, s, s_inv)` halves separately, so callers can mix-and-match them
 /// across two different keys.
-fn sign_z(z: &[u8; 32], key_byte: u8) -> ((num_bigint::BigInt, num_bigint::BigInt), (num_bigint::BigInt, num_bigint::BigInt, num_bigint::BigInt)) {
+fn sign_z(
+  z: &[u8; 32],
+  key_byte: u8,
+) -> (
+  (num_bigint::BigInt, num_bigint::BigInt),
+  (num_bigint::BigInt, num_bigint::BigInt, num_bigint::BigInt),
+) {
   use num_bigint::{BigInt, Sign};
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
   use zk_cred_vega::p256_ecc::p256_order;
 
   let signing_key = SigningKey::from_bytes(&[key_byte; 32].into()).expect("valid scalar");
@@ -295,19 +304,14 @@ fn two_presentations_of_the_same_undisclosed_claim_are_unlinkable() {
 
   // birth_date (index 2 in the fixture) is undisclosed -- see the
   // fixture's own JSON (`disclose: false`).
-  let undisclosed_index = fixture
-    .claims
-    .iter()
-    .position(|c| !c.disclose)
-    .expect("fixture has an undisclosed claim");
+  let undisclosed_index = fixture.claims.iter().position(|c| !c.disclose).expect("fixture has an undisclosed claim");
   assert!(!claims[undisclosed_index].disclose);
 
   let wire_value_for = || -> Vec<<zk_cred_vega::Engine_ as vega_prover::traits::Engine>::Scalar> {
     let keys = zk_cred_vega::setup().expect("setup");
     let nonce = zk_cred_vega::fresh_nonce().expect("fresh_nonce");
     let prep = zk_cred_vega::prep_prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, &nonce).expect("prep_prove");
-    let (proof, _next_prep) =
-      zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
+    let (proof, _next_prep) = zk_cred_vega::prove(&keys.pk, &claims, &ecdsa_witness, &mso_body, prep, &nonce).expect("prove");
     let (step_public_values, _core_public_values) = zk_cred_vega::verify(&proof, &keys.vk).expect("verify");
     step_public_values[undisclosed_index][0..256].to_vec()
   };

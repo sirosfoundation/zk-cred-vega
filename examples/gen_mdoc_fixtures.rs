@@ -52,7 +52,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-
 // ---- Minimal canonical CBOR, only the shapes a PID MSO needs --------
 
 fn head(major: u8, len: u64) -> Vec<u8> {
@@ -127,7 +126,6 @@ fn canonical_sort(entries: &mut [(Vec<u8>, Vec<u8>)]) {
   entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
 }
 
-
 // ---- Document specifications ----------------------------------------
 
 /// One namespace's worth of elements.
@@ -190,16 +188,19 @@ fn mdl_elements(portrait: &[u8], seed: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
     ("document_number", tstr("SE-DL-100")),
     ("portrait", bstr(portrait)),
     ("un_distinguishing_sign", tstr("S")),
-    ("driving_privileges", array(&[{
-      let mut m = head(5, 3);
-      m.extend(tstr("vehicle_category_code"));
-      m.extend(tstr("B"));
-      m.extend(tstr("issue_date"));
-      m.extend(full_date("2016-05-01"));
-      m.extend(tstr("expiry_date"));
-      m.extend(full_date("2031-04-28"));
-      m
-    }])),
+    (
+      "driving_privileges",
+      array(&[{
+        let mut m = head(5, 3);
+        m.extend(tstr("vehicle_category_code"));
+        m.extend(tstr("B"));
+        m.extend(tstr("issue_date"));
+        m.extend(full_date("2016-05-01"));
+        m.extend(tstr("expiry_date"));
+        m.extend(full_date("2031-04-28"));
+        m
+      }]),
+    ),
     ("administrative_number", tstr("adm-100")),
     ("sex", uint(2)),
     ("height", uint(170)),
@@ -452,7 +453,7 @@ fn issuer_signed_item(digest_id: u32, random: &[u8], element_id: &str, value: &[
 }
 
 fn gen_doc(spec: DocSpec) {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
   let mut rng = rand::thread_rng();
 
   // Build every item, per namespace, with a digestID counter per
@@ -483,7 +484,12 @@ fn gen_doc(spec: DocSpec) {
       let bytes = issuer_signed_item(digest_id, &salt, element_id, value);
       let digest: [u8; 32] = Sha256::digest(&bytes).into();
       entries.push((uint(digest_id as u64), bstr(&digest)));
-      items.push(BuiltItem { digest_id, digest, element_id, bytes });
+      items.push(BuiltItem {
+        digest_id,
+        digest,
+        element_id,
+        bytes,
+      });
     }
     canonical_sort(&mut entries);
     ns_regions.push(BuiltNs { name: ns.name, entries, items });
@@ -507,7 +513,11 @@ fn gen_doc(spec: DocSpec) {
   let forged = if spec.plant_forged_digest_in_device_key {
     let mut salt = vec![0u8; spec.salt_bytes];
     rng.fill_bytes(&mut salt);
-    let value = if spec.photo_id_date_map { birth_date_map("2015-01-01") } else { full_date("2015-01-01") };
+    let value = if spec.photo_id_date_map {
+      birth_date_map("2015-01-01")
+    } else {
+      full_date("2015-01-01")
+    };
     let bytes = issuer_signed_item(2, &salt, "birth_date", &value);
     device_x = Sha256::digest(&bytes).into();
     Some(bytes)
@@ -594,7 +604,13 @@ fn gen_doc(spec: DocSpec) {
   sig.extend(bstr(&payload));
 
   for BuiltNs { name, items, .. } in &ns_regions {
-    for BuiltItem { digest_id, digest, element_id, bytes } in items {
+    for BuiltItem {
+      digest_id,
+      digest,
+      element_id,
+      bytes,
+    } in items
+    {
       let off = mso_base + digest_offsets[&(*name, *digest_id)];
       assert_eq!(&sig[off..off + 32], digest.as_slice(), "{name}/{element_id}: digest offset");
       assert_eq!(&sig[off - 2..off], &[0x58, 0x20], "digest must follow a bstr(32) header");
@@ -612,7 +628,11 @@ fn gen_doc(spec: DocSpec) {
   let device_key_x_offset = mso_base + device_key_x_offset_in_mso;
   assert_eq!(&sig[device_key_x_offset..device_key_x_offset + 32], &device_x, "deviceKey x landmark");
   let device_key_info_offset = mso_base + device_key_info_offset_in_mso;
-  assert_eq!(&sig[device_key_info_offset..device_key_info_offset + 14], b"\x6ddeviceKeyInfo", "deviceKeyInfo anchor");
+  assert_eq!(
+    &sig[device_key_info_offset..device_key_info_offset + 14],
+    b"\x6ddeviceKeyInfo",
+    "deviceKeyInfo anchor"
+  );
 
   // The circuit's own offset arithmetic must agree with these bytes.
   let target = all_claims
@@ -715,7 +735,10 @@ fn main() {
   gen_doc(DocSpec {
     name: "mdl_iso18013",
     doc_type: "org.iso.18013.5.1.mDL",
-    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    namespaces: vec![Ns {
+      name: "org.iso.18013.5.1",
+      elements: mdl_elements(&portrait, &seed),
+    }],
     target_ns: "org.iso.18013.5.1",
     salt_bytes: 16,
     photo_id_date_map: false,
@@ -723,14 +746,16 @@ fn main() {
     valid_from: "2026-10-01T00:00:00Z",
     valid_until: "2031-10-01T00:00:00Z",
     description: "ISO 18013-5 mDL, 35 elements, 16-byte salts (what our own MSOBuilder emits). \
-                  Its namespace is neither equal to nor the same length as its docType."
-      ,
+                  Its namespace is neither equal to nor the same length as its docType.",
   });
 
   gen_doc(DocSpec {
     name: "pid_arf18",
     doc_type: "eu.europa.ec.eudi.pid.1",
-    namespaces: vec![Ns { name: "eu.europa.ec.eudi.pid.1", elements: pid_elements(&portrait, &seed) }],
+    namespaces: vec![Ns {
+      name: "eu.europa.ec.eudi.pid.1",
+      elements: pid_elements(&portrait, &seed),
+    }],
     target_ns: "eu.europa.ec.eudi.pid.1",
     salt_bytes: 32,
     photo_id_date_map: false,
@@ -775,7 +800,10 @@ fn main() {
   gen_doc(DocSpec {
     name: "mdl_planted_device_key",
     doc_type: "org.iso.18013.5.1.mDL",
-    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    namespaces: vec![Ns {
+      name: "org.iso.18013.5.1",
+      elements: mdl_elements(&portrait, &seed),
+    }],
     target_ns: "org.iso.18013.5.1",
     salt_bytes: 16,
     photo_id_date_map: false,
@@ -791,7 +819,10 @@ fn main() {
   gen_doc(DocSpec {
     name: "mdl_expired",
     doc_type: "org.iso.18013.5.1.mDL",
-    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    namespaces: vec![Ns {
+      name: "org.iso.18013.5.1",
+      elements: mdl_elements(&portrait, &seed),
+    }],
     target_ns: "org.iso.18013.5.1",
     salt_bytes: 16,
     photo_id_date_map: false,
@@ -805,7 +836,10 @@ fn main() {
   gen_doc(DocSpec {
     name: "mdl_not_yet_valid",
     doc_type: "org.iso.18013.5.1.mDL",
-    namespaces: vec![Ns { name: "org.iso.18013.5.1", elements: mdl_elements(&portrait, &seed) }],
+    namespaces: vec![Ns {
+      name: "org.iso.18013.5.1",
+      elements: mdl_elements(&portrait, &seed),
+    }],
     target_ns: "org.iso.18013.5.1",
     salt_bytes: 16,
     photo_id_date_map: false,

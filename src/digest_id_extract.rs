@@ -41,8 +41,8 @@
 
 use crate::cbor_uint::{self, MAX_CBOR_UINT_BYTES};
 use bellpepper_core::{
-  boolean::{AllocatedBit, Boolean},
   ConstraintSystem, LinearCombination, SynthesisError,
+  boolean::{AllocatedBit, Boolean},
 };
 use ff::PrimeField;
 
@@ -81,12 +81,7 @@ pub struct ExtractedDigestId {
 /// `digest_id` is a native witness value (already checked
 /// `<= cbor_uint::MAX_DIGEST_ID` by the caller — see `ClaimWitness`'s doc).
 #[allow(clippy::needless_range_loop)] // indices double as the numeric `c`/`byte_idx`/`bit_idx` the formulas reason about
-pub fn extract_digest_id<Scalar, CS>(
-  mut cs: CS,
-  item_bits: &[Boolean],
-  offset_bytes: usize,
-  digest_id: u32,
-) -> Result<ExtractedDigestId, SynthesisError>
+pub fn extract_digest_id<Scalar, CS>(mut cs: CS, item_bits: &[Boolean], offset_bytes: usize, digest_id: u32) -> Result<ExtractedDigestId, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -115,12 +110,7 @@ where
     for b in &class_selector {
       lc = lc + &b.lc(CS::one(), Scalar::ONE);
     }
-    cs.enforce(
-      || "digest_id class_selector is one-hot",
-      |_| lc,
-      |lc| lc + CS::one(),
-      |lc| lc + CS::one(),
-    );
+    cs.enforce(|| "digest_id class_selector is one-hot", |_| lc, |lc| lc + CS::one(), |lc| lc + CS::one());
   }
 
   // 2. `active(byte_idx)` — is this byte of the 5-byte window part of the
@@ -353,13 +343,12 @@ mod tests {
     bits
       .chunks(8)
       .map(|byte_bits| {
-        byte_bits.iter().enumerate().fold(0u8, |byte, (i, bit)| {
-          if bit.get_value().expect("has a value") {
-            byte | (1 << (7 - i))
-          } else {
-            byte
-          }
-        })
+        byte_bits.iter().enumerate().fold(
+          0u8,
+          |byte, (i, bit)| {
+            if bit.get_value().expect("has a value") { byte | (1 << (7 - i)) } else { byte }
+          },
+        )
       })
       .collect()
   }
@@ -387,13 +376,8 @@ mod tests {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let item_bits = alloc_item_bits(&mut cs, &item);
 
-      let extracted = extract_digest_id::<Scalar, _>(
-        cs.namespace(|| format!("digest_id={digest_id}")),
-        &item_bits,
-        DIGEST_ID_OFFSET_BYTES,
-        digest_id,
-      )
-      .expect("synthesis");
+      let extracted =
+        extract_digest_id::<Scalar, _>(cs.namespace(|| format!("digest_id={digest_id}")), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id).expect("synthesis");
 
       if let Some(reason) = cs.which_is_unsatisfied() {
         panic!("digest_id={digest_id}: constraint system unsatisfied at: {reason}");
@@ -421,7 +405,10 @@ mod tests {
       "d8185866a46672616e646f6d582050a281e6edc59abac15e7ea7e455fed1045a513d47f091c5932f632fdf6d0b41\
        686469676573744944006c656c656d656e7456616c7565664d697272656e71656c656d656e744964656e7469666965726b66616d696c795f6e616d65",
     );
-    assert_eq!(item[DIGEST_ID_OFFSET_BYTES], 0x00, "byte at DIGEST_ID_OFFSET_BYTES must be the real digestID=0 value");
+    assert_eq!(
+      item[DIGEST_ID_OFFSET_BYTES], 0x00,
+      "byte at DIGEST_ID_OFFSET_BYTES must be the real digestID=0 value"
+    );
     // alloc_item_bits requires exactly ITEM_BITS_LEN/8 bytes; the real
     // item (106 bytes) is longer, but only the DIGEST_ID_OFFSET_BYTES
     // window matters here, so truncate/pad to the fixed test width.
@@ -429,8 +416,7 @@ mod tests {
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let item_bits = alloc_item_bits(&mut cs, &item);
-    let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "extract"), &item_bits, DIGEST_ID_OFFSET_BYTES, 0)
-      .expect("synthesis");
+    let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "extract"), &item_bits, DIGEST_ID_OFFSET_BYTES, 0).expect("synthesis");
     assert!(cs.is_satisfied());
     assert_eq!(bits_to_bytes(&extracted.value_bits), 0u32.to_be_bytes().to_vec());
   }
@@ -452,9 +438,7 @@ mod tests {
     for bytes in [&base, &changed] {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let item_bits = alloc_item_bits(&mut cs, bytes);
-      let extracted =
-        extract_digest_id::<Scalar, _>(cs.namespace(|| "extract"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
-          .expect("synthesis");
+      let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "extract"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id).expect("synthesis");
       assert!(cs.is_satisfied());
       assert_eq!(bits_to_bytes(&extracted.value_bits), digest_id.to_be_bytes().to_vec());
     }
@@ -471,13 +455,8 @@ mod tests {
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let item_bits = alloc_item_bits(&mut cs, &item);
-    let _ = extract_digest_id::<Scalar, _>(
-      cs.namespace(|| "mismatched"),
-      &item_bits,
-      DIGEST_ID_OFFSET_BYTES,
-      claimed_digest_id,
-    )
-    .expect("synthesis itself succeeds -- it's the constraints that must fail");
+    let _ = extract_digest_id::<Scalar, _>(cs.namespace(|| "mismatched"), &item_bits, DIGEST_ID_OFFSET_BYTES, claimed_digest_id)
+      .expect("synthesis itself succeeds -- it's the constraints that must fail");
 
     assert!(!cs.is_satisfied(), "a witness claiming the wrong digest_id must not satisfy the constraints");
   }
@@ -491,8 +470,7 @@ mod tests {
 
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let item_bits = alloc_item_bits(&mut cs, &item);
-    let _ = extract_digest_id::<Scalar, _>(cs.namespace(|| "malformed"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
-      .expect("synthesis itself succeeds");
+    let _ = extract_digest_id::<Scalar, _>(cs.namespace(|| "malformed"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id).expect("synthesis itself succeeds");
     assert!(!cs.is_satisfied(), "a malformed marker byte must not satisfy the constraints");
   }
 
@@ -521,9 +499,7 @@ mod tests {
     for tampered_byte in 0..3usize {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let item_bits = alloc_item_bits(&mut cs, &item);
-      let extracted =
-        extract_digest_id::<Scalar, _>(cs.namespace(|| "honest"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
-          .expect("synthesis");
+      let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "honest"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id).expect("synthesis");
       assert!(cs.is_satisfied(), "the honest witness must satisfy the constraints to begin with");
       assert_eq!(bits_to_bytes(&extracted.value_bits), digest_id.to_be_bytes().to_vec());
 
@@ -552,9 +528,7 @@ mod tests {
       let item = build_item(digest_id);
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let item_bits = alloc_item_bits(&mut cs, &item);
-      let extracted =
-        extract_digest_id::<Scalar, _>(cs.namespace(|| "c3"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id)
-          .expect("synthesis");
+      let extracted = extract_digest_id::<Scalar, _>(cs.namespace(|| "c3"), &item_bits, DIGEST_ID_OFFSET_BYTES, digest_id).expect("synthesis");
       assert!(cs.is_satisfied(), "digest_id={digest_id} must remain satisfiable");
       assert_eq!(bits_to_bytes(&extracted.value_bits), digest_id.to_be_bytes().to_vec());
     }

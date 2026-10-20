@@ -2,13 +2,21 @@
 //! so the decision to adopt one is made from this circuit's own numbers
 //! rather than the paper's ratios. Analysis tool.
 
-use bellpepper_core::{boolean::{AllocatedBit, Boolean}, test_cs::TestConstraintSystem, ConstraintSystem};
+use bellpepper_core::{
+  ConstraintSystem,
+  boolean::{AllocatedBit, Boolean},
+  test_cs::TestConstraintSystem,
+};
 use zk_cred_vega::Engine_;
 type S = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
 fn bits<CS: ConstraintSystem<S>>(cs: &mut CS, n: usize, tag: &str) -> Vec<Boolean> {
   (0..n * 8)
-    .map(|i| AllocatedBit::alloc(cs.namespace(|| format!("{tag} {i}")), Some(i % 3 == 0)).map(Boolean::from).unwrap())
+    .map(|i| {
+      AllocatedBit::alloc(cs.namespace(|| format!("{tag} {i}")), Some(i % 3 == 0))
+        .map(Boolean::from)
+        .unwrap()
+    })
     .collect()
 }
 
@@ -27,8 +35,11 @@ fn main() {
   println!("\n  A. length-hiding SHA-256 over {max} B / {blocks} blocks");
   println!("     total                       {total:>9}");
   println!("     of which compressions       {compressions:>9}");
-  println!("     length-hiding overhead      {:>9}  ({:.1}% of the hash)",
-    total - compressions, (total - compressions) as f64 * 100.0 / total as f64);
+  println!(
+    "     length-hiding overhead      {:>9}  ({:.1}% of the hash)",
+    total - compressions,
+    (total - compressions) as f64 * 100.0 / total as f64
+  );
   println!("     selector is over bytes      {:>9} bits", max + 1);
   println!("     paper 4.1.1 selects blocks  {blocks:>9} bits");
 
@@ -38,8 +49,7 @@ fn main() {
   let native = vec![0u8; max];
   let cands = zk_cred_vega::offset_bind::anchor_offsets(max);
   let base = cs.num_constraints();
-  let _ = zk_cred_vega::offset_bind::select_window::<S, _>(
-    cs.namespace(|| "win"), &b, &native, &cands, 100, 32).unwrap();
+  let _ = zk_cred_vega::offset_bind::select_window::<S, _>(cs.namespace(|| "win"), &b, &native, &cands, 100, 32).unwrap();
   let one_window = cs.num_constraints() - base;
   println!("\n  B. one 32-byte anchored window ({} candidates)", cands.len());
   println!("     cost                        {one_window:>9}");

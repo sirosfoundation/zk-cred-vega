@@ -9,21 +9,16 @@
 //! (`t256::Scalar`), which the P-256/T-256 2-cycle guarantees are the same
 //! field under a different `halo2curves` type — see `p256_ecc`'s module doc.
 
-use crate::nonnative::bignat::{nat_to_limbs, BigNat};
-use bellpepper_core::{boolean::Boolean, num::AllocatedNum, ConstraintSystem, SynthesisError};
+use crate::nonnative::bignat::{BigNat, nat_to_limbs};
 use bellpepper::gadgets::Assignment;
+use bellpepper_core::{ConstraintSystem, SynthesisError, boolean::Boolean, num::AllocatedNum};
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 
 /// Allocate a variable that is set to zero
 pub fn alloc_zero<F: PrimeField, CS: ConstraintSystem<F>>(mut cs: CS) -> AllocatedNum<F> {
   let zero = AllocatedNum::alloc_infallible(cs.namespace(|| "alloc"), || F::ZERO);
-  cs.enforce(
-    || "check zero is valid",
-    |lc| lc,
-    |lc| lc,
-    |lc| lc + zero.get_variable(),
-  );
+  cs.enforce(|| "check zero is valid", |lc| lc, |lc| lc, |lc| lc + zero.get_variable());
   zero
 }
 
@@ -52,13 +47,7 @@ pub fn alloc_bignat_constant<F: PrimeField, CS: ConstraintSystem<F>>(
   n_limbs: usize,
 ) -> Result<BigNat<F>, SynthesisError> {
   let limbs = nat_to_limbs(val, limb_width, n_limbs).unwrap();
-  let bignat = BigNat::alloc_from_limbs(
-    cs.namespace(|| "alloc bignat"),
-    || Ok(limbs.clone()),
-    None,
-    limb_width,
-    n_limbs,
-  )?;
+  let bignat = BigNat::alloc_from_limbs(cs.namespace(|| "alloc bignat"), || Ok(limbs.clone()), None, limb_width, n_limbs)?;
   (0..n_limbs).for_each(|i| {
     cs.enforce(
       || format!("check limb {i}"),
@@ -89,9 +78,7 @@ pub fn alloc_num_equals<F: PrimeField, CS: ConstraintSystem<F>>(
     Ok(if *a.get_value().get()? == *b.get_value().get()? {
       F::ONE
     } else {
-      (*a.get_value().get()? - *b.get_value().get()?)
-        .invert()
-        .unwrap()
+      (*a.get_value().get()? - *b.get_value().get()?).invert().unwrap()
     })
   })?;
 
@@ -306,10 +293,7 @@ pub fn select_num_or_one<F: PrimeField, CS: ConstraintSystem<F>>(
 }
 
 /// Allocate a constant value in the circuit
-pub fn alloc_constant<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
-  mut cs: CS,
-  c: &Scalar,
-) -> Result<AllocatedNum<Scalar>, SynthesisError> {
+pub fn alloc_constant<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(mut cs: CS, c: &Scalar) -> Result<AllocatedNum<Scalar>, SynthesisError> {
   let constant = AllocatedNum::alloc(cs.namespace(|| "constant"), || Ok(*c))?;
 
   cs.enforce(

@@ -68,8 +68,8 @@
 
 use crate::gadget_utils::alloc_bignat_constant;
 use crate::nonnative::{bignat::BigNat, util::Num};
-use crate::p256_ecc::{p256_generator, p256_order, AllocatedPoint};
-use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+use crate::p256_ecc::{AllocatedPoint, p256_generator, p256_order};
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 
@@ -108,34 +108,18 @@ pub struct EcdsaP256Witness<Scalar: PrimeField> {
 /// derives `z` from an in-circuit SHA-256 over other witness data and
 /// calls `verify_ecdsa_p256_with_digest` directly with that computed
 /// `BigNat`, so the two share every constraint except how `z` is sourced.
-pub fn verify_ecdsa_p256<Scalar, CS>(
-  mut cs: CS,
-  w: &EcdsaP256Witness<Scalar>,
-) -> Result<(), SynthesisError>
+pub fn verify_ecdsa_p256<Scalar, CS>(mut cs: CS, w: &EcdsaP256Witness<Scalar>) -> Result<(), SynthesisError>
 where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
 {
-  let z_bn = BigNat::alloc_from_nat(
-    cs.namespace(|| "z"),
-    || Ok(w.z.clone()),
-    LIMB_WIDTH,
-    N_LIMBS,
-  )?;
+  let z_bn = BigNat::alloc_from_nat(cs.namespace(|| "z"), || Ok(w.z.clone()), LIMB_WIDTH, N_LIMBS)?;
   z_bn.assert_well_formed(cs.namespace(|| "z well-formed"))?;
 
   let qx_num = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(w.qx))?;
   let qy_num = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(w.qy))?;
 
-  verify_ecdsa_p256_with_digest(
-    cs.namespace(|| "verify"),
-    &qx_num,
-    &qy_num,
-    &w.r,
-    &w.s,
-    &w.s_inv,
-    &z_bn,
-  )
+  verify_ecdsa_p256_with_digest(cs.namespace(|| "verify"), &qx_num, &qy_num, &w.r, &w.s, &w.s_inv, &z_bn)
 }
 
 /// Core of [`verify_ecdsa_p256`], taking the message digest as an
@@ -160,35 +144,18 @@ where
   let n_bn = alloc_bignat_constant(cs.namespace(|| "n"), &n, LIMB_WIDTH, N_LIMBS)?;
   let one_bn = alloc_bignat_constant(cs.namespace(|| "one"), &BigInt::from(1), LIMB_WIDTH, N_LIMBS)?;
 
-  let r_bn = BigNat::alloc_from_nat(
-    cs.namespace(|| "r"),
-    || Ok(r.clone()),
-    LIMB_WIDTH,
-    N_LIMBS,
-  )?;
+  let r_bn = BigNat::alloc_from_nat(cs.namespace(|| "r"), || Ok(r.clone()), LIMB_WIDTH, N_LIMBS)?;
   r_bn.assert_well_formed(cs.namespace(|| "r well-formed"))?;
 
-  let s_bn = BigNat::alloc_from_nat(
-    cs.namespace(|| "s"),
-    || Ok(s.clone()),
-    LIMB_WIDTH,
-    N_LIMBS,
-  )?;
+  let s_bn = BigNat::alloc_from_nat(cs.namespace(|| "s"), || Ok(s.clone()), LIMB_WIDTH, N_LIMBS)?;
   s_bn.assert_well_formed(cs.namespace(|| "s well-formed"))?;
 
-  let s_inv_bn = BigNat::alloc_from_nat(
-    cs.namespace(|| "s_inv"),
-    || Ok(s_inv.clone()),
-    LIMB_WIDTH,
-    N_LIMBS,
-  )?;
+  let s_inv_bn = BigNat::alloc_from_nat(cs.namespace(|| "s_inv"), || Ok(s_inv.clone()), LIMB_WIDTH, N_LIMBS)?;
   s_inv_bn.assert_well_formed(cs.namespace(|| "s_inv well-formed"))?;
 
   // s * s_inv ≡ 1 (mod n) — binds the s_inv hint to the actual signature.
-  let (_q, s_times_s_inv_mod_n) =
-    s_bn.mult_mod(cs.namespace(|| "s * s_inv mod n"), &s_inv_bn, &n_bn)?;
-  s_times_s_inv_mod_n
-    .equal_when_carried_regroup(cs.namespace(|| "s * s_inv == 1 (mod n)"), &one_bn)?;
+  let (_q, s_times_s_inv_mod_n) = s_bn.mult_mod(cs.namespace(|| "s * s_inv mod n"), &s_inv_bn, &n_bn)?;
+  s_times_s_inv_mod_n.equal_when_carried_regroup(cs.namespace(|| "s * s_inv == 1 (mod n)"), &one_bn)?;
 
   // u1 = z * s_inv mod n
   let (_q, u1_bn) = z_bn.mult_mod(cs.namespace(|| "u1 = z * s_inv mod n"), &s_inv_bn, &n_bn)?;
@@ -240,12 +207,12 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::Engine_;
   use crate::nonnative::util::nat_to_f;
   use crate::p256_ecc::p256_order;
-  use crate::Engine_;
   use bellpepper_core::test_cs::TestConstraintSystem;
   use num_bigint::{BigInt, Sign};
-  use p256::ecdsa::{signature::Signer, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Signer};
   use sha2::{Digest, Sha256};
   use vega_prover::traits::Engine;
 
@@ -276,11 +243,7 @@ mod tests {
 
     let n = p256_order();
     let s_inv = s.modpow(&(n.clone() - BigInt::from(2)), &n);
-    assert_eq!(
-      (&s * &s_inv) % &n,
-      BigInt::from(1),
-      "sanity: s_inv must actually be s's inverse mod n"
-    );
+    assert_eq!((&s * &s_inv) % &n, BigInt::from(1), "sanity: s_inv must actually be s's inverse mod n");
 
     let encoded = verifying_key.to_encoded_point(false);
     let qx = BigInt::from_bytes_be(Sign::Plus, encoded.x().expect("uncompressed point has x"));

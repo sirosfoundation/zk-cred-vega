@@ -41,7 +41,10 @@ fn main() {
   println!("verify               : {:>8.2?}", t.elapsed());
 
   let t = Instant::now();
-  let disclosed: Vec<Option<Vec<u8>>> = claims.iter().map(|c| if c.disclose { Some(c.issuer_signed_item_bytes.clone()) } else { None }).collect();
+  let disclosed: Vec<Option<Vec<u8>>> = claims
+    .iter()
+    .map(|c| if c.disclose { Some(c.issuer_signed_item_bytes.clone()) } else { None })
+    .collect();
   let _ = zk_cred_vega::verify_and_check_binding(&sv, &cv, &disclosed).expect("bind");
   println!("verify_and_check_bind: {:>8.2?}", t.elapsed());
 }

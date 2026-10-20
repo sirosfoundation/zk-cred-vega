@@ -75,10 +75,10 @@
 
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
+use zk_cred_vega::Engine_;
 use zk_cred_vega::mdoc_age::{DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 use zk_cred_vega::mdoc_age_circuit::{self, MdocAgeCircuit};
 use zk_cred_vega::offset_bind::Landmarks;
-use zk_cred_vega::Engine_;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
@@ -193,7 +193,7 @@ struct Secret {
 /// fixture's device key and hands the raw `(r, s)` to the library, the
 /// same way a wallet hands over what the SE returns.
 fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+  use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
   let b: [u8; 32] = hex::decode(key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&b.into()).unwrap();
   let sig: Signature = sk.sign_prehash(digest).unwrap();
@@ -201,9 +201,7 @@ fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
 }
 
 fn load(name: &str) -> (MdocAgeCircuit<Engine_>, Vec<Secret>, [u8; 32]) {
-  let json: serde_json::Value =
-    serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture"))
-      .unwrap();
+  let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
   let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
   let lm = &json["landmarks"];
   let ns = json["namespace"].as_str().unwrap();
@@ -263,19 +261,40 @@ fn load(name: &str) -> (MdocAgeCircuit<Engine_>, Vec<Secret>, [u8; 32]) {
   // exposure made every presentation of a credential linkable.
   let birth_date = circuit.witness.birth_date_bytes().expect("the fixture has a birth_date");
   let secrets = vec![
-    Secret { what: "device key x", bytes: sig[x_at..x_at + 32].to_vec() },
+    Secret {
+      what: "device key x",
+      bytes: sig[x_at..x_at + 32].to_vec(),
+    },
     // `y` is at x + 35, not x + 33: COSE puts its own `22 58 20` label
     // and header between the two coordinates. See `DEVICE_KEY_Y_DELTA`,
     // which is `DEVICE_KEY_X_DELTA + 32 + 3`. Getting this wrong made
     // the probe search for `58 20 || y[0..30]` — a string that would be
     // absent even from a proof carrying `y` in full, so it could report
     // clean through an actual leak.
-    Secret { what: "device key y", bytes: sig[x_at + 35..x_at + 67].to_vec() },
-    Secret { what: "birth_date", bytes: birth_date.to_vec() },
-    Secret { what: "the claim digest", bytes: sig[digest_at..digest_at + 32].to_vec() },
-    Secret { what: "the IssuerSignedItem", bytes: item },
-    Secret { what: "the item's random salt", bytes: sig[digest_at..digest_at + 16].to_vec() },
-    Secret { what: "the validityInfo block", bytes: sig[validity_at..validity_at + 60].to_vec() },
+    Secret {
+      what: "device key y",
+      bytes: sig[x_at + 35..x_at + 67].to_vec(),
+    },
+    Secret {
+      what: "birth_date",
+      bytes: birth_date.to_vec(),
+    },
+    Secret {
+      what: "the claim digest",
+      bytes: sig[digest_at..digest_at + 32].to_vec(),
+    },
+    Secret {
+      what: "the IssuerSignedItem",
+      bytes: item,
+    },
+    Secret {
+      what: "the item's random salt",
+      bytes: sig[digest_at..digest_at + 16].to_vec(),
+    },
+    Secret {
+      what: "the validityInfo block",
+      bytes: sig[validity_at..validity_at + 60].to_vec(),
+    },
   ];
   // The issuer key as the proof carries it: a field element, which
   // serializes little-endian.
@@ -350,14 +369,8 @@ fn main() {
     std::fs::write(format!("{dir}/proof_single.bin"), &bytes).expect("write");
   }
 
-  let (steps, core) = zk_cred_vega::mdoc_age_mc::build(
-    &circuit.witness,
-    &circuit.ecdsa,
-    circuit.cutoff,
-    circuit.now,
-    circuit.device_auth_digest,
-  )
-  .expect("folded build");
+  let (steps, core) =
+    zk_cred_vega::mdoc_age_mc::build(&circuit.witness, &circuit.ecdsa, circuit.cutoff, circuit.now, circuit.device_auth_digest).expect("folded build");
   let mc_keys = zk_cred_vega::mdoc_age_mc::setup(&steps[0], &core).expect("folded setup");
   let mc_proof = zk_cred_vega::mdoc_age_mc::prove(&mc_keys.pk, &steps, &core).expect("folded prove");
   let mc_bytes = bincode::serialize(&mc_proof).expect("serialize");

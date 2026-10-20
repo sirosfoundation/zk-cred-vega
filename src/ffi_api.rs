@@ -21,8 +21,8 @@
 //! boundary should make possible to make by accident.
 
 use crate::{
-  self as vega_mdoc, nonnative::util::{f_to_nat, nat_to_f}, ClaimWitness, Engine_, MdocEcdsaWitness,
-  VegaMdocPrepState,
+  self as vega_mdoc, ClaimWitness, Engine_, MdocEcdsaWitness, VegaMdocPrepState,
+  nonnative::util::{f_to_nat, nat_to_f},
 };
 use num_bigint::{BigInt, Sign};
 use std::fmt::{self, Debug, Display};
@@ -42,8 +42,7 @@ fn bigint_to_bytes(n: &BigInt) -> Vec<u8> {
 }
 
 fn bytes_to_scalar(bytes: &[u8]) -> Result<Scalar, VegaFfiError> {
-  nat_to_f(&bytes_to_bigint(bytes))
-    .ok_or_else(|| VegaFfiError(anyhow::anyhow!("value does not fit in the field")))
+  nat_to_f(&bytes_to_bigint(bytes)).ok_or_else(|| VegaFfiError(anyhow::anyhow!("value does not fit in the field")))
 }
 
 /// P-256's coordinate field is ~256 bits — every `qx`/`qy` fits in 32
@@ -212,18 +211,14 @@ pub struct VegaVerifierKey(pub(crate) VegaMcVerifierKey<Engine_>);
 /// `go-zk-circuits`) into a handle usable by [`prep_prove`]/[`prove`].
 #[uniffi::export]
 pub fn deserialize_prover_key(bytes: &[u8]) -> Result<VegaProverKey, VegaFfiError> {
-  bincode::deserialize(bytes)
-    .map(VegaProverKey)
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
+  bincode::deserialize(bytes).map(VegaProverKey).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
 }
 
 /// Deserializes a published verifier-key artifact into a handle usable by
 /// [`verify`].
 #[uniffi::export]
 pub fn deserialize_verifier_key(bytes: &[u8]) -> Result<VegaVerifierKey, VegaFfiError> {
-  bincode::deserialize(bytes)
-    .map(VegaVerifierKey)
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
+  bincode::deserialize(bytes).map(VegaVerifierKey).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))
 }
 
 /// `prior_state`/`next_state`'s wire format is `nonce(BLIND_NONCE_BYTES) ||
@@ -256,18 +251,12 @@ fn decode_prep_state(state: &[u8]) -> Result<([u8; NONCE_LEN], VegaMcPrepZkSNARK
 /// boundary as bytes rather than a long-lived handle, and `encode_prep_state`'s
 /// doc for the nonce carried alongside it.
 #[uniffi::export]
-pub fn prep_prove(
-  pk: &VegaProverKey,
-  claims: Vec<FfiClaim>,
-  ecdsa_witness: FfiEcdsaWitness,
-  mso_body: FfiMsoBodyWitness,
-) -> Result<Vec<u8>, VegaFfiError> {
+pub fn prep_prove(pk: &VegaProverKey, claims: Vec<FfiClaim>, ecdsa_witness: FfiEcdsaWitness, mso_body: FfiMsoBodyWitness) -> Result<Vec<u8>, VegaFfiError> {
   let claims: Vec<ClaimWitness> = claims.into_iter().map(Into::into).collect();
   let ecdsa_witness: MdocEcdsaWitness = ecdsa_witness.try_into()?;
   let mso_body: crate::mso::MsoBodyWitness = mso_body.try_into()?;
   let nonce = vega_mdoc::fresh_nonce().map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
-  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness, &mso_body, &nonce)
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let prep = vega_mdoc::prep_prove(&pk.0, &claims, &ecdsa_witness, &mso_body, &nonce).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
   encode_prep_state(&nonce, prep.into_inner())
 }
 
@@ -288,31 +277,21 @@ pub fn prove(
   let (nonce, prep_snark) = decode_prep_state(&prior_state)?;
   let prep = VegaMdocPrepState::from_inner(prep_snark);
 
-  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, &mso_body, prep, &nonce)
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let (proof, next_prep) = vega_mdoc::prove(&pk.0, &claims, &ecdsa_witness, &mso_body, prep, &nonce).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   let proof_bytes = bincode::serialize(&proof).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
   let next_state = encode_prep_state(&nonce, next_prep.into_inner())?;
 
-  Ok(FfiProveResult {
-    proof_bytes,
-    next_state,
-  })
+  Ok(FfiProveResult { proof_bytes, next_state })
 }
 
 /// Verifies a proof and checks the step↔core binding (see this module's
 /// doc) in one call — a caller never sees an unbound "valid" proof.
 #[uniffi::export]
-pub fn verify(
-  vk: &VegaVerifierKey,
-  proof_bytes: Vec<u8>,
-  disclosed_bytes: Vec<Vec<u8>>,
-) -> Result<FfiVerifyResult, VegaFfiError> {
-  let proof: VegaMcZkSNARK<Engine_> =
-    bincode::deserialize(&proof_bytes).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+pub fn verify(vk: &VegaVerifierKey, proof_bytes: Vec<u8>, disclosed_bytes: Vec<Vec<u8>>) -> Result<FfiVerifyResult, VegaFfiError> {
+  let proof: VegaMcZkSNARK<Engine_> = bincode::deserialize(&proof_bytes).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
-  let (step_public_values, core_public_values) =
-    vega_mdoc::verify(&proof, &vk.0).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let (step_public_values, core_public_values) = vega_mdoc::verify(&proof, &vk.0).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   // One entry per claim slot, in order: the real IssuerSignedItem bytes
   // for a disclosed slot, EMPTY for an undisclosed one. These are no
@@ -327,13 +306,9 @@ pub fn verify(
       disclosed_bytes.len()
     )));
   }
-  let disclosed: Vec<Option<Vec<u8>>> = disclosed_bytes
-    .into_iter()
-    .map(|b| if b.is_empty() { None } else { Some(b) })
-    .collect();
+  let disclosed: Vec<Option<Vec<u8>>> = disclosed_bytes.into_iter().map(|b| if b.is_empty() { None } else { Some(b) }).collect();
 
-  let verified = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed)
-    .map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
+  let verified = vega_mdoc::verify_and_check_binding(&step_public_values, &core_public_values, &disclosed).map_err(|e| VegaFfiError(anyhow::anyhow!(e)))?;
 
   Ok(FfiVerifyResult {
     qx: scalar_to_bytes(verified.qx),
@@ -373,7 +348,7 @@ impl Debug for VegaFfiError {
 mod tests {
   use super::*;
   use crate::p256_ecc::p256_order;
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
   use sha2::{Digest, Sha256};
 
   /// Builds claim bytes with `digest_id` genuinely CBOR-encoded at
@@ -433,14 +408,15 @@ mod tests {
         digest_id: 300,
       },
     ];
-    let claim_witnesses: Vec<ClaimWitness> =
-      claims.iter().map(|c| ClaimWitness {
+    let claim_witnesses: Vec<ClaimWitness> = claims
+      .iter()
+      .map(|c| ClaimWitness {
         issuer_signed_item_bytes: c.issuer_signed_item_bytes.clone(),
         disclose: c.disclose,
         digest_id: c.digest_id,
-      }).collect();
-    let claim_digests =
-      vega_mdoc::core_claim_digests(&claim_witnesses).expect("core_claim_digests");
+      })
+      .collect();
+    let claim_digests = vega_mdoc::core_claim_digests(&claim_witnesses).expect("core_claim_digests");
     let digest_ids = vega_mdoc::core_digest_ids(&claim_witnesses).expect("core_digest_ids");
 
     let mso_body_native = crate::mso::MsoBodyWitness {
@@ -466,9 +442,7 @@ mod tests {
     let n = p256_order();
     let s = bytes_to_bigint(&signature.s().to_bytes());
     let s_inv = s.modpow(&(n.clone() - BigInt::from(2)), &n);
-    let encoded = {
-      verifying_key.to_encoded_point(false)
-    };
+    let encoded = { verifying_key.to_encoded_point(false) };
 
     let ecdsa_witness = FfiEcdsaWitness {
       qx: encoded.x().expect("x").to_vec(),
@@ -478,21 +452,8 @@ mod tests {
       s_inv: bigint_to_bytes(&s_inv),
     };
 
-    let prep_state = prep_prove(
-      &pk,
-      claims.clone(),
-      ffi_witness_clone(&ecdsa_witness),
-      mso_body.clone(),
-    )
-    .expect("prep_prove");
-    let result1 = prove(
-      &pk,
-      claims.clone(),
-      ffi_witness_clone(&ecdsa_witness),
-      mso_body.clone(),
-      prep_state,
-    )
-    .expect("prove 1");
+    let prep_state = prep_prove(&pk, claims.clone(), ffi_witness_clone(&ecdsa_witness), mso_body.clone()).expect("prep_prove");
+    let result1 = prove(&pk, claims.clone(), ffi_witness_clone(&ecdsa_witness), mso_body.clone(), prep_state).expect("prove 1");
     let expected_claim0_bytes = claim_bytes_with_digest_id(26, b"family_name:Doe");
     let disclosed_in = vec![expected_claim0_bytes.clone(), Vec::new(), Vec::new(), Vec::new()];
     let verified1 = verify(&vk, result1.proof_bytes, disclosed_in.clone()).expect("verify 1");
@@ -518,14 +479,7 @@ mod tests {
     assert_eq!(verified1.valid_until_ts, mso_body_native.valid_until_ts.to_vec());
 
     // Second presentation reusing next_state (the fold-and-reuse path).
-    let result2 = prove(
-      &pk,
-      claims,
-      ffi_witness_clone(&ecdsa_witness),
-      mso_body,
-      result1.next_state,
-    )
-    .expect("prove 2 (reused prep state)");
+    let result2 = prove(&pk, claims, ffi_witness_clone(&ecdsa_witness), mso_body, result1.next_state).expect("prove 2 (reused prep state)");
     let verified2 = verify(&vk, result2.proof_bytes, disclosed_in).expect("verify 2");
     assert_eq!(verified2.qx, ecdsa_witness.qx);
   }

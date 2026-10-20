@@ -30,14 +30,14 @@
 //! not our situation) and `absorb_in_ro` (Nova's own IVC transcript hook).
 
 use crate::gadget_utils::{
-  alloc_zero, conditionally_select, conditionally_select2, field_switch, select_num_or_one,
-  select_num_or_zero, select_num_or_zero2, select_one_or_diff2, select_zero_or_num2,
+  alloc_zero, conditionally_select, conditionally_select2, field_switch, select_num_or_one, select_num_or_zero, select_num_or_zero2, select_one_or_diff2,
+  select_zero_or_num2,
 };
 use bellpepper::gadgets::Assignment;
 use bellpepper_core::{
+  ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, SynthesisError,
 };
 use ff::PrimeFieldBits;
 use vega_prover::{provider::pt256::p256, traits::Group};
@@ -85,22 +85,11 @@ pub struct AllocatedPoint<Scalar: PrimeFieldBits> {
 impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   /// Allocates a new point on the curve using coordinates provided by `coords`.
   /// If coords = None, it allocates the default infinity point
-  pub fn alloc<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    coords: Option<(Scalar, Scalar, bool)>,
-  ) -> Result<Self, SynthesisError> {
-    let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
-      Ok(coords.map_or(Scalar::ZERO, |c| c.0))
-    })?;
-    let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-      Ok(coords.map_or(Scalar::ZERO, |c| c.1))
-    })?;
+  pub fn alloc<CS: ConstraintSystem<Scalar>>(mut cs: CS, coords: Option<(Scalar, Scalar, bool)>) -> Result<Self, SynthesisError> {
+    let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(coords.map_or(Scalar::ZERO, |c| c.0)))?;
+    let y = AllocatedNum::alloc(cs.namespace(|| "y"), || Ok(coords.map_or(Scalar::ZERO, |c| c.1)))?;
     let is_infinity = AllocatedNum::alloc(cs.namespace(|| "is_infinity"), || {
-      Ok(if coords.is_none_or(|c| c.2) {
-        Scalar::ONE
-      } else {
-        Scalar::ZERO
-      })
+      Ok(if coords.is_none_or(|c| c.2) { Scalar::ONE } else { Scalar::ZERO })
     })?;
     cs.enforce(
       || "is_infinity is bit",
@@ -176,25 +165,12 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   }
 
   /// Add two points (may be equal)
-  pub fn add<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    other: &AllocatedPoint<Scalar>,
-  ) -> Result<Self, SynthesisError> {
-    let equal_x = alloc_num_equals(
-      cs.namespace(|| "check self.x == other.x"),
-      &self.x,
-      &other.x,
-    )?;
+  pub fn add<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, other: &AllocatedPoint<Scalar>) -> Result<Self, SynthesisError> {
+    let equal_x = alloc_num_equals(cs.namespace(|| "check self.x == other.x"), &self.x, &other.x)?;
 
-    let equal_y = alloc_num_equals(
-      cs.namespace(|| "check self.y == other.y"),
-      &self.y,
-      &other.y,
-    )?;
+    let equal_y = alloc_num_equals(cs.namespace(|| "check self.y == other.y"), &self.y, &other.y)?;
 
-    let (result_from_add, at_least_one_inf) =
-      self.add_internal(cs.namespace(|| "add internal"), other, &equal_x)?;
+    let (result_from_add, at_least_one_inf) = self.add_internal(cs.namespace(|| "add internal"), other, &equal_x)?;
     let result_from_double = self.double(cs.namespace(|| "double"))?;
 
     let result_for_equal_x = AllocatedPoint::select_point_or_infinity(
@@ -204,11 +180,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     )?;
 
     let use_equal_x = AllocatedNum::alloc(cs.namespace(|| "equal_x and neither_inf"), || {
-      let ex = if *equal_x.get_value().get()? {
-        Scalar::ONE
-      } else {
-        Scalar::ZERO
-      };
+      let ex = if *equal_x.get_value().get()? { Scalar::ONE } else { Scalar::ZERO };
       Ok(ex * (Scalar::ONE - *at_least_one_inf.get_value().get()?))
     })?;
     cs.enforce(
@@ -235,11 +207,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     equal_x: &AllocatedBit,
   ) -> Result<(Self, AllocatedNum<Scalar>), SynthesisError> {
     let at_least_one_inf = AllocatedNum::alloc(cs.namespace(|| "at least one inf"), || {
-      Ok(
-        Scalar::ONE
-          - (Scalar::ONE - *self.is_infinity.get_value().get()?)
-            * (Scalar::ONE - *other.is_infinity.get_value().get()?),
-      )
+      Ok(Scalar::ONE - (Scalar::ONE - *self.is_infinity.get_value().get()?) * (Scalar::ONE - *other.is_infinity.get_value().get()?))
     })?;
     cs.enforce(
       || "1 - at least one inf = (1-self.is_infinity) * (1-other.is_infinity)",
@@ -248,14 +216,13 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
       |lc| lc + CS::one() - at_least_one_inf.get_variable(),
     );
 
-    let x_diff_is_actual =
-      AllocatedNum::alloc(cs.namespace(|| "allocate x_diff_is_actual"), || {
-        Ok(if *equal_x.get_value().get()? {
-          Scalar::ONE
-        } else {
-          *at_least_one_inf.get_value().get()?
-        })
-      })?;
+    let x_diff_is_actual = AllocatedNum::alloc(cs.namespace(|| "allocate x_diff_is_actual"), || {
+      Ok(if *equal_x.get_value().get()? {
+        Scalar::ONE
+      } else {
+        *at_least_one_inf.get_value().get()?
+      })
+    })?;
     cs.enforce(
       || "1 - x_diff_is_actual = (1-equal_x) * (1-at_least_one_inf)",
       |lc| lc + CS::one() - at_least_one_inf.get_variable(),
@@ -263,20 +230,13 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
       |lc| lc + CS::one() - x_diff_is_actual.get_variable(),
     );
 
-    let x_diff = select_one_or_diff2(
-      cs.namespace(|| "Compute x_diff"),
-      &other.x,
-      &self.x,
-      &x_diff_is_actual,
-    )?;
+    let x_diff = select_one_or_diff2(cs.namespace(|| "Compute x_diff"), &other.x, &self.x, &x_diff_is_actual)?;
 
     let lambda = AllocatedNum::alloc(cs.namespace(|| "lambda"), || {
       let x_diff_inv = if *x_diff_is_actual.get_value().get()? == Scalar::ONE {
         Scalar::ONE
       } else {
-        (*other.x.get_value().get()? - *self.x.get_value().get()?)
-          .invert()
-          .unwrap()
+        (*other.x.get_value().get()? - *self.x.get_value().get()?).invert().unwrap()
       };
 
       Ok((*other.y.get_value().get()? - *self.y.get_value().get()?) * x_diff_inv)
@@ -289,11 +249,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     );
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
-      Ok(
-        *lambda.get_value().get()? * lambda.get_value().get()?
-          - *self.x.get_value().get()?
-          - *other.x.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * lambda.get_value().get()? - *self.x.get_value().get()? - *other.x.get_value().get()?)
     })?;
     cs.enforce(
       || "check that x is correct",
@@ -303,10 +259,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     );
 
     let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-      Ok(
-        *lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?)
-          - *self.y.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?) - *self.y.get_value().get()?)
     })?;
 
     cs.enforce(
@@ -316,33 +269,13 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
       |lc| lc + y.get_variable() + self.y.get_variable(),
     );
 
-    let x1 = conditionally_select2(
-      cs.namespace(|| "x1 = other.is_infinity ? self.x : x"),
-      &self.x,
-      &x,
-      &other.is_infinity,
-    )?;
+    let x1 = conditionally_select2(cs.namespace(|| "x1 = other.is_infinity ? self.x : x"), &self.x, &x, &other.is_infinity)?;
 
-    let x = conditionally_select2(
-      cs.namespace(|| "x = self.is_infinity ? other.x : x1"),
-      &other.x,
-      &x1,
-      &self.is_infinity,
-    )?;
+    let x = conditionally_select2(cs.namespace(|| "x = self.is_infinity ? other.x : x1"), &other.x, &x1, &self.is_infinity)?;
 
-    let y1 = conditionally_select2(
-      cs.namespace(|| "y1 = other.is_infinity ? self.y : y"),
-      &self.y,
-      &y,
-      &other.is_infinity,
-    )?;
+    let y1 = conditionally_select2(cs.namespace(|| "y1 = other.is_infinity ? self.y : y"), &self.y, &y, &other.is_infinity)?;
 
-    let y = conditionally_select2(
-      cs.namespace(|| "y = self.is_infinity ? other.y : y1"),
-      &other.y,
-      &y1,
-      &self.is_infinity,
-    )?;
+    let y = conditionally_select2(cs.namespace(|| "y = self.is_infinity ? other.y : y1"), &other.y, &y1, &self.is_infinity)?;
 
     let is_infinity1 = select_num_or_zero2(
       cs.namespace(|| "is_infinity1 = other.is_infinity ? self.is_infinity : 0"),
@@ -364,9 +297,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   pub fn double<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS) -> Result<Self, SynthesisError> {
     let (a, _b) = p256_curve_params::<Scalar>();
 
-    let tmp_actual = AllocatedNum::alloc(cs.namespace(|| "tmp_actual"), || {
-      Ok(*self.y.get_value().get()? + *self.y.get_value().get()?)
-    })?;
+    let tmp_actual = AllocatedNum::alloc(cs.namespace(|| "tmp_actual"), || Ok(*self.y.get_value().get()? + *self.y.get_value().get()?))?;
     cs.enforce(
       || "check tmp_actual",
       |lc| lc + CS::one() + CS::one(),
@@ -374,11 +305,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
       |lc| lc + tmp_actual.get_variable(),
     );
 
-    let tmp = crate::gadget_utils::select_one_or_num2(
-      cs.namespace(|| "tmp"),
-      &tmp_actual,
-      &self.is_infinity,
-    )?;
+    let tmp = crate::gadget_utils::select_one_or_num2(cs.namespace(|| "tmp"), &tmp_actual, &self.is_infinity)?;
 
     let prod_1 = AllocatedNum::alloc(cs.namespace(|| "alloc prod 1"), || {
       Ok(Scalar::from(3) * self.x.get_value().get()? * self.x.get_value().get()?)
@@ -408,11 +335,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     );
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
-      Ok(
-        ((*lambda.get_value().get()?) * (*lambda.get_value().get()?))
-          - *self.x.get_value().get()?
-          - self.x.get_value().get()?,
-      )
+      Ok(((*lambda.get_value().get()?) * (*lambda.get_value().get()?)) - *self.x.get_value().get()? - self.x.get_value().get()?)
     })?;
     cs.enforce(
       || "Check x",
@@ -422,10 +345,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     );
 
     let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-      Ok(
-        (*lambda.get_value().get()?) * (*self.x.get_value().get()? - x.get_value().get()?)
-          - self.y.get_value().get()?,
-      )
+      Ok((*lambda.get_value().get()?) * (*self.x.get_value().get()? - x.get_value().get()?) - self.y.get_value().get()?)
     })?;
     cs.enforce(
       || "Check y",
@@ -445,11 +365,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   /// for most bits and the complete addition law for the tail (see
   /// `microsoft/Nova`'s original doc comment for the arkworks reference this
   /// optimization follows).
-  pub fn scalar_mul<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    scalar_bits: &[AllocatedBit],
-  ) -> Result<Self, SynthesisError> {
+  pub fn scalar_mul<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, scalar_bits: &[AllocatedBit]) -> Result<Self, SynthesisError> {
     let split_len = core::cmp::min(scalar_bits.len(), (Scalar::NUM_BITS - 2) as usize);
     let (incomplete_bits, complete_bits) = scalar_bits.split_at(split_len);
 
@@ -460,12 +376,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
 
     for (i, bit) in incomplete_bits.iter().enumerate().skip(1) {
       let temp = acc.add_incomplete(cs.namespace(|| format!("add {i}")), &p)?;
-      acc = AllocatedPointNonInfinity::conditionally_select(
-        cs.namespace(|| format!("acc_iteration_{i}")),
-        &temp,
-        &acc,
-        &Boolean::from(bit.clone()),
-      )?;
+      acc = AllocatedPointNonInfinity::conditionally_select(cs.namespace(|| format!("acc_iteration_{i}")), &temp, &acc, &Boolean::from(bit.clone()))?;
 
       p = p.double_incomplete(cs.namespace(|| format!("double {i}")))?;
     }
@@ -487,19 +398,9 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
     };
 
     let default = Self::default(cs.namespace(|| "default"))?;
-    let x = conditionally_select2(
-      cs.namespace(|| "check if self.is_infinity is zero (x)"),
-      &default.x,
-      &res.x,
-      &self.is_infinity,
-    )?;
+    let x = conditionally_select2(cs.namespace(|| "check if self.is_infinity is zero (x)"), &default.x, &res.x, &self.is_infinity)?;
 
-    let y = conditionally_select2(
-      cs.namespace(|| "check if self.is_infinity is zero (y)"),
-      &default.y,
-      &res.y,
-      &self.is_infinity,
-    )?;
+    let y = conditionally_select2(cs.namespace(|| "check if self.is_infinity is zero (y)"), &default.y, &res.y, &self.is_infinity)?;
 
     let mut acc = AllocatedPoint {
       x,
@@ -510,12 +411,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
 
     for (i, bit) in complete_bits.iter().enumerate() {
       let temp = acc.add(cs.namespace(|| format!("add_complete {i}")), &p_complete)?;
-      acc = AllocatedPoint::conditionally_select(
-        cs.namespace(|| format!("acc_complete_iteration_{i}")),
-        &temp,
-        &acc,
-        &Boolean::from(bit.clone()),
-      )?;
+      acc = AllocatedPoint::conditionally_select(cs.namespace(|| format!("acc_complete_iteration_{i}")), &temp, &acc, &Boolean::from(bit.clone()))?;
 
       p_complete = p_complete.double(cs.namespace(|| format!("double_complete {i}")))?;
     }
@@ -524,56 +420,28 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   }
 
   /// If condition outputs a otherwise outputs b
-  pub fn conditionally_select<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    a: &Self,
-    b: &Self,
-    condition: &Boolean,
-  ) -> Result<Self, SynthesisError> {
+  pub fn conditionally_select<CS: ConstraintSystem<Scalar>>(mut cs: CS, a: &Self, b: &Self, condition: &Boolean) -> Result<Self, SynthesisError> {
     let x = conditionally_select(cs.namespace(|| "select x"), &a.x, &b.x, condition)?;
     let y = conditionally_select(cs.namespace(|| "select y"), &a.y, &b.y, condition)?;
-    let is_infinity = conditionally_select(
-      cs.namespace(|| "select is_infinity"),
-      &a.is_infinity,
-      &b.is_infinity,
-      condition,
-    )?;
+    let is_infinity = conditionally_select(cs.namespace(|| "select is_infinity"), &a.is_infinity, &b.is_infinity, condition)?;
 
     Ok(Self { x, y, is_infinity })
   }
 
   /// Conditional select using an `AllocatedNum` (constrained to `{0, 1}`) instead of `Boolean`.
-  pub fn conditionally_select2<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    a: &Self,
-    b: &Self,
-    condition: &AllocatedNum<Scalar>,
-  ) -> Result<Self, SynthesisError> {
+  pub fn conditionally_select2<CS: ConstraintSystem<Scalar>>(mut cs: CS, a: &Self, b: &Self, condition: &AllocatedNum<Scalar>) -> Result<Self, SynthesisError> {
     let x = conditionally_select2(cs.namespace(|| "select x"), &a.x, &b.x, condition)?;
     let y = conditionally_select2(cs.namespace(|| "select y"), &a.y, &b.y, condition)?;
-    let is_infinity = conditionally_select2(
-      cs.namespace(|| "select is_infinity"),
-      &a.is_infinity,
-      &b.is_infinity,
-      condition,
-    )?;
+    let is_infinity = conditionally_select2(cs.namespace(|| "select is_infinity"), &a.is_infinity, &b.is_infinity, condition)?;
 
     Ok(Self { x, y, is_infinity })
   }
 
   /// If condition outputs a otherwise infinity
-  pub fn select_point_or_infinity<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    a: &Self,
-    condition: &Boolean,
-  ) -> Result<Self, SynthesisError> {
+  pub fn select_point_or_infinity<CS: ConstraintSystem<Scalar>>(mut cs: CS, a: &Self, condition: &Boolean) -> Result<Self, SynthesisError> {
     let x = select_num_or_zero(cs.namespace(|| "select x"), &a.x, condition)?;
     let y = select_num_or_zero(cs.namespace(|| "select y"), &a.y, condition)?;
-    let is_infinity = select_num_or_one(
-      cs.namespace(|| "select is_infinity"),
-      &a.is_infinity,
-      condition,
-    )?;
+    let is_infinity = select_num_or_one(cs.namespace(|| "select is_infinity"), &a.is_infinity, condition)?;
 
     Ok(Self { x, y, is_infinity })
   }
@@ -591,11 +459,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPoint<Scalar> {
   }
 
   /// Enforce that self equals other.
-  pub fn enforce_equal<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    other: &Self,
-  ) -> Result<(), SynthesisError> {
+  pub fn enforce_equal<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, other: &Self) -> Result<(), SynthesisError> {
     cs.enforce(
       || "check x equality",
       |lc| lc + self.x.get_variable() - other.x.get_variable(),
@@ -638,10 +502,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
   }
 
   /// Returns an `AllocatedPoint` from an `AllocatedPointNonInfinity`
-  pub fn to_allocated_point(
-    &self,
-    is_infinity: &AllocatedNum<Scalar>,
-  ) -> Result<AllocatedPoint<Scalar>, SynthesisError> {
+  pub fn to_allocated_point(&self, is_infinity: &AllocatedNum<Scalar>) -> Result<AllocatedPoint<Scalar>, SynthesisError> {
     Ok(AllocatedPoint {
       x: self.x.clone(),
       y: self.y.clone(),
@@ -650,21 +511,12 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
   }
 
   /// Add two points assuming self != +/- other
-  pub fn add_incomplete<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    other: &Self,
-  ) -> Result<Self, SynthesisError> {
+  pub fn add_incomplete<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError> {
     let lambda = AllocatedNum::alloc(cs.namespace(|| "lambda"), || {
       if *other.x.get_value().get()? == *self.x.get_value().get()? {
         Ok(Scalar::ONE)
       } else {
-        Ok(
-          (*other.y.get_value().get()? - *self.y.get_value().get()?)
-            * (*other.x.get_value().get()? - *self.x.get_value().get()?)
-              .invert()
-              .unwrap(),
-        )
+        Ok((*other.y.get_value().get()? - *self.y.get_value().get()?) * (*other.x.get_value().get()? - *self.x.get_value().get()?).invert().unwrap())
       }
     })?;
     cs.enforce(
@@ -675,11 +527,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
     );
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
-      Ok(
-        *lambda.get_value().get()? * lambda.get_value().get()?
-          - *self.x.get_value().get()?
-          - *other.x.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * lambda.get_value().get()? - *self.x.get_value().get()? - *other.x.get_value().get()?)
     })?;
     cs.enforce(
       || "check that x is correct",
@@ -689,10 +537,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
     );
 
     let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-      Ok(
-        *lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?)
-          - *self.y.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?) - *self.y.get_value().get()?)
     })?;
 
     cs.enforce(
@@ -706,21 +551,14 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
   }
 
   /// doubles the point; since this is called with a point not at infinity, it is guaranteed to be not infinity
-  pub fn double_incomplete<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-  ) -> Result<Self, SynthesisError> {
+  pub fn double_incomplete<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS) -> Result<Self, SynthesisError> {
     let (a, _b) = p256_curve_params::<Scalar>();
     let x_sq = self.x.square(cs.namespace(|| "x_sq"))?;
 
     let lambda = AllocatedNum::alloc(cs.namespace(|| "lambda"), || {
       let n = Scalar::from(3) * x_sq.get_value().get()? + a;
       let d = Scalar::from(2) * *self.y.get_value().get()?;
-      if d == Scalar::ZERO {
-        Ok(Scalar::ONE)
-      } else {
-        Ok(n * d.invert().unwrap())
-      }
+      if d == Scalar::ZERO { Ok(Scalar::ONE) } else { Ok(n * d.invert().unwrap()) }
     })?;
     cs.enforce(
       || "Check that lambda is computed correctly",
@@ -730,11 +568,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
     );
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || {
-      Ok(
-        *lambda.get_value().get()? * *lambda.get_value().get()?
-          - *self.x.get_value().get()?
-          - *self.x.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * *lambda.get_value().get()? - *self.x.get_value().get()? - *self.x.get_value().get()?)
     })?;
 
     cs.enforce(
@@ -745,10 +579,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
     );
 
     let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-      Ok(
-        *lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?)
-          - *self.y.get_value().get()?,
-      )
+      Ok(*lambda.get_value().get()? * (*self.x.get_value().get()? - *x.get_value().get()?) - *self.y.get_value().get()?)
     })?;
 
     cs.enforce(
@@ -762,12 +593,7 @@ impl<Scalar: PrimeFieldBits> AllocatedPointNonInfinity<Scalar> {
   }
 
   /// If condition outputs a otherwise outputs b
-  pub fn conditionally_select<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    a: &Self,
-    b: &Self,
-    condition: &Boolean,
-  ) -> Result<Self, SynthesisError> {
+  pub fn conditionally_select<CS: ConstraintSystem<Scalar>>(mut cs: CS, a: &Self, b: &Self, condition: &Boolean) -> Result<Self, SynthesisError> {
     let x = conditionally_select(cs.namespace(|| "select x"), &a.x, &b.x, condition)?;
     let y = conditionally_select(cs.namespace(|| "select y"), &a.y, &b.y, condition)?;
 

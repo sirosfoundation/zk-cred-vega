@@ -15,8 +15,8 @@
 //! keeping the state small enough to stay cheap through the whole chain.
 
 use bellpepper_core::{
-  boolean::{AllocatedBit, Boolean},
   ConstraintSystem, LinearCombination, SynthesisError,
+  boolean::{AllocatedBit, Boolean},
 };
 use ff::PrimeField;
 
@@ -42,12 +42,7 @@ where
     for b in &onehot {
       lc = lc + &b.lc(CS::one(), Scalar::ONE);
     }
-    cs.enforce(
-      || "one_hot sums to exactly 1",
-      |_| lc,
-      |lc| lc + CS::one(),
-      |lc| lc + CS::one(),
-    );
+    cs.enforce(|| "one_hot sums to exactly 1", |_| lc, |lc| lc + CS::one(), |lc| lc + CS::one());
   }
   Ok(onehot)
 }
@@ -78,10 +73,7 @@ where
   assert_eq!(a.len(), a_values.len());
   assert_eq!(b.len(), b_values.len());
 
-  let mut sum_values: Vec<usize> = a_values
-    .iter()
-    .flat_map(|&av| b_values.iter().map(move |&bv| av + bv))
-    .collect();
+  let mut sum_values: Vec<usize> = a_values.iter().flat_map(|&av| b_values.iter().map(move |&bv| av + bv)).collect();
   sum_values.sort_unstable();
   sum_values.dedup();
 
@@ -145,8 +137,7 @@ mod tests {
         let mut cs = TestConstraintSystem::<Scalar>::new();
         let a = alloc_one_hot::<Scalar, _>(cs.namespace(|| "a"), &widths, w0).expect("alloc a");
         let b = alloc_one_hot::<Scalar, _>(cs.namespace(|| "b"), &widths, w1).expect("alloc b");
-        let (sum_onehot, sum_values) =
-          convolve_sum::<Scalar, _>(cs.namespace(|| "convolve"), &a, &widths, &b, &widths).expect("convolve");
+        let (sum_onehot, sum_values) = convolve_sum::<Scalar, _>(cs.namespace(|| "convolve"), &a, &widths, &b, &widths).expect("convolve");
 
         if let Some(reason) = cs.which_is_unsatisfied() {
           panic!("w0={w0} w1={w1}: unsatisfied at {reason}");
@@ -184,10 +175,8 @@ mod tests {
           let a = alloc_one_hot::<Scalar, _>(cs.namespace(|| "a"), &widths, w0).expect("alloc a");
           let b = alloc_one_hot::<Scalar, _>(cs.namespace(|| "b"), &widths, w1).expect("alloc b");
           let c = alloc_one_hot::<Scalar, _>(cs.namespace(|| "c"), &widths, w2).expect("alloc c");
-          let (ab_onehot, ab_values) =
-            convolve_sum::<Scalar, _>(cs.namespace(|| "ab"), &a, &widths, &b, &widths).expect("convolve ab");
-          let (abc_onehot, abc_values) =
-            convolve_sum::<Scalar, _>(cs.namespace(|| "abc"), &ab_onehot, &ab_values, &c, &widths).expect("convolve abc");
+          let (ab_onehot, ab_values) = convolve_sum::<Scalar, _>(cs.namespace(|| "ab"), &a, &widths, &b, &widths).expect("convolve ab");
+          let (abc_onehot, abc_values) = convolve_sum::<Scalar, _>(cs.namespace(|| "abc"), &ab_onehot, &ab_values, &c, &widths).expect("convolve abc");
 
           assert!(cs.is_satisfied(), "w0={w0} w1={w1} w2={w2}");
           assert_eq!(onehot_value(&abc_onehot, &abc_values), w0 + w1 + w2, "w0={w0} w1={w1} w2={w2}");
