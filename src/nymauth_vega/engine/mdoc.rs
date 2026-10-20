@@ -49,7 +49,7 @@ use crate::nymauth_vega::engine::gadgets::window::{Message, find};
 use crate::nymauth_vega::engine::presentation::{self, BASE_VALUES, DATE_DIGITS, DATE_TIME_DIGITS, Facts, Presentation, TimeEncoding, window_slots};
 use crate::nymauth_vega::engine::pseudonym::{self, MDOC_IDENTIFIER, MDOC_VALUE, NymPublic, SSC_BYTES};
 use crate::nymauth_vega::engine::request::{DOC_TYPE_WINDOW, IDENTIFIER_WINDOW, Window};
-use crate::nymauth_vega::engine::table::{self, AGE, Cells, FULL_MDOC, Layout, Table, blocks_before, last_block, sha256};
+use crate::nymauth_vega::engine::table::{self, Cells, FULL_MDOC, Layout, Table, blocks_before, last_block, sha256};
 
 pub use crate::nymauth_vega::engine::request::{DOC_TYPE_KEY, IDENTIFIER_KEY};
 
@@ -131,13 +131,6 @@ pub fn window_at(bytes: &[u8], key: &[u8], len: usize, what: &str) -> Result<usi
 }
 
 impl MdocWitness {
-  /// Finds each value, skips the blocks before the first value the rules read, and places the
-  /// rest of the Sig_structure and the item in the table. The rules compare the docType and the
-  /// identifier with the verifier's patterns, so the prover only finds where their texts end.
-  pub fn new(sig_structure: &[u8], item: &[u8], issuer_key: PublicKey, issuer_signature: Signature) -> Result<Self, String> {
-    Self::build(AGE, sig_structure, item, issuer_key, issuer_signature, None)
-  }
-
   /// The witness of the full statement ([`crate::nymauth_vega::engine::pseudonym`]), in the layout
   /// [`FULL_MDOC`]: the age statement's, the `ssc` item `nym.ssc`, and the messages of the
   /// holder's secret seed and of the pseudonym in the table. The listed digest of the `ssc` item
@@ -330,57 +323,6 @@ pub struct MdocCore {
   pub witness: Option<Arc<MdocWitness>>,
   /// The presentation, or none before the prover knows it.
   pub presentation: Option<Presentation>,
-}
-
-impl MdocCore {
-  /// A core without values, for setup.
-  pub fn blank() -> Self {
-    MdocCore {
-      witness: None,
-      presentation: None,
-    }
-  }
-}
-
-impl Core for MdocCore {}
-
-impl VegaCircuit<T256HyraxEngine> for MdocCore {
-  fn public_values(&self) -> Result<Vec<t256::Scalar>, SynthesisError> {
-    let presentation = self.presentation.as_ref().ok_or(SynthesisError::AssignmentMissing)?;
-    Ok(presentation.public.values(TimeEncoding::Digits))
-  }
-
-  fn shared<CS: ConstraintSystem<t256::Scalar>>(&self, cs: &mut CS) -> Result<Vec<AllocatedNum<t256::Scalar>>, SynthesisError> {
-    table::allocate(cs.namespace(|| "table"), self.witness.as_ref().map(|w| &*w.table))
-  }
-
-  /// The rules that depend only on the credential.
-  fn precommitted<CS: ConstraintSystem<t256::Scalar>>(
-    &self,
-    cs: &mut CS,
-    shared: &[AllocatedNum<t256::Scalar>],
-  ) -> Result<Vec<AllocatedNum<t256::Scalar>>, SynthesisError> {
-    let cells = Cells(shared);
-    let (_, facts) = age_part(cs, &cells, self.witness.as_deref(), &AGE)?;
-    facts.into_slots(cs.namespace(|| "facts"))
-  }
-
-  fn num_challenges(&self) -> usize {
-    0
-  }
-
-  /// The rules of the presentation.
-  fn synthesize<CS: ConstraintSystem<t256::Scalar>>(
-    &self,
-    cs: &mut CS,
-    _: &[AllocatedNum<t256::Scalar>],
-    facts: &[AllocatedNum<t256::Scalar>],
-    _: Option<&[t256::Scalar]>,
-  ) -> Result<(), SynthesisError> {
-    let presentation = self.presentation.as_ref();
-    let times = TimeEncoding::Digits;
-    presentation::check(cs.namespace(|| "presentation"), facts, presentation, times, WINDOWS)
-  }
 }
 
 /// The core circuit of the full statement for an mdoc: the age statement's rules in the layout

@@ -136,7 +136,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-  fn new(code: RefusalCode, _rule: &str) -> Self {
+  pub(crate) fn new(code: RefusalCode, _rule: &str) -> Self {
     Refusal {
       code,
       #[cfg(feature = "debug-rules")]
@@ -581,4 +581,62 @@ pub fn verify(keys: &Keys, statement: &Statement, proof: &[u8]) -> Result<[u8; 3
 pub fn pseudonym_of(secret_seed: &[u8], verifier_input: &[u8]) -> Result<[u8; 32], Error> {
   let seed: Zeroizing<[u8; SEED_BYTES]> = Zeroizing::new(fixed(secret_seed, "secret_seed")?);
   Ok(pseudonym::pseudonym(&seed, &fixed(verifier_input, "verifier input")?))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn every_error_displays_without_a_rule_path() {
+    let cases = [
+      (Error::Input("x".into()), "invalid input: x"),
+      (Error::Shapes("x".into()), "invalid circuit shapes: x"),
+      (Error::UnknownCircuit("ab".into()), "circuit shapes ab are not approved"),
+      (Error::Refused(Refusal::new(RefusalCode::SeedMismatch, "a/b/c")), "inputs refused: SeedMismatch"),
+      (Error::Prover("x".into()), "prover failed: x"),
+      (Error::ProofInvalid("x".into()), "proof invalid: x"),
+      (Error::Mismatch("x".into()), "proof does not match the named values: x"),
+      (Error::Internal("x".into()), "internal error: x"),
+    ];
+    for (e, text) in cases {
+      assert_eq!(e.to_string(), text);
+    }
+  }
+
+  #[test]
+  fn rules_are_classified_into_coarse_codes() {
+    let code = |rule: &str| Refusal::of_rule(rule).code;
+    assert_eq!(code("precommitted/pseudonym/seed digest half 0 is ssc/equal"), RefusalCode::SeedMismatch);
+    assert_eq!(code("rest/presentation/device signature/x equals r/equal"), RefusalCode::DeviceSignature);
+    assert_eq!(code("precommitted/issuer signature/x equals r/equal"), RefusalCode::IssuerSignature);
+    assert_eq!(code("rest/presentation/validity/product"), RefusalCode::Credential);
+  }
+
+  #[test]
+  fn a_panic_becomes_an_internal_error_whatever_its_payload() {
+    assert_eq!(guarded::<()>(|| panic!("static text")), Err(Error::Internal("static text".into())));
+    assert_eq!(
+      guarded::<()>(|| panic!("{}", String::from("owned text"))),
+      Err(Error::Internal("owned text".into()))
+    );
+    assert_eq!(guarded::<()>(|| std::panic::panic_any(42u32)), Err(Error::Internal("panic".into())));
+    assert_eq!(guarded(|| Ok(7)), Ok(7));
+  }
+
+  #[test]
+  fn proved_debug_shows_no_proof_bytes() {
+    let p = Proved {
+      proof: vec![1, 2, 3],
+      pseudonym: [9; 32],
+    };
+    assert_eq!(format!("{p:?}"), "Proved(3 proof bytes)");
+  }
+
+  #[test]
+  fn months_have_their_real_lengths() {
+    assert!(date("2008-04-30").is_ok() && date("2008-04-31").is_err());
+    assert!(date("2008-02-29").is_ok() && date("2007-02-29").is_err() && date("1900-02-29").is_err() && date("2000-02-29").is_ok());
+    assert!(date("2008-12-31").is_ok() && date("2008-11-31").is_err());
+  }
 }

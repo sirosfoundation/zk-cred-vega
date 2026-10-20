@@ -4,8 +4,6 @@
 //! A circuit's coefficients are fixed, so they cannot point at a different table entry for each
 //! position. A selector reads the entry at a private or public index with rules instead.
 
-use std::ops::Range;
-
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
@@ -42,11 +40,6 @@ impl OneHot {
       .iter()
       .enumerate()
       .fold(Lc::zero(), |sum, (j, bit)| sum + &Lc::bit(bit).scale(t256::Scalar::from(j as u64)))
-  }
-
-  /// One when the selected index lies in `range`, and zero otherwise: the sum of its bits there.
-  pub fn within(&self, range: Range<usize>) -> Lc {
-    self.bits[range].iter().fold(Lc::zero(), |sum, bit| sum + &Lc::bit(bit))
   }
 
   /// Step 4 of clause 5.3: the entry at the selected index, with one rule per entry after the

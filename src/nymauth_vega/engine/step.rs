@@ -34,7 +34,7 @@ use crate::nymauth_vega::engine::gadgets::lc::{Lc, equal, low_bytes};
 use crate::nymauth_vega::engine::gadgets::select::{OneHot, one_hot_values, select_values};
 use crate::nymauth_vega::engine::gadgets::sha256;
 use crate::nymauth_vega::engine::gadgets::values::Values;
-use crate::nymauth_vega::engine::table::{self, AGE, CHUNK_BYTES, CHUNKS_PER_BLOCK, Cells, Layout, Table};
+use crate::nymauth_vega::engine::table::{self, CHUNK_BYTES, CHUNKS_PER_BLOCK, Cells, Layout, Table};
 
 /// The step instance at one position of the table.
 #[derive(Clone, Debug)]
@@ -48,11 +48,6 @@ pub struct Step {
 }
 
 impl Step {
-  /// A step without values, for setup.
-  pub fn blank(position: usize) -> Self {
-    Self::blank_in(AGE, position)
-  }
-
   /// A step of `layout` without values, for setup.
   pub fn blank_in(layout: Layout, position: usize) -> Self {
     Step { position, table: None, layout }
@@ -225,13 +220,8 @@ impl VegaCircuit<T256HyraxEngine> for Step {
     let selector = OneHot::alloc(cs.namespace(|| "selector"), layout.instances(), Some(self.position))?;
     equal(cs.namespace(|| "selected position"), &selector.index(), &Lc::num(&position));
 
-    if layout.per_instance == 1 {
-      compression(cs, &cells, layout, &selector, 0, None)?;
-      return Ok(vec![]);
-    }
-    // The second compression of an instance starts from the first's result: no message starts
-    // at its positions (`Layout::chains_within_instances`).
-    debug_assert!(layout.chains_within_instances());
+    // A compression after the first of an instance starts from the first's result: no message
+    // starts at those positions.
     let mut result = None;
     for k in 0..layout.per_instance {
       let cs = &mut cs.namespace(|| format!("compression {k}"));

@@ -177,14 +177,6 @@ pub fn nonzero<CS: ConstraintSystem<t256::Scalar>>(mut cs: CS, a: &Lc) -> Result
   Ok(())
 }
 
-/// Adds the rule that `a` is not zero when the bit `flag` is one. A slot holds the flag times the
-/// inverse of `a`, and a · slot = flag. With the flag zero the slot is zero and the rule holds.
-pub fn nonzero_if<CS: ConstraintSystem<t256::Scalar>>(mut cs: CS, flag: &Lc, a: &Lc) -> Result<(), SynthesisError> {
-  let inv = Lc::alloc(cs.namespace(|| "inverse"), val([flag.value, a.value], |[f, a]| f * inverse(a)))?;
-  product(cs.namespace(|| "rule"), a, &inv, flag);
-  Ok(())
-}
-
 /// A new slot holding the value of `a`, with one rule. Values pass from the precommitted
 /// segment to the rest segment in slots.
 pub fn to_num<CS: ConstraintSystem<t256::Scalar>>(mut cs: CS, a: &Lc) -> Result<AllocatedNum<t256::Scalar>, SynthesisError> {

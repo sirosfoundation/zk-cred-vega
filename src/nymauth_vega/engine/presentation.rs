@@ -47,17 +47,6 @@ impl Date {
   pub fn text(&self) -> String {
     format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
   }
-
-  /// The number of days since 1970-01-01, by the days_from_civil algorithm of Howard Hinnant.
-  fn days_since_1970(&self) -> i64 {
-    let year = i64::from(self.year) - i64::from(self.month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month_from_march = i64::from((self.month + 9) % 12);
-    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(self.day) - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-  }
 }
 
 /// A time in UTC.
@@ -78,12 +67,6 @@ impl Time {
   /// The time as YYYY-MM-DDThh:mm:ssZ, as RFC 3339 writes a date-time.
   pub fn text(&self) -> String {
     format!("{}T{:02}:{:02}:{:02}Z", self.date.text(), self.hour, self.minute, self.second)
-  }
-
-  /// The number of seconds since 1970-01-01T00:00:00Z, which JWT calls a NumericDate.
-  pub fn seconds_since_1970(&self) -> u64 {
-    let days = u64::try_from(self.date.days_since_1970()).expect("a time after 1970");
-    days * 86_400 + u64::from(self.hour) * 3_600 + u64::from(self.minute) * 60 + u64::from(self.second)
   }
 }
 

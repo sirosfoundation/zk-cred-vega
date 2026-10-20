@@ -26,7 +26,7 @@ use vega_prover::{
   bellpepper::{r1cs::VegaShape, shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::VegaError,
   provider::{T256HyraxEngine, pt256::t256},
-  traits::{circuit::VegaCircuit, snark::DigestHelperTrait},
+  traits::circuit::VegaCircuit,
   vega_mc_zkp::{VegaMcPrepZkSNARK, VegaMcProverKey, VegaMcVerifierKey, VegaMcZkSNARK},
 };
 
@@ -51,13 +51,7 @@ pub struct ProverKey(VegaMcProverKey<T256HyraxEngine>);
 #[serde(transparent)]
 pub struct VerifierKey(VegaMcVerifierKey<T256HyraxEngine>);
 
-impl VerifierKey {
-  /// Computes the key's digest, which every verification absorbs, and keeps it, so that a key
-  /// read from its bytes does not compute it during the first verification. Returns it.
-  pub fn ready(&self) -> Result<[u8; 32], VegaError> {
-    DigestHelperTrait::digest(&self.0)
-  }
-}
+impl VerifierKey {}
 
 /// The holder's commitments to the shared and precommitted segments of one credential, with the
 /// values they commit to.
@@ -79,14 +73,6 @@ pub trait Core: VegaCircuit<T256HyraxEngine> {
   /// The table's layout: the age statement's, or the full statement's
   /// ([`crate::nymauth_vega::engine::pseudonym`]).
   const LAYOUT: Layout = AGE;
-}
-
-/// Builds the keys for a core circuit. All step instances share one shape, so a blank step
-/// stands for them.
-pub fn setup<C: Core>(core: &C) -> Result<(ProverKey, VerifierKey), VegaError> {
-  let step = Step::blank_in(C::LAYOUT, 0);
-  let (pk, vk) = VegaMcZkSNARK::setup(&step, core, C::LAYOUT.instances())?;
-  Ok((ProverKey(pk), VerifierKey(vk)))
 }
 
 /// The budget of every circuit of the age statement: 2^15 rules, and 2^15 values once the
@@ -120,15 +106,6 @@ pub fn shapes<C: Core>(core: &C) -> Result<Vec<u8>, VegaError> {
   bincode::serialize(&(step, core)).map_err(|e| VegaError::InternalError {
     reason: format!("serializing the shapes: {e}"),
   })
-}
-
-/// Builds the keys from the circuits as data ([`shapes`]), without the circuits' code. The pinned
-/// prover's setup takes circuits, so each stored shape is replayed as a circuit that allocates the
-/// shape's variables and adds its rows, coefficient for coefficient, through which the prover
-/// builds the same shape again, and the keys of [`setup`] byte for byte. Refuses a circuit past
-/// [`BUDGET`].
-pub fn setup_from_shapes(bytes: &[u8]) -> Result<(ProverKey, VerifierKey), VegaError> {
-  setup_from_shapes_in(&AGE, bytes)
 }
 
 /// [`setup_from_shapes`] for the circuits of `layout`: its instances and its budget.
@@ -351,16 +328,6 @@ pub enum Rejection {
   Position { instance: usize, reported: Vec<t256::Scalar> },
   /// The core circuit reports other public values than the verifier named.
   PublicValues { reported: Vec<t256::Scalar> },
-}
-
-/// Accepts a proof for the public values the verifier named, in the order of
-/// [`crate::nymauth_vega::engine::presentation::Public::values`].
-pub fn accept(vk: &VerifierKey, proof: &Proof, expected: &[t256::Scalar]) -> Result<(), Rejection> {
-  let core = verified(&AGE, vk, proof)?;
-  if core != expected {
-    return Err(Rejection::PublicValues { reported: core });
-  }
-  Ok(())
 }
 
 /// Verifies a proof of `layout`'s circuits and its step instances' positions, and returns the
@@ -589,16 +556,6 @@ impl Assignment {
       instance: &self.core,
     }
   }
-
-  /// The number of values in each segment kind, summed over the instances: shared, precommitted,
-  /// rest, and the public values the segments allocate.
-  pub fn counts(&self) -> [usize; 4] {
-    let instances = self.steps.iter().chain([&self.core]);
-    instances.fold([self.shared.private.len(), 0, 0, self.shared.public.len()], |[s, p, r, x], i| {
-      let public = i.precommitted.public.len() + i.rest.public.len();
-      [s, p + i.precommitted.private.len(), r + i.rest.private.len(), x + public]
-    })
-  }
 }
 
 /// Synthesizes one instance's precommitted and rest segments over the shared values, as the
@@ -640,28 +597,6 @@ pub fn witness<C: VegaCircuit<T256HyraxEngine>>(steps: &[Step], core: &C) -> Res
     steps: steps?,
     core: core?,
   })
-}
-
-/// The witness of a prover whose prepared state already holds the shared and precommitted
-/// segments: the core's rest segment, which the presentation fixes. It needs the facts that the
-/// core's precommitted segment computes, so the core synthesizes both. The steps have no rest
-/// segment, and carry only the positions they report. Preparing from this witness fails.
-pub fn presentation_witness<S: VegaCircuit<T256HyraxEngine>, C: VegaCircuit<T256HyraxEngine>>(steps: &[S], core: &C) -> Result<Assignment, SynthesisError> {
-  let mut cs = SatisfyingAssignment::<T256HyraxEngine>::new();
-  let start = Segment::mark(&cs);
-  let shared_values = core.shared(&mut cs)?;
-  let shared = Segment::since(&cs, start);
-  let core = instance(core, &shared_values)?;
-  let steps = steps
-    .iter()
-    .map(|step| {
-      Ok(Instance {
-        public_values: step.public_values()?,
-        ..Instance::default()
-      })
-    })
-    .collect::<Result<_, SynthesisError>>()?;
-  Ok(Assignment { shared, steps, core })
 }
 
 /// A circuit instance that allocates the recorded values of a witness and adds no rule. The

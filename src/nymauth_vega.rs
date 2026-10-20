@@ -238,3 +238,36 @@ pub fn nymauth_verifier_input(client_id: String) -> Result<Vec<u8>, NymAuthVegaE
     .map(|d| d.to_vec())
     .map_err(|detail| NymAuthVegaError::InvalidInput { detail })
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::nymauth_vega::engine::statement::{Refusal, RefusalCode};
+
+  #[test]
+  fn every_engine_error_maps_to_its_binding_error() {
+    let m = |e: Error| NymAuthVegaError::from(e);
+    assert!(matches!(m(Error::Input("a".into())), NymAuthVegaError::InvalidInput { detail } if detail == "a"));
+    assert!(matches!(m(Error::Shapes("a".into())), NymAuthVegaError::InvalidShapes { detail } if detail == "a"));
+    assert!(matches!(m(Error::UnknownCircuit("h".into())), NymAuthVegaError::UnknownCircuit { detail } if detail == "h"));
+    assert!(
+      matches!(m(Error::Refused(Refusal::new(RefusalCode::DeviceSignature, "x/y"))), NymAuthVegaError::Refused { detail } if detail == "DeviceSignature")
+    );
+    assert!(matches!(m(Error::Prover("a".into())), NymAuthVegaError::ProverFailed { detail } if detail == "a"));
+    assert!(matches!(m(Error::ProofInvalid("a".into())), NymAuthVegaError::ProofInvalid { detail } if detail == "a"));
+    assert!(matches!(m(Error::Mismatch("a".into())), NymAuthVegaError::Mismatch { detail } if detail == "a"));
+    assert!(matches!(m(Error::Internal("a".into())), NymAuthVegaError::Internal { detail } if detail == "a"));
+  }
+
+  #[test]
+  fn the_binding_errors_display_their_detail() {
+    assert_eq!(
+      NymAuthVegaError::Mismatch { detail: "d".into() }.to_string(),
+      "proof does not match the named values: d"
+    );
+    assert_eq!(
+      NymAuthVegaError::Refused { detail: "SeedMismatch".into() }.to_string(),
+      "inputs refused: SeedMismatch"
+    );
+  }
+}

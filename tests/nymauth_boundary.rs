@@ -17,7 +17,6 @@ const ALLOWED: &[&str] = &[
   "provider::T256HyraxEngine",
   "provider::pt256::t256",
   "traits::circuit::VegaCircuit",
-  "traits::snark::DigestHelperTrait",
   "vega_mc_zkp::VegaMcPrepZkSNARK",
   "vega_mc_zkp::VegaMcProverKey",
   "vega_mc_zkp::VegaMcVerifierKey",

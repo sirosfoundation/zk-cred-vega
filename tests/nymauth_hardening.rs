@@ -24,6 +24,11 @@ const MSG: &[u8] = b"hardening-challenge-message";
 /// A synthetic credential and everything a verifier names for it.
 #[derive(Clone)]
 struct Case {
+  sig_structure: Vec<u8>,
+  birth: Vec<u8>,
+  ssc: Vec<u8>,
+  issuer_rs: ([u8; 32], [u8; 32]),
+  dev_rs_parts: ([u8; 32], [u8; 32]),
   issuer_signed: Vec<u8>,
   seed: [u8; 16],
   dev_rs: [u8; 64],
@@ -65,6 +70,11 @@ fn case(seed: [u8; 16]) -> Case {
   dev_rs[..32].copy_from_slice(&ds.r);
   dev_rs[32..].copy_from_slice(&ds.s);
   Case {
+    sig_structure: mdoc.sig_structure.clone(),
+    birth: mdoc.item("birth_date").to_vec(),
+    ssc: mdoc.item("ssc").to_vec(),
+    issuer_rs: (mdoc.signature.r, mdoc.signature.s),
+    dev_rs_parts: (ds.r, ds.s),
     issuer_signed,
     seed,
     dev_rs,
@@ -457,4 +467,139 @@ fn prove_leaves_no_copy_of_the_seed_behind() {
   assert_eq!(proved.pseudonym, statement::pseudonym_of(&needle, &VI).unwrap());
   eprintln!("seed copies: control {control}, with the caller's buffer {during}, after prove and zeroing it {after}");
   assert!(after <= control, "prove left {} copies of the seed behind", after - control);
+}
+
+// ---- coverage of the paths the fast witness skips ------------------------------------------------
+
+#[test]
+fn proving_from_the_circuits_alone_gives_an_accepted_proof() {
+  use std::sync::Arc;
+  use zk_cred_vega::nymauth_vega::engine::gadgets::p256::{PublicKey, Signature};
+  use zk_cred_vega::nymauth_vega::engine::mdoc::{MdocNymCore, MdocWitness};
+  use zk_cred_vega::nymauth_vega::engine::presentation::{Presentation, Public, Time, TimeEncoding};
+  use zk_cred_vega::nymauth_vega::engine::pseudonym::{self, NymMessages, NymPublic};
+  use zk_cred_vega::nymauth_vega::engine::request::Request;
+
+  let (c, _) = honest();
+  let circuit = &APPROVED_SHAPES[0];
+  let (pk, vk) = app::setup_from_shapes_in(&circuit.layout, shapes()).unwrap();
+  let public = Public {
+    issuer_key: PublicKey {
+      x: c.qx.clone().try_into().unwrap(),
+      y: c.qy.clone().try_into().unwrap(),
+    },
+    born_from: None,
+    born_by: Date { year: 2008, month: 10, day: 7 },
+    now: Time {
+      date: Date { year: 2026, month: 10, day: 7 },
+      hour: 12,
+      minute: 0,
+      second: 0,
+    },
+    challenge: c.e2.clone().try_into().unwrap(),
+    request: Request::mdoc(circuit.doc_type, circuit.birth_date_element).unwrap(),
+  };
+  let witness = MdocWitness::full(
+    &c.sig_structure,
+    &c.birth,
+    NymMessages {
+      ssc: &c.ssc,
+      secret_seed: &c.seed,
+      verifier_input: &VI,
+    },
+    public.issuer_key,
+    Signature::from_rs(&c.issuer_rs.0, &c.issuer_rs.1),
+  )
+  .unwrap();
+  let table = witness.table.clone();
+  let pseudonym = pseudonym::pseudonym(&c.seed, &VI);
+  let core = MdocNymCore {
+    witness: Some(Arc::new(witness)),
+    presentation: Some(Presentation {
+      public: public.clone(),
+      device_signature: Signature::from_rs(&c.dev_rs_parts.0, &c.dev_rs_parts.1),
+    }),
+    nym: Some(NymPublic { verifier_input: VI, pseudonym }),
+  };
+  // No precomputed assignment: the prover synthesizes the step and core circuits itself.
+  let steps = app::steps(&table);
+  let prepared = app::prepare(&pk, &steps, &core).unwrap();
+  let (proof, _) = app::prove(&pk, &steps, &core, prepared).unwrap();
+  let mut expected = public.values(TimeEncoding::Digits);
+  expected.extend(NymPublic::verifier_values(&VI));
+  assert_eq!(app::accept_pseudonym(&circuit.layout, &vk, &proof, &expected).unwrap(), pseudonym);
+  // A different public value is not accepted for the same proof.
+  let second = expected[1];
+  expected[0] += second;
+  assert!(app::accept_pseudonym(&circuit.layout, &vk, &proof, &expected).is_err());
+}
+
+#[test]
+fn witness_types_print_no_values() {
+  use zk_cred_vega::nymauth_vega::engine::pseudonym::NymMessages;
+  let (c, _) = honest();
+  let m = NymMessages {
+    ssc: &c.ssc,
+    secret_seed: &c.seed,
+    verifier_input: &VI,
+  };
+  assert_eq!(format!("{m:?}"), "NymMessages(redacted)");
+  let seed_hex = hex(&c.seed);
+  let table_text = format!(
+    "{:?}",
+    zk_cred_vega::nymauth_vega::engine::table::Table::with_messages(
+      APPROVED_SHAPES[0].layout,
+      &[1, 2, 3],
+      0,
+      &[(APPROVED_SHAPES[0].layout.attribute, &c.seed[..])]
+    )
+    .unwrap()
+  );
+  assert!(table_text.contains("redacted") && !table_text.contains(&seed_hex));
+  assert!(format!("{:?}", app::Segment::default()).contains("redacted"));
+}
+
+#[test]
+fn a_message_that_does_not_fit_its_region_is_refused() {
+  use zk_cred_vega::nymauth_vega::engine::table::Table;
+  let layout = APPROVED_SHAPES[0].layout;
+  let long = vec![7u8; 64 * layout.attribute.blocks];
+  assert!(Table::with_messages(layout, &[1], 0, &[(layout.attribute, &long[..])]).is_err());
+}
+
+#[test]
+fn the_keys_know_their_circuit_and_odd_name_spaces_are_refused() {
+  let (c, _) = honest();
+  assert_eq!(keys().circuit().name, APPROVED_SHAPES[0].name);
+  // nameSpaces as an array of one element: not name-space/items pairs.
+  let odd = record(vec![
+    ("nameSpaces", Value::Array(vec![Value::Unsigned(1)])),
+    (
+      "issuerAuth",
+      Value::Array(vec![
+        Value::Bytes(vec![0xa1, 0x01, 0x26]),
+        Value::Map(vec![]),
+        Value::Bytes(vec![0]),
+        Value::Bytes(vec![0; 64]),
+      ]),
+    ),
+  ])
+  .encode();
+  let h = Holder {
+    issuer_signed: &odd,
+    secret_seed: &c.seed,
+    device_signature: &c.dev_rs,
+  };
+  match statement::prove(keys(), &c.statement(), &h) {
+    Err(Error::Input(m)) => assert!(m.contains("odd nameSpaces"), "{m}"),
+    other => panic!("{:?}", other.map(|_| ())),
+  }
+}
+
+#[test]
+fn request_patterns_refuse_what_the_circuit_cannot_compare() {
+  use zk_cred_vega::nymauth_vega::engine::request::Request;
+  assert!(Request::mdoc(&"d".repeat(300), "birth_date").is_err());
+  assert!(Request::mdoc(&"d".repeat(120), "birth_date").is_err());
+  assert!(Request::mdoc(APPROVED_SHAPES[0].doc_type, "birth_date").is_ok());
 }

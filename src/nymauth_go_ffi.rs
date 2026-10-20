@@ -386,3 +386,57 @@ pub unsafe extern "C" fn zk_cred_vega_nymauth_verifier_input(client_id: ZkNymSli
     }
   })
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::nymauth_vega::engine::statement::Refusal;
+
+  #[test]
+  fn every_error_has_its_own_status_code() {
+    let cases = [
+      (Error::Input(String::new()), ZK_NYM_INVALID_INPUT),
+      (Error::Shapes(String::new()), ZK_NYM_INVALID_SHAPES),
+      (Error::UnknownCircuit(String::new()), ZK_NYM_UNKNOWN_CIRCUIT),
+      (Error::Prover(String::new()), ZK_NYM_PROVER_FAILED),
+      (Error::ProofInvalid(String::new()), ZK_NYM_PROOF_INVALID),
+      (Error::Mismatch(String::new()), ZK_NYM_MISMATCH),
+      (Error::Internal(String::new()), ZK_NYM_INTERNAL),
+      (Error::Refused(Refusal::new(RefusalCode::SeedMismatch, "")), ZK_NYM_REFUSED_SEED_MISMATCH),
+      (Error::Refused(Refusal::new(RefusalCode::IssuerSignature, "")), ZK_NYM_REFUSED_ISSUER_SIGNATURE),
+      (Error::Refused(Refusal::new(RefusalCode::DeviceSignature, "")), ZK_NYM_REFUSED_DEVICE_SIGNATURE),
+      (Error::Refused(Refusal::new(RefusalCode::Credential, "")), ZK_NYM_REFUSED_CREDENTIAL),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for (e, want) in cases {
+      assert_eq!(code(&e), want);
+      assert!(seen.insert(want), "status {want} is used twice");
+    }
+  }
+
+  #[test]
+  fn a_panic_is_a_status_not_an_unwind() {
+    assert_eq!(guarded(|| panic!("boom")), ZK_NYM_INTERNAL);
+    assert_eq!(guarded(|| ZK_NYM_OK), ZK_NYM_OK);
+  }
+
+  #[test]
+  fn slices_are_checked_before_they_are_read() {
+    let data = [1u8, 2, 3];
+    let ok = |s: ZkNymSlice, max| unsafe { bytes(s, max) };
+    assert_eq!(ok(ZkNymSlice { ptr: data.as_ptr(), len: 3 }, 8), Some(&data[..]));
+    assert_eq!(ok(ZkNymSlice { ptr: std::ptr::null(), len: 0 }, 8), Some(&[][..]));
+    assert_eq!(ok(ZkNymSlice { ptr: std::ptr::null(), len: 3 }, 8), None);
+    assert_eq!(ok(ZkNymSlice { ptr: data.as_ptr(), len: 9 }, 8), None);
+    let bad_utf8 = [0xffu8, 0xfe];
+    assert!(
+      unsafe {
+        text(ZkNymSlice {
+          ptr: bad_utf8.as_ptr(),
+          len: 2,
+        })
+      }
+      .is_none()
+    );
+  }
+}

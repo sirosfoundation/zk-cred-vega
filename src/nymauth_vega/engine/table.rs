@@ -146,14 +146,6 @@ impl Layout {
     POSITIONS / self.per_instance
   }
 
-  /// Whether every chain starts at an instance's first compression, so that each later
-  /// compression of an instance continues from the one before it (`crate::nymauth_vega::engine::step`).
-  pub fn chains_within_instances(&self) -> bool {
-    (0..POSITIONS)
-      .filter(|j| j % self.per_instance != 0)
-      .all(|j| j != self.signed.first && !self.starts_from_iv(j))
-  }
-
   /// The positions whose chain starts from the initial value: every region's first but the
   /// signed message's, which starts from the start state.
   pub(crate) fn starts_from_iv(&self, j: usize) -> bool {
@@ -258,12 +250,6 @@ impl std::fmt::Debug for Table {
 }
 
 impl Table {
-  /// Pads each message as SHA-256 does and places it in its region, without the first `skipped`
-  /// blocks of the signed message. Unused blocks are zero.
-  pub fn new(signed: &[u8], skipped: usize, attribute: &[u8]) -> Result<Self, String> {
-    Self::with_messages(AGE, signed, skipped, &[(ATTRIBUTE, attribute)])
-  }
-
   /// [`Table::new`] in `layout`: the signed message in its region, without its first `skipped`
   /// blocks, and each other message, padded, in its region.
   pub fn with_messages(layout: Layout, signed: &[u8], skipped: usize, messages: &[(Region, &[u8])]) -> Result<Self, String> {
@@ -286,12 +272,6 @@ impl Table {
     Ok(Self::from_blocks_in(layout, blocks, words_to_bytes(&start)))
   }
 
-  /// Hashes the blocks as the step circuits do: from the start state at the signed message's
-  /// first position, and from the initial value at the attribute's.
-  pub fn from_blocks(blocks: Vec<[u8; 64]>, start: [u8; 32]) -> Self {
-    Self::from_blocks_in(AGE, blocks, start)
-  }
-
   /// [`Table::from_blocks`] in `layout`: every region but the signed message's chains from the
   /// initial value.
   pub fn from_blocks_in(layout: Layout, blocks: Vec<[u8; 64]>, start: [u8; 32]) -> Self {
@@ -312,11 +292,6 @@ impl Table {
       })
       .collect();
     Table { blocks, states, start, layout }
-  }
-
-  /// The bytes of a region, all its blocks in order.
-  pub fn region_bytes(&self, region: Region) -> Vec<u8> {
-    self.blocks[region.first..region.first + region.blocks].concat()
   }
 
   /// The value of chunk `c` of the shared segment, as [`Cells::chunk`] reads it: counting from
@@ -346,13 +321,6 @@ impl Table {
       self.state_value(j - 1, h)
     }
   }
-}
-
-/// How many times a circuit allocated the shared segment: once for each synthesis of a step or a
-/// core circuit, whatever the constraint system. A caller reads it to check that a load from the
-/// circuits as data synthesizes no circuit.
-pub fn syntheses() -> usize {
-  SYNTHESES.load(Ordering::Relaxed)
 }
 
 static SYNTHESES: AtomicUsize = AtomicUsize::new(0);
@@ -404,12 +372,6 @@ impl Cells<'_> {
   /// Half `h` of the state after position `j`.
   pub fn state(&self, j: usize, h: usize) -> Lc {
     Lc::num(&self.0[CELLS_PER_POSITION * j + CHUNKS_PER_BLOCK + h])
-  }
-
-  /// Half `h` of the state before position `j`: the start state before the signed message, the
-  /// initial value before the attribute, and otherwise the state after position j − 1.
-  pub fn state_before(&self, j: usize, h: usize) -> Lc {
-    self.state_before_in(&AGE, j, h)
   }
 
   /// [`Cells::state_before`] in `layout`: the start state before the signed message, the initial

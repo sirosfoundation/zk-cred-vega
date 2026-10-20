@@ -162,14 +162,6 @@ impl Pattern {
     Self::new(IDENTIFIER_WINDOW, &[IDENTIFIER_KEY, &text_head(text.len())?, text].concat())
   }
 
-  pub fn window(&self) -> Window {
-    self.window
-  }
-
-  pub fn bytes(&self) -> &[u8] {
-    &self.bytes
-  }
-
   /// The thermometer's count: the pattern's bytes beyond those every pattern covers.
   pub fn count(&self) -> usize {
     self.bytes.len() - self.window.fixed()

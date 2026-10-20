@@ -76,11 +76,6 @@ pub const MDOC_VALUE: &[u8] = b"\x6celementValue\x58\x20";
 /// two.
 pub const VALUES: usize = 5;
 
-/// A verifier's verifier_input: the SHA-256 of its client_id.
-pub fn verifier_input(client_id: &str) -> [u8; 32] {
-  sha256(client_id.as_bytes())
-}
-
 /// The pseudonym's message, 119 bytes: DST, the seed, prover_input and verifier_input.
 pub fn message(seed: &[u8; 16], verifier_input: &[u8; 32]) -> Vec<u8> {
   [DST, seed, &PROVER_INPUT, verifier_input].concat()

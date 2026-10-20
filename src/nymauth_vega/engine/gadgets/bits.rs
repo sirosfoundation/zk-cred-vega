@@ -11,7 +11,7 @@ use bellpepper_core::{
 use ff::{Field, PrimeField};
 use vega_prover::provider::pt256::t256;
 
-use super::lc::{Lc, equal, from_be, mul, product};
+use super::lc::{Lc, equal, from_be, mul};
 use super::values::Values;
 
 /// The bits of a field element, least significant first.
@@ -141,16 +141,6 @@ pub fn expect<CS: ConstraintSystem<t256::Scalar>>(mut cs: CS, bytes: &[Lc], patt
       &pack_bytes(group),
       &Lc::constant(from_be(constant)),
     );
-  }
-}
-
-/// Adds the rules that bytes equal a constant string when the bit `flag` is one, sixteen bytes
-/// per rule: flag · (packed bytes − packed constant) = 0.
-pub fn expect_if<CS: ConstraintSystem<t256::Scalar>>(mut cs: CS, flag: &Lc, bytes: &[Lc], pattern: &[u8]) {
-  assert_eq!(bytes.len(), pattern.len());
-  for (i, (group, constant)) in bytes.chunks(16).zip(pattern.chunks(16)).enumerate() {
-    let difference = pack_bytes(group) - &Lc::constant(from_be(constant));
-    product(cs.namespace(|| format!("bytes from {}", 16 * i)), flag, &difference, &Lc::zero());
   }
 }
 
