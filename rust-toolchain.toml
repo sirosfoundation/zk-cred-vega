@@ -1,0 +1,18 @@
+# Exact toolchain pin. This file is the single source of truth: rustup uses it
+# for every local `cargo`/`rustc`, and CI and release builds install from it
+# through .github/actions/rust-toolchain, so a local build and CI run the very
+# same compiler.
+#
+# Why exact: a floating `stable` changes the compiler with every Rust release,
+# so new default lints can turn `-D warnings` red without a commit, and the
+# prebuilt native libraries we publish are not reproducible from a tag.
+#
+# Cross targets (android, ios) are installed by the release jobs as extra
+# inputs to the action, not here, so local builds do not download them.
+#
+# To bump: change `channel` to the new release (Dependabot's `rust-toolchain`
+# ecosystem opens this PR monthly), then run fmt, clippy and the tests.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

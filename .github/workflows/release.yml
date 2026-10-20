@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: make bindings
       - uses: actions/upload-artifact@v6
@@ -72,9 +72,9 @@ jobs:
       # jobs (out of its "new code" window) - SHA-pinned here rather than
       # matching the tag-only convention elsewhere in this file.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      # This crate has no rust-toolchain.toml (unlike zk-cred-longfellow) -
-      # targets are declared explicitly here, same as the android job below.
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # Version and components come from rust-toolchain.toml; the cross
+      # targets are extra inputs here, same as the android job below.
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -102,7 +102,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2

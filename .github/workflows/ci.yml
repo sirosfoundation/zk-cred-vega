@@ -18,38 +18,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-features --all-targets
+      - run: cargo check --locked --all-features --all-targets
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
       # --release is not optional here: the proving system is slow enough
       # in debug builds that the full-pipeline tests time out.
-      - run: cargo test --release --all-features
+      - run: cargo test --locked --release --all-features
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --release --all-features --all-targets -- -D warnings
+      - run: cargo clippy --locked --release --all-features --all-targets -- -D warnings
 
   bindings:
     name: Generate bindings
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
       # Proves the UniFFI surface still generates (both Swift and Kotlin),
       # which catches bad `#[uniffi::export]` annotations. Not a staleness
@@ -63,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
