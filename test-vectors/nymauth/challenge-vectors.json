@@ -1,5 +1,5 @@
 {
-  "description": "Shared test vectors of the nym_auth mdoc challenge (SPEC.md section 3): the SessionTranscript (the transcript seed) and e2, the SHA-256 of the device-authentication message. Byte-identical in zk-cred-vega and zk-cred-longfellow. min_nonce_chars is the shortest nonce derive accepts. derive_redirect and rejects_redirect (added for the OpenID4VPHandover of a presentation delivered by redirect or QR, response_uri, OpenID4VP 1.0 appendix B.2.6.1) are additive: derive and rejects keep their meaning, and a consumer that does not implement the redirect handover ignores both new arrays. Each derive_redirect entry gives the CBOR of OpenID4VPHandoverInfo, the SessionTranscript and e2; the digest of the transcript alone is e2 for either handover.",
+  "description": "Shared test vectors of the nym_auth mdoc challenge (SPEC.md section 3): the SessionTranscript (the transcript seed) and e2, the SHA-256 of the device-authentication message. Byte-identical in zk-cred-vega and zk-cred-longfellow. min_nonce_chars is the shortest nonce derive accepts. derive_redirect and rejects_redirect (added for the OpenID4VPHandover of a presentation delivered by redirect or QR, response_uri, OpenID4VP 1.0 appendix B.2.6.1) are additive: derive and rejects keep their meaning, and a consumer that does not implement the redirect handover ignores both new arrays. Over redirects the response MUST be encrypted, so the JWK thumbprint is always 32 bytes and a null one is in rejects_redirect (the DC API handover keeps null for an unencrypted response). Each derive_redirect entry gives the CBOR of OpenID4VPHandoverInfo, the SessionTranscript and e2; the digest of the transcript alone is e2 for either handover.",
   "version": 1,
   "min_nonce_chars": 16,
   "derive": [
@@ -162,17 +162,6 @@
       "challenge_digest_hex": "b020ccd1acbc88ecab505e150c07c76da775f8488b715f7832487900afdf062d"
     },
     {
-      "name": "nym_auth, verifier 1: same request, unencrypted response (jwk thumbprint null)",
-      "client_id": "x509_san_dns:verifier.example",
-      "nonce": "pOA0oqEAhLnqug2r7Ve4tQ",
-      "response_uri": "https://verifier.example/verification/direct_post",
-      "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null,
-      "handover_info_hex": "84781d783530395f73616e5f646e733a76657269666965722e6578616d706c6576704f41306f714541684c6e7175673272375665347451f6783168747470733a2f2f76657269666965722e6578616d706c652f766572696669636174696f6e2f6469726563745f706f7374",
-      "session_transcript_hex": "83f6f682714f70656e494434565048616e646f766572582029c9f3fc51d426c76d6cfad2232f653279e01d05a22922f62faa09ecb1e25bb0",
-      "challenge_digest_hex": "81cedc7d2a21f444449a1dafc666ce5c4d69ab8feeccfc964b2ebd0eee98b271"
-    },
-    {
       "name": "nym_auth, verifier 2: other client_id and nonce",
       "client_id": "x509_san_dns:other-verifier.example",
       "nonce": "6YfsJcysIReLorHGvKlsFQ",
@@ -200,10 +189,10 @@
       "nonce": "0123456789abcdefghijkl",
       "response_uri": "https://verifier.example/response?session=1",
       "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null,
-      "handover_info_hex": "847076657269666965722e6578616d706c6576303132333435363738396162636465666768696a6b6cf6782b68747470733a2f2f76657269666965722e6578616d706c652f726573706f6e73653f73657373696f6e3d31",
-      "session_transcript_hex": "83f6f682714f70656e494434565048616e646f76657258208e8045e2957e50962b9f56565efb1dd61d2f372fa3a34fa4487f61223c31afe7",
-      "challenge_digest_hex": "8dfa0b3ae9d9ba11a6239cd3e231c96037dfa98e711716fa34ad3299a73844ad"
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "handover_info_hex": "847076657269666965722e6578616d706c6576303132333435363738396162636465666768696a6b6c58201111111111111111111111111111111111111111111111111111111111111111782b68747470733a2f2f76657269666965722e6578616d706c652f726573706f6e73653f73657373696f6e3d31",
+      "session_transcript_hex": "83f6f682714f70656e494434565048616e646f7665725820873b04a3b2bd45b285897a6b6f61eee13fd9f169e2dd535b9bd9094a1bb9264c",
+      "challenge_digest_hex": "a42898514b6d3118fd42ef103ba88d1ff549c56a5a4afd901384f7c5aacf9c76"
     },
     {
       "name": "non-ASCII response_uri (a CBOR text length is the UTF-8 byte length) and a response_uri over 255 bytes (two-byte CBOR length head)",
@@ -219,13 +208,23 @@
   ],
   "rejects_redirect": [
     {
+      "name": "null JWK thumbprint (unencrypted response)",
+      "op": "derive_redirect",
+      "client_id": "x509_san_dns:verifier.example",
+      "nonce": "pOA0oqEAhLnqug2r7Ve4tQ",
+      "response_uri": "https://verifier.example/verification/direct_post",
+      "doc_type": "eu.europa.ec.eudi.nym_auth.1",
+      "jwk_thumbprint_hex": null,
+      "reason": "nym_auth over redirects requires an encrypted response (direct_post.jwt), so the thumbprint is always a 32-byte value; null is valid only in the DC API handover"
+    },
+    {
       "name": "empty client_id",
       "op": "derive_redirect",
       "client_id": "",
       "nonce": "pOA0oqEAhLnqug2r7Ve4tQ",
       "response_uri": "https://verifier.example/verification/direct_post",
       "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
       "name": "empty nonce",
@@ -234,7 +233,7 @@
       "nonce": "",
       "response_uri": "https://verifier.example/verification/direct_post",
       "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
       "name": "15-character nonce",
@@ -243,7 +242,7 @@
       "nonce": "abcdefghijklmno",
       "response_uri": "https://verifier.example/verification/direct_post",
       "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
       "name": "empty response_uri",
@@ -252,7 +251,7 @@
       "nonce": "pOA0oqEAhLnqug2r7Ve4tQ",
       "response_uri": "",
       "doc_type": "eu.europa.ec.eudi.nym_auth.1",
-      "jwk_thumbprint_hex": null
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
       "name": "empty docType",
@@ -261,7 +260,7 @@
       "nonce": "pOA0oqEAhLnqug2r7Ve4tQ",
       "response_uri": "https://verifier.example/verification/direct_post",
       "doc_type": "",
-      "jwk_thumbprint_hex": null
+      "jwk_thumbprint_hex": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
       "name": "31-byte JWK thumbprint",

@@ -50,10 +50,9 @@ T11 = bytes([0x11]) * 32
 cases = [
  ("OpenID4VP 1.0 B.2.6.1 non-normative example (client_id with x509_san_dns prefix, thumbprint of the example JWK)", ci, n, spec_thumb, ru),
  ("nym_auth, verifier 1: x509_san_dns client_id, encrypted response (direct_post.jwt), thumbprint 0x11*32", "x509_san_dns:verifier.example", "pOA0oqEAhLnqug2r7Ve4tQ", T11, "https://verifier.example/verification/direct_post"),
- ("nym_auth, verifier 1: same request, unencrypted response (jwk thumbprint null)", "x509_san_dns:verifier.example", "pOA0oqEAhLnqug2r7Ve4tQ", None, "https://verifier.example/verification/direct_post"),
  ("nym_auth, verifier 2: other client_id and nonce", "x509_san_dns:other-verifier.example", "6YfsJcysIReLorHGvKlsFQ", T11, "https://other-verifier.example/cb"),
  ("client_id with another prefix (x509_hash) and a hash-shaped identifier", "x509_hash:Uvo3HtuIxuhC92rShpgqcT3YXwrqRxWEviRiA0OZszk", "0123456789abcdefghijkl", T11, "https://verifier.example/response"),
- ("client_id without a Client Identifier Prefix (pre-registered), response_uri with a query", "verifier.example", "0123456789abcdefghijkl", None, "https://verifier.example/response?session=1"),
+ ("client_id without a Client Identifier Prefix (pre-registered), response_uri with a query", "verifier.example", "0123456789abcdefghijkl", T11, "https://verifier.example/response?session=1"),
  ("non-ASCII response_uri (a CBOR text length is the UTF-8 byte length) and a response_uri over 255 bytes (two-byte CBOR length head)", "x509_san_dns:xn--bcher-kva.example", "0123456789abcdefghijkl", T11, "https://bücher.example/" + "p"*260),
 ]
 out = []
@@ -72,9 +71,12 @@ assert d.hex() != out[1]["session_transcript_hex"]
 assert dcapi_transcript("https://verifier.example", "pOA0oqEAhLnqug2r7Ve4tQ", T11).hex() == "83f6f682764f70656e4944345650444341504948616e646f766572582098a74db4c57a62c35763573aa80ce0583c9556e27bddca7c7172eaf38285fd4c"
 
 rej = []
-base = dict(client_id="x509_san_dns:verifier.example", nonce="pOA0oqEAhLnqug2r7Ve4tQ", response_uri="https://verifier.example/verification/direct_post", doc_type=DOC, jwk_thumbprint_hex=None)
-def r(name, **kw):
-    d = dict(base); d.update(kw); rej.append({"name": name, "op": "derive_redirect", **d})
+base = dict(client_id="x509_san_dns:verifier.example", nonce="pOA0oqEAhLnqug2r7Ve4tQ", response_uri="https://verifier.example/verification/direct_post", doc_type=DOC, jwk_thumbprint_hex="11"*32)
+def r(name, reason=None, **kw):
+    d = dict(base); d.update(kw); e = {"name": name, "op": "derive_redirect", **d}
+    if reason: e["reason"] = reason
+    rej.append(e)
+r("null JWK thumbprint (unencrypted response)", reason="nym_auth over redirects requires an encrypted response (direct_post.jwt), so the thumbprint is always a 32-byte value; null is valid only in the DC API handover", jwk_thumbprint_hex=None)
 r("empty client_id", client_id="")
 r("empty nonce", nonce="")
 r("15-character nonce", nonce="abcdefghijklmno")
