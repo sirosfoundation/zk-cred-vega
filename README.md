@@ -116,7 +116,7 @@ item to that list, and to this table, only on purpose.
   characters, any field over 4096 bytes, a thumbprint that is not 32 bytes, and an empty or malformed
   (not one definite CBOR array of three items, nothing after it) transcript. `nymauthVerifierInput(clientId)`
   is SHA-256(client_id). Shared test
-  vectors, byte-identical in zk-cred-longfellow: `test-vectors/nymauth/challenge-vectors.json`.
+  vectors, byte-identical in zk-cred-longfellow: `test-vectors/nymauth/challenge-vectors.json` (the files of that directory are listed in its README.md; the redirect / QR handover vectors are in `derive_redirect` and `rejects_redirect`).
 - **Pinned circuit, and adding a circuit version.** Only shapes whose SHA-256 is in
   `nymauth_vega::engine::statement::APPROVED_SHAPES` load (`UnknownCircuit` otherwise). The table
   entry holds everything circuit-specific: digest, layout, docType, birth-date and `ssc` element
