@@ -54,19 +54,17 @@
 //! before its review found two critical bugs.
 
 use bellpepper::gadgets::sha256::sha256_compression_function;
-use bellpepper_core::{
-  boolean::{AllocatedBit, Boolean},
-  ConstraintSystem, LinearCombination, SynthesisError,
-};
 use bellpepper::gadgets::uint32::UInt32;
+use bellpepper_core::{
+  ConstraintSystem, LinearCombination, SynthesisError,
+  boolean::{AllocatedBit, Boolean},
+};
 use ff::PrimeField;
 
 /// SHA-256's standard initialization vector (FIPS 180-4 §5.3.3) —
 /// hardcoded here because `bellpepper`'s own copy (`get_sha256_iv`) is
 /// private to its crate.
-const SHA256_IV: [u32; 8] = [
-  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-];
+const SHA256_IV: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
 
 /// Maximum real message length this gadget supports. Originally 128,
 /// chosen against a measured 79-95 byte real signed test vector - too
@@ -155,12 +153,7 @@ pub fn injected_byte(byte_idx: usize, real_len: usize) -> Option<u8> {
 /// — where a panic unwinding into the host is a process abort. An
 /// over-budget credential is a thing a verifier should reject, not a
 /// thing that kills the wallet.
-pub fn native_padded_buffer_sized(
-  message: &[u8],
-  real_len: usize,
-  max_message_bytes: usize,
-  num_blocks: usize,
-) -> Result<Vec<u8>, SynthesisError> {
+pub fn native_padded_buffer_sized(message: &[u8], real_len: usize, max_message_bytes: usize, num_blocks: usize) -> Result<Vec<u8>, SynthesisError> {
   // Checked throughout, including the comparison operands themselves: a
   // function whose contract is "reject, never panic" cannot reach that
   // rejection through arithmetic that traps in debug and wraps in
@@ -320,11 +313,7 @@ where
       let (combined_lc, expected_value) = match &msg_active {
         Some(active) => {
           let raw_bit = &raw_bits[byte_idx * 8 + bit_idx];
-          let msg_contrib = Boolean::and(
-            cs.namespace(|| format!("msg contribution byte {byte_idx} bit {bit_idx}")),
-            active,
-            raw_bit,
-          )?;
+          let msg_contrib = Boolean::and(cs.namespace(|| format!("msg contribution byte {byte_idx} bit {bit_idx}")), active, raw_bit)?;
           let expected = if byte_idx < real_len {
             raw_bit.get_value()
           } else {
@@ -333,16 +322,12 @@ where
           (msg_contrib.lc(CS::one(), Scalar::ONE) + &injected_lc, expected)
         }
         None => {
-          let expected =
-            Some(injected_byte(byte_idx, real_len).expect("byte_idx >= real_len for byte_idx >= max") >> (7 - bit_idx) & 1 == 1);
+          let expected = Some(injected_byte(byte_idx, real_len).expect("byte_idx >= real_len for byte_idx >= max") >> (7 - bit_idx) & 1 == 1);
           (injected_lc, expected)
         }
       };
 
-      let out_bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("buffer bit {byte_idx} {bit_idx}")),
-        expected_value,
-      )?;
+      let out_bit = AllocatedBit::alloc(cs.namespace(|| format!("buffer bit {byte_idx} {bit_idx}")), expected_value)?;
       cs.enforce(
         || format!("buffer bit {byte_idx} {bit_idx} matches combination"),
         |_| combined_lc,
@@ -368,8 +353,7 @@ where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
 {
-  let (buffer_bits, msg_active_bits, len_selector) =
-    padded_buffer_bits(&mut cs, raw_bits, real_len, max_message_bytes, num_blocks)?;
+  let (buffer_bits, msg_active_bits, len_selector) = padded_buffer_bits(&mut cs, raw_bits, real_len, max_message_bytes, num_blocks)?;
 
   // 3. Run the fixed num_blocks compression rounds unconditionally,
   // recording the state after each block.
@@ -405,7 +389,10 @@ where
     in_block.push(Boolean::from(bit));
   }
 
-  let per_block_bits: Vec<Vec<Boolean>> = block_states.into_iter().map(|s| s.into_iter().flat_map(|w| w.into_bits_be()).collect()).collect();
+  let per_block_bits: Vec<Vec<Boolean>> = block_states
+    .into_iter()
+    .map(|s| s.into_iter().flat_map(|w| w.into_bits_be()).collect())
+    .collect();
 
   let mut digest_bits: Vec<Boolean> = Vec::with_capacity(256);
   for bit_idx in 0..256 {
@@ -418,11 +405,7 @@ where
       )?;
       acc = Some(match acc {
         None => term,
-        Some(prev) => Boolean::or(
-          cs.namespace(|| format!("select-or digest bit {bit_idx} block {k}")),
-          &prev,
-          &term,
-        )?,
+        Some(prev) => Boolean::or(cs.namespace(|| format!("select-or digest bit {bit_idx} block {k}")), &prev, &term)?,
       });
     }
     digest_bits.push(acc.expect("num_blocks >= 1"));
@@ -434,11 +417,7 @@ where
 /// [`sha256_var_sized`] fixed to this module's claim-sized constants
 /// ([`MAX_VAR_MESSAGE_BYTES`]/[`NUM_BLOCKS`]) — what
 /// [`crate::ClaimDigestStepCircuit`] uses.
-pub fn sha256_var<Scalar, CS>(
-  cs: CS,
-  raw_bits: &[Boolean],
-  real_len: usize,
-) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
+pub fn sha256_var<Scalar, CS>(cs: CS, raw_bits: &[Boolean], real_len: usize) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -506,10 +485,7 @@ mod native_tests {
       use sha2::compress256;
       use sha2::digest::generic_array::GenericArray;
       use sha2::digest::typenum::U64;
-      let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-      ];
+      let mut state: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
       for block in prefix.chunks(64) {
         let ga: GenericArray<u8, U64> = GenericArray::clone_from_slice(block);
         compress256(&mut state, &[ga]);
@@ -520,10 +496,7 @@ mod native_tests {
       }
 
       let expected = native_reference_digest(&message, real_len);
-      assert_eq!(
-        digest, expected,
-        "native_padded_buffer mismatch at real_len={real_len} (blocks={blocks})"
-      );
+      assert_eq!(digest, expected, "native_padded_buffer mismatch at real_len={real_len} (blocks={blocks})");
     }
   }
 
@@ -619,8 +592,8 @@ mod circuit_tests {
     for real_len in lengths {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let raw_bits = alloc_raw_bits(&mut cs, &message);
-      let (digest_bits, _msg_active) = sha256_var(cs.namespace(|| format!("sha256_var real_len={real_len}")), &raw_bits, real_len)
-        .expect("sha256_var synthesis");
+      let (digest_bits, _msg_active) =
+        sha256_var(cs.namespace(|| format!("sha256_var real_len={real_len}")), &raw_bits, real_len).expect("sha256_var synthesis");
 
       if let Some(reason) = cs.which_is_unsatisfied() {
         panic!("real_len={real_len}: constraint system unsatisfied at: {reason}");
@@ -702,8 +675,7 @@ mod circuit_tests {
     for real_len in [0, 1, 56, 90, 127, MAX_VAR_MESSAGE_BYTES] {
       let mut cs = TestConstraintSystem::<Scalar>::new();
       let raw_bits = alloc_raw_bits(&mut cs, &message);
-      let (_, msg_active) = sha256_var(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len)
-        .expect("synthesis");
+      let (_, msg_active) = sha256_var(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len).expect("synthesis");
       assert_eq!(msg_active.len(), MAX_VAR_MESSAGE_BYTES);
       for (byte_idx, active) in msg_active.iter().enumerate() {
         assert_eq!(
@@ -742,9 +714,7 @@ mod circuit_tests {
         })
         .collect::<Vec<_>>();
 
-      let (digest_bits, msg_active) =
-        sha256_var_sized(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len, MAX, BLOCKS)
-          .expect("synthesis");
+      let (digest_bits, msg_active) = sha256_var_sized(cs.namespace(|| format!("real_len={real_len}")), &raw_bits, real_len, MAX, BLOCKS).expect("synthesis");
 
       if let Some(reason) = cs.which_is_unsatisfied() {
         panic!("real_len={real_len}: constraint system unsatisfied at: {reason}");

@@ -9,9 +9,9 @@
 use bellpepper_core::test_cs::TestConstraintSystem;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
+use zk_cred_vega::Engine_;
 use zk_cred_vega::mdoc_age::{self, DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 use zk_cred_vega::offset_bind::Landmarks;
-use zk_cred_vega::Engine_;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
@@ -24,12 +24,14 @@ const NOW: &[u8; 20] = b"2026-10-10T12:00:00Z";
 fn main() {
   let docs = ["mdl_iso18013", "pid_arf18", "photo_id_23220", "photo_id_23220_bare_date"];
   println!("\n  offset-based age proof, measured per document type");
-  println!("  {:<26} {:>7} {:>5} {:>4} {:>7} {:>12}", "fixture", "bytes", "blks", "ns", "entries", "constraints");
+  println!(
+    "  {:<26} {:>7} {:>5} {:>4} {:>7} {:>12}",
+    "fixture", "bytes", "blks", "ns", "entries", "constraints"
+  );
   let mut shapes = Vec::new();
 
   for name in docs {
-    let json: serde_json::Value =
-      serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
     let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
     let lm = &json["landmarks"];
     let ns = json["namespace"].as_str().unwrap();
@@ -44,7 +46,7 @@ fn main() {
       sig_structure: sig.clone(),
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
-      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
+        validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -61,7 +63,7 @@ fn main() {
         _ => DateEncoding::Bare,
       },
       device_auth: {
-        use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+        use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
         let kb: [u8; 32] = hex::decode(json["device_private_key_hex"].as_str().unwrap()).unwrap().try_into().unwrap();
         let sk = SigningKey::from_bytes(&kb.into()).unwrap();
         let sig: Signature = sk.sign_prehash(SESSION).unwrap();
@@ -110,14 +112,19 @@ fn main() {
 
   println!("\n  every document type synthesises the SAME {total} constraints,");
   println!("  so one setup and one published artifact serves all of them.");
-  println!("\n  of which SHA-256 over the credential  {:>9}  {:.0}%",
+  println!(
+    "\n  of which SHA-256 over the credential  {:>9}  {:.0}%",
     mdoc_age::SIG_STRUCTURE_BLOCKS * COMP,
-    (mdoc_age::SIG_STRUCTURE_BLOCKS * COMP) as f64 * 100.0 / total as f64);
+    (mdoc_age::SIG_STRUCTURE_BLOCKS * COMP) as f64 * 100.0 / total as f64
+  );
 
   // What the reconstruct architecture would need for the largest of them.
   let photo_entries = 56;
   let recon = photo_entries * STEP + mdoc_age::SIG_STRUCTURE_BLOCKS * COMP + photo_entries * COMP + 400_000 + 10_256;
-  println!("\n  reconstruct architecture, Photo ID's {photo_entries} entries: {recon} ({:.1}x)", recon as f64 / total as f64);
+  println!(
+    "\n  reconstruct architecture, Photo ID's {photo_entries} entries: {recon} ({:.1}x)",
+    recon as f64 / total as f64
+  );
   println!("  and it would need a separate circuit, setup and artifact per");
   println!("  attribute count -- 35 for the mDL, 34 for the PID, 56 here.\n");
 }

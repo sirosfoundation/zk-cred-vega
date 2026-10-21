@@ -73,17 +73,17 @@
 //! anywhere in `vega-prover`'s book/spec/README as of this writing.
 
 use crate::ecdsa::verify_ecdsa_p256_with_digest;
-use crate::nonnative::bignat::{limbs_to_nat, BigNat, BigNatParams};
+use crate::nonnative::bignat::{BigNat, BigNatParams, limbs_to_nat};
 use bellpepper_core::{
+  ConstraintSystem, LinearCombination, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, LinearCombination, SynthesisError,
 };
 use ff::PrimeFieldBits;
 use num_bigint::BigInt;
 use sha2::{Digest, Sha256};
 use std::marker::PhantomData;
-use vega_prover::traits::{circuit::VegaCircuit, Engine};
+use vega_prover::traits::{Engine, circuit::VegaCircuit};
 
 use crate::ecdsa::{LIMB_WIDTH, N_LIMBS};
 
@@ -184,9 +184,7 @@ pub(crate) fn native_u32_to_bits<S: ff::PrimeField>(value: u32) -> Vec<S> {
 /// offset-based circuit derives its ECDSA message digest from an
 /// in-circuit SHA-256 exactly as this module does, and re-deriving it a
 /// second, independent way is how the two drift apart.
-pub fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(
-  bits: &[Boolean],
-) -> Result<BigNat<Scalar>, SynthesisError> {
+pub fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(bits: &[Boolean]) -> Result<BigNat<Scalar>, SynthesisError> {
   assert_eq!(bits.len(), N_LIMBS * LIMB_WIDTH);
 
   let mut limbs = Vec::with_capacity(N_LIMBS);
@@ -216,9 +214,7 @@ pub fn bits_be_to_bignat<Scalar: PrimeFieldBits, CS: ConstraintSystem<Scalar>>(
     };
   }
 
-  let value = limb_values
-    .as_ref()
-    .map(|vs| limbs_to_nat::<Scalar, _, _>(vs.iter(), LIMB_WIDTH));
+  let value = limb_values.as_ref().map(|vs| limbs_to_nat::<Scalar, _, _>(vs.iter(), LIMB_WIDTH));
 
   Ok(BigNat {
     limbs,
@@ -245,11 +241,7 @@ pub(crate) fn native_bytes_to_bits<S: ff::PrimeField>(bytes: &[u8]) -> Vec<S> {
 /// `Boolean`) — the same per-bit pattern used repeatedly by this circuit's
 /// public outputs, factored out since it's now needed for `z` and five
 /// MSO-body fields.
-pub(crate) fn inputize_bits<S: ff::PrimeField, CS: ConstraintSystem<S>>(
-  cs: &mut CS,
-  bits: &[Boolean],
-  label: &str,
-) -> Result<(), SynthesisError> {
+pub(crate) fn inputize_bits<S: ff::PrimeField, CS: ConstraintSystem<S>>(cs: &mut CS, bits: &[Boolean], label: &str) -> Result<(), SynthesisError> {
   for (i, bit) in bits.iter().enumerate() {
     let value = bit.get_value().map(|b| if b { S::ONE } else { S::ZERO });
     let num = AllocatedNum::alloc(cs.namespace(|| format!("{label} bit {i} as num")), || {
@@ -309,10 +301,7 @@ where
     Ok(values)
   }
 
-  fn shared<CS: ConstraintSystem<Eng::Scalar>>(
-    &self,
-    _cs: &mut CS,
-  ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
+  fn shared<CS: ConstraintSystem<Eng::Scalar>>(&self, _cs: &mut CS) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
     Ok(vec![])
   }
 
@@ -331,8 +320,7 @@ where
     // witness splices, now including each variable-width digestID — see
     // crate::mso's module doc) as a flat, fixed-size bit vector, plus the
     // real (non-don't-care) length for sha256_var_sized below.
-    let (mso_bits, real_len, body_bits) =
-      crate::mso::alloc_sig_structure_bits(cs, &self.digest_ids, &self.claim_digests, &self.mso_body)?;
+    let (mso_bits, real_len, body_bits) = crate::mso::alloc_sig_structure_bits(cs, &self.digest_ids, &self.claim_digests, &self.mso_body)?;
     let (z_bits, _msg_active) = crate::sha256_var::sha256_var_sized(
       cs.namespace(|| "z = sha256_var(Sig_structure)"),
       &mso_bits,
@@ -399,9 +387,7 @@ where
         .iter()
         .flat_map(|byte| (0..8).rev().map(move |b| (byte >> b) & 1u8 == 1u8))
         .enumerate()
-        .map(|(j, b)| {
-          AllocatedBit::alloc(cs.namespace(|| format!("claim_digest {i} byte-bit {j}")), Some(b)).map(Boolean::from)
-        })
+        .map(|(j, b)| AllocatedBit::alloc(cs.namespace(|| format!("claim_digest {i} byte-bit {j}")), Some(b)).map(Boolean::from))
         .collect::<Result<Vec<_>, _>>()?;
       let mut blind_input = digest_bits;
       blind_input.extend(nonce_bits.clone());
@@ -411,15 +397,7 @@ where
 
     let z_bn = bits_be_to_bignat::<Eng::Scalar, CS>(&z_bits)?;
 
-    verify_ecdsa_p256_with_digest(
-      cs.namespace(|| "ecdsa"),
-      &qx_num,
-      &qy_num,
-      &self.r,
-      &self.s,
-      &self.s_inv,
-      &z_bn,
-    )?;
+    verify_ecdsa_p256_with_digest(cs.namespace(|| "ecdsa"), &qx_num, &qy_num, &self.r, &self.s, &self.s_inv, &z_bn)?;
 
     Ok(vec![])
   }
@@ -442,13 +420,13 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::Engine_;
   use crate::nonnative::util::nat_to_f;
   use crate::p256_ecc::p256_order;
-  use crate::Engine_;
   use bellpepper::gadgets::sha256::sha256;
   use bellpepper_core::test_cs::TestConstraintSystem;
   use num_bigint::Sign;
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
 
   /// Isolates `bits_be_to_bignat` from everything else: hash a known
   /// message via the real `sha256` gadget, pack the output bits into a
@@ -466,9 +444,7 @@ mod tests {
       .iter()
       .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
       .enumerate()
-      .map(|(i, b)| {
-        AllocatedBit::alloc(cs.namespace(|| format!("bit {i}")), Some(b)).map(Boolean::from)
-      })
+      .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("bit {i}")), Some(b)).map(Boolean::from))
       .collect::<Result<Vec<_>, _>>()
       .unwrap();
     let z_bits = sha256(cs.namespace(|| "sha256"), &input_bits).unwrap();
@@ -532,9 +508,7 @@ mod tests {
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let shared = circuit.shared(&mut cs).expect("shared");
     let precommitted = circuit.precommitted(&mut cs, &shared).expect("precommitted");
-    circuit
-      .synthesize(&mut cs, &shared, &precommitted, None)
-      .expect("synthesize");
+    circuit.synthesize(&mut cs, &shared, &precommitted, None).expect("synthesize");
 
     if let Some(reason) = cs.which_is_unsatisfied() {
       panic!("constraint system unsatisfied at: {reason}");

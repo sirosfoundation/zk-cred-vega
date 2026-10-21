@@ -6,11 +6,11 @@
 //! prover does but without proving, so it's fast enough to iterate on.
 
 use bellpepper_core::{
+  ConstraintSystem,
   boolean::{AllocatedBit, Boolean},
   test_cs::TestConstraintSystem,
-  ConstraintSystem,
 };
-use zk_cred_vega::{mso_splice::ENTRY_TAIL_LEN, Engine_};
+use zk_cred_vega::{Engine_, mso_splice::ENTRY_TAIL_LEN};
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
@@ -19,11 +19,7 @@ fn alloc_bits<CS: ConstraintSystem<Scalar>>(cs: &mut CS, bytes: &[u8], tag: &str
     .iter()
     .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1u8 == 1u8))
     .enumerate()
-    .map(|(i, b)| {
-      AllocatedBit::alloc(cs.namespace(|| format!("{tag} {i}")), Some(b))
-        .map(Boolean::from)
-        .unwrap()
-    })
+    .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("{tag} {i}")), Some(b)).map(Boolean::from).unwrap())
     .collect()
 }
 
@@ -75,12 +71,7 @@ fn main() {
   let item: Vec<u8> = (0..zk_cred_vega::MAX_CLAIM_BYTES_V1).map(|i| (i * 3 + 1) as u8).collect();
   let bits = alloc_bits(&mut cs, &item, "i");
   let base = cs.num_constraints();
-  let _ = zk_cred_vega::digest_id_extract::extract_digest_id(
-    cs.namespace(|| "d"),
-    &bits,
-    zk_cred_vega::digest_id_extract::DIGEST_ID_OFFSET_BYTES,
-    26,
-  );
+  let _ = zk_cred_vega::digest_id_extract::extract_digest_id(cs.namespace(|| "d"), &bits, zk_cred_vega::digest_id_extract::DIGEST_ID_OFFSET_BYTES, 26);
   let digest_id_extract = cs.num_constraints() - base;
 
   // ---- Sub-gadget: MSO splice assembly ------------------------------
@@ -95,13 +86,7 @@ fn main() {
     }
   });
   let base = cs.num_constraints();
-  let _ = zk_cred_vega::mso_splice::assemble_mso_sig_structure::<Scalar, _>(
-    cs.namespace(|| "a"),
-    &prefix,
-    &entries,
-    &suffix,
-  )
-  .unwrap();
+  let _ = zk_cred_vega::mso_splice::assemble_mso_sig_structure::<Scalar, _>(cs.namespace(|| "a"), &prefix, &entries, &suffix).unwrap();
   let splice = cs.num_constraints() - base;
 
   // ---- Sub-gadget: whole-MSO variable-length SHA-256 ----------------
@@ -111,19 +96,17 @@ fn main() {
   let buf: Vec<u8> = (0..mso_max).map(|i| (i % 251) as u8).collect();
   let raw = alloc_bits(&mut cs, &buf, "b");
   let base = cs.num_constraints();
-  let _ = zk_cred_vega::sha256_var::sha256_var_sized(
-    cs.namespace(|| "H"),
-    &raw,
-    mso_max - 20,
-    mso_max,
-    blocks,
-  )
-  .unwrap();
+  let _ = zk_cred_vega::sha256_var::sha256_var_sized(cs.namespace(|| "H"), &raw, mso_max - 20, mso_max, blocks).unwrap();
   let sha_mso = cs.num_constraints() - base;
 
   println!("\nzk-cred-vega constraint census");
-  println!("  MAX_CLAIMS={} MAX_CLAIM_BYTES={} MSO_MAX={} MSO_BLOCKS={}",
-    zk_cred_vega::MAX_CLAIMS_V1, zk_cred_vega::MAX_CLAIM_BYTES_V1, mso_max, blocks);
+  println!(
+    "  MAX_CLAIMS={} MAX_CLAIM_BYTES={} MSO_MAX={} MSO_BLOCKS={}",
+    zk_cred_vega::MAX_CLAIMS_V1,
+    zk_cred_vega::MAX_CLAIM_BYTES_V1,
+    mso_max,
+    blocks
+  );
 
   let step_total = sha_claim + digest_id_extract;
   let core_est = splice + sha_mso;
@@ -142,7 +125,7 @@ fn main() {
 
   // ---- Whole circuits, so ECDSA and glue are included -------------
   use num_bigint::{BigInt, Sign};
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
   use sha2::{Digest, Sha256};
   use vega_prover::traits::circuit::VegaCircuit;
 
@@ -170,15 +153,13 @@ fn main() {
   let qx = zk_cred_vega::nonnative::util::nat_to_f::<Scalar>(&BigInt::from_bytes_be(Sign::Plus, enc.x().unwrap())).unwrap();
   let qy = zk_cred_vega::nonnative::util::nat_to_f::<Scalar>(&BigInt::from_bytes_be(Sign::Plus, enc.y().unwrap())).unwrap();
 
-  let core = zk_cred_vega::mdoc_core::MdocCoreCircuit::<Engine_>::new(
-    qx, qy, r, sv, s_inv, digest_ids, claim_digests, body, nonce);
+  let core = zk_cred_vega::mdoc_core::MdocCoreCircuit::<Engine_>::new(qx, qy, r, sv, s_inv, digest_ids, claim_digests, body, nonce);
   let mut cs = TestConstraintSystem::<Scalar>::new();
   let shared = core.shared(&mut cs).unwrap();
   let _ = core.precommitted(&mut cs, &shared).unwrap();
   let core_total = cs.num_constraints();
 
-  let step = zk_cred_vega::ClaimDigestStepCircuit::<Engine_>::new(
-    msg.clone(), claim_len, true, 26, nonce);
+  let step = zk_cred_vega::ClaimDigestStepCircuit::<Engine_>::new(msg.clone(), claim_len, true, 26, nonce);
   let mut cs2 = TestConstraintSystem::<Scalar>::new();
   let sh2 = step.shared(&mut cs2).unwrap();
   let _ = step.precommitted(&mut cs2, &sh2).unwrap();
@@ -201,24 +182,22 @@ fn main() {
     let mut cs = TestConstraintSystem::<Scalar>::new();
     let qxn = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(qx)).unwrap();
     let qyn = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(qy)).unwrap();
-    let zbn = BigNat::alloc_from_nat(
-      cs.namespace(|| "z"),
-      || Ok(BigInt::from_bytes_be(Sign::Plus, &z)),
-      64, 4).unwrap();
+    let zbn = BigNat::alloc_from_nat(cs.namespace(|| "z"), || Ok(BigInt::from_bytes_be(Sign::Plus, &z)), 64, 4).unwrap();
     let base = cs.num_constraints();
     let n2 = zk_cred_vega::p256_ecc::p256_order();
     let sv2 = BigInt::from_bytes_be(Sign::Plus, &sig.s().to_bytes());
     let si2 = sv2.modpow(&(n2.clone() - BigInt::from(2)), &n2);
     let r2 = BigInt::from_bytes_be(Sign::Plus, &sig.r().to_bytes());
-    let _ = zk_cred_vega::ecdsa::verify_ecdsa_p256_with_digest(
-      cs.namespace(|| "e"), &qxn, &qyn, &r2, &sv2, &si2, &zbn);
+    let _ = zk_cred_vega::ecdsa::verify_ecdsa_p256_with_digest(cs.namespace(|| "e"), &qxn, &qyn, &r2, &sv2, &si2, &zbn);
     println!("\n  ECDSA-P256 verify gadget            {:>9}", cs.num_constraints() - base);
   }
 
   println!("\n  public values/instance:");
   println!("    step public values : {}", step.public_values().unwrap().len());
   println!("    core public values : {}", core.public_values().unwrap().len());
-  println!("    total across 4 steps + core : {}",
-    step.public_values().unwrap().len() * 4 + core.public_values().unwrap().len());
+  println!(
+    "    total across 4 steps + core : {}",
+    step.public_values().unwrap().len() * 4 + core.public_values().unwrap().len()
+  );
   println!();
 }

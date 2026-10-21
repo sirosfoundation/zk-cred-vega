@@ -4,7 +4,7 @@
 //! folding transcript — not needed here. See `super`'s module doc.
 
 use super::{BitAccess, OptionExt};
-use bellpepper_core::{num::AllocatedNum, ConstraintSystem, LinearCombination, SynthesisError, Variable};
+use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, Variable, num::AllocatedNum};
 use ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 
@@ -29,29 +29,17 @@ pub struct Bitvector<Scalar: PrimeField> {
 impl<Scalar: PrimeField> Bit<Scalar> {
   /// Allocate a variable in the constraint system which can only be a
   /// boolean value.
-  pub fn alloc<CS: ConstraintSystem<Scalar>>(
-    mut cs: CS,
-    value: Option<bool>,
-  ) -> Result<Self, SynthesisError> {
+  pub fn alloc<CS: ConstraintSystem<Scalar>>(mut cs: CS, value: Option<bool>) -> Result<Self, SynthesisError> {
     let var = cs.alloc(
       || "boolean",
       || {
-        if *value.grab()? {
-          Ok(Scalar::ONE)
-        } else {
-          Ok(Scalar::ZERO)
-        }
+        if *value.grab()? { Ok(Scalar::ONE) } else { Ok(Scalar::ZERO) }
       },
     )?;
 
     // Constrain: (1 - a) * a = 0
     // This constrains a to be either 0 or 1.
-    cs.enforce(
-      || "boolean constraint",
-      |lc| lc + CS::one() - var,
-      |lc| lc + var,
-      |lc| lc,
-    );
+    cs.enforce(|| "boolean constraint", |lc| lc + CS::one() - var, |lc| lc + var, |lc| lc);
 
     Ok(Self {
       bit: LinearCombination::zero() + var,
@@ -97,11 +85,7 @@ impl<Scalar: PrimeField> Num<Scalar> {
   }
 
   /// Checks that the `Num` fits in the given number of bits.
-  pub fn fits_in_bits<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    n_bits: usize,
-  ) -> Result<(), SynthesisError> {
+  pub fn fits_in_bits<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, n_bits: usize) -> Result<(), SynthesisError> {
     let v = self.value;
 
     // Allocate all but the first bit.
@@ -110,11 +94,7 @@ impl<Scalar: PrimeField> Num<Scalar> {
         cs.alloc(
           || format!("bit {i}"),
           || {
-            let r = if *v.grab()?.get_bit(i).grab()? {
-              Scalar::ONE
-            } else {
-              Scalar::ZERO
-            };
+            let r = if *v.grab()?.get_bit(i).grab()? { Scalar::ONE } else { Scalar::ZERO };
             Ok(r)
           },
         )
@@ -122,12 +102,7 @@ impl<Scalar: PrimeField> Num<Scalar> {
       .collect::<Result<_, _>>()?;
 
     for (i, v) in bits.iter().enumerate() {
-      cs.enforce(
-        || format!("{i} is bit"),
-        |lc| lc + *v,
-        |lc| lc + CS::one() - *v,
-        |lc| lc,
-      )
+      cs.enforce(|| format!("{i} is bit"), |lc| lc + *v, |lc| lc + CS::one() - *v, |lc| lc)
     }
 
     // Last bit
@@ -162,13 +137,11 @@ impl<Scalar: PrimeField> Num<Scalar> {
   pub fn is_equal<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, other: &Bitvector<Scalar>) {
     let allocations = other.allocations.clone();
     let mut f = Scalar::ONE;
-    let sum = allocations
-      .iter()
-      .fold(LinearCombination::zero(), |lc, bit| {
-        let l = lc + (f, &bit.bit);
-        f = f.double();
-        l
-      });
+    let sum = allocations.iter().fold(LinearCombination::zero(), |lc, bit| {
+      let l = lc + (f, &bit.bit);
+      f = f.double();
+      l
+    });
     let sum_lc = LinearCombination::zero() + &self.num - &sum;
     cs.enforce(|| "sum", |lc| lc + &sum_lc, |lc| lc + CS::one(), |lc| lc);
   }
@@ -176,57 +149,30 @@ impl<Scalar: PrimeField> Num<Scalar> {
   /// Compute the natural number represented by an array of limbs.
   /// The limbs are assumed to be based the `limb_width` power of 2.
   /// Low-index bits are low-order
-  pub fn decompose<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-    n_bits: usize,
-  ) -> Result<Bitvector<Scalar>, SynthesisError> {
+  pub fn decompose<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS, n_bits: usize) -> Result<Bitvector<Scalar>, SynthesisError> {
     let values: Option<Vec<bool>> = self.value.as_ref().map(|v| {
       let num = *v;
       (0..n_bits).map(|i| num.get_bit(i).unwrap()).collect()
     });
     let allocations: Vec<Bit<Scalar>> = (0..n_bits)
-      .map(|bit_i| {
-        Bit::alloc(
-          cs.namespace(|| format!("bit{bit_i}")),
-          values.as_ref().map(|vs| vs[bit_i]),
-        )
-      })
+      .map(|bit_i| Bit::alloc(cs.namespace(|| format!("bit{bit_i}")), values.as_ref().map(|vs| vs[bit_i])))
       .collect::<Result<Vec<_>, _>>()?;
     let mut f = Scalar::ONE;
-    let sum = allocations
-      .iter()
-      .fold(LinearCombination::zero(), |lc, bit| {
-        let l = lc + (f, &bit.bit);
-        f = f.double();
-        l
-      });
+    let sum = allocations.iter().fold(LinearCombination::zero(), |lc, bit| {
+      let l = lc + (f, &bit.bit);
+      f = f.double();
+      l
+    });
     let sum_lc = LinearCombination::zero() + &self.num - &sum;
     cs.enforce(|| "sum", |lc| lc + &sum_lc, |lc| lc + CS::one(), |lc| lc);
-    let bits: Vec<LinearCombination<Scalar>> = allocations
-      .clone()
-      .into_iter()
-      .map(|a| LinearCombination::zero() + &a.bit)
-      .collect();
-    Ok(Bitvector {
-      allocations,
-      values,
-      bits,
-    })
+    let bits: Vec<LinearCombination<Scalar>> = allocations.clone().into_iter().map(|a| LinearCombination::zero() + &a.bit).collect();
+    Ok(Bitvector { allocations, values, bits })
   }
 
   /// Converts the `Num` to an `AllocatedNum` in the constraint system.
-  pub fn as_allocated_num<CS: ConstraintSystem<Scalar>>(
-    &self,
-    mut cs: CS,
-  ) -> Result<AllocatedNum<Scalar>, SynthesisError> {
+  pub fn as_allocated_num<CS: ConstraintSystem<Scalar>>(&self, mut cs: CS) -> Result<AllocatedNum<Scalar>, SynthesisError> {
     let new = AllocatedNum::alloc(cs.namespace(|| "alloc"), || Ok(*self.value.grab()?))?;
-    cs.enforce(
-      || "eq",
-      |lc| lc,
-      |lc| lc,
-      |lc| lc + new.get_variable() - &self.num,
-    );
+    cs.enforce(|| "eq", |lc| lc, |lc| lc, |lc| lc + new.get_variable() - &self.num);
     Ok(new)
   }
 }

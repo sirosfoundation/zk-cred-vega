@@ -19,10 +19,10 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
+use zk_cred_vega::Engine_;
 use zk_cred_vega::mdoc_age::{DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 use zk_cred_vega::mdoc_age_circuit::{self, ExpectedContext, MdocAgeCircuit};
 use zk_cred_vega::offset_bind::Landmarks;
-use zk_cred_vega::Engine_;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
@@ -43,7 +43,7 @@ const NOW: &[u8; 20] = b"2026-10-10T12:00:00Z";
 /// fixture's device key and hands the raw `(r, s)` to the library, the
 /// same way a wallet hands over what the SE returns.
 fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+  use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
   let b: [u8; 32] = hex::decode(key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&b.into()).unwrap();
   let sig: Signature = sk.sign_prehash(digest).unwrap();
@@ -51,13 +51,16 @@ fn sign_device_auth(key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
 }
 
 fn circuit(name: &str, cutoff: &[u8; 10], session: &[u8; 32], device_key: Option<&str>) -> MdocAgeCircuit<Engine_> {
-  let json: serde_json::Value =
-    serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
+  let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
   let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
   let lm = &json["landmarks"];
   let ns = json["namespace"].as_str().unwrap();
-  let t = json["claims"].as_array().unwrap().iter()
-    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns).unwrap();
+  let t = json["claims"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns)
+    .unwrap();
   let key = device_key.unwrap_or_else(|| json["device_private_key_hex"].as_str().unwrap());
 
   let w = &json["ecdsa_witness"];
@@ -69,7 +72,7 @@ fn circuit(name: &str, cutoff: &[u8; 10], session: &[u8; 32], device_key: Option
       sig_structure: sig,
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
-      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
+        validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -193,8 +196,14 @@ fn artifact_sizes() {
 
 // ---- The folded (multi-circuit) arithmetization ---------------------
 
-fn mc_build(name: &str, cutoff: &[u8; 10], session: &[u8; 32])
-  -> (Vec<zk_cred_vega::mdoc_age_mc::StepCircuit<Engine_>>, zk_cred_vega::mdoc_age_mc::CoreCircuit<Engine_>) {
+fn mc_build(
+  name: &str,
+  cutoff: &[u8; 10],
+  session: &[u8; 32],
+) -> (
+  Vec<zk_cred_vega::mdoc_age_mc::StepCircuit<Engine_>>,
+  zk_cred_vega::mdoc_age_mc::CoreCircuit<Engine_>,
+) {
   let c = circuit(name, cutoff, session, None);
   zk_cred_vega::mdoc_age_mc::build(&c.witness, &c.ecdsa, c.cutoff, c.now, c.device_auth_digest).unwrap()
 }

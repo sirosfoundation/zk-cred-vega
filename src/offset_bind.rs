@@ -109,11 +109,7 @@
 //! three namespaces, so its entries are followed by another namespace
 //! rather than by `deviceKeyInfo`.
 
-use bellpepper_core::{
-  boolean::Boolean,
-  num::AllocatedNum,
-  ConstraintSystem, LinearCombination, SynthesisError,
-};
+use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, boolean::Boolean, num::AllocatedNum};
 use ff::PrimeField;
 
 /// Rejects a malformed witness instead of aborting.
@@ -151,11 +147,7 @@ const VALUE_DIGESTS_OPEN_KEY: &[u8] = b"\x6cvalueDigests";
 /// The canonical CBOR map header for a map of `n` entries, one byte below
 /// 24 and two from 24 to 255.
 fn map_header(n: usize) -> Vec<u8> {
-  if n < 24 {
-    vec![0xa0 | n as u8]
-  } else {
-    vec![0xb8, n as u8]
-  }
+  if n < 24 { vec![0xa0 | n as u8] } else { vec![0xb8, n as u8] }
 }
 
 /// The literal that closes the table, extended through the holder's
@@ -217,11 +209,7 @@ pub const VALIDITY_WINDOW_LEN: usize = VALID_UNTIL_DELTA + TIMESTAMP_LEN;
 /// per byte, or about 27k for a window this size -- whereas allocating
 /// eight bits and checking one recomposition per pack costs roughly 130
 /// per pack. Callers comparing or matching bytes want the bits anyway.
-pub fn unpack_window_bits<Scalar, CS>(
-  mut cs: CS,
-  window: &SelectedWindow<Scalar>,
-  total_len: usize,
-) -> Result<Vec<Boolean>, SynthesisError>
+pub fn unpack_window_bits<Scalar, CS>(mut cs: CS, window: &SelectedWindow<Scalar>, total_len: usize) -> Result<Vec<Boolean>, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -281,10 +269,7 @@ where
   let mut bits = Vec::with_capacity(8);
   let mut recomposed = LinearCombination::<Scalar>::zero();
   for i in 0..8 {
-    let b = bellpepper_core::boolean::AllocatedBit::alloc(
-      cs.namespace(|| format!("bit {i}")),
-      native.map(|n| (n >> (7 - i)) & 1 == 1),
-    )?;
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(cs.namespace(|| format!("bit {i}")), native.map(|n| (n >> (7 - i)) & 1 == 1))?;
     let mut coeff = Scalar::ONE;
     for _ in 0..(7 - i) {
       coeff = coeff.double();
@@ -292,7 +277,12 @@ where
     recomposed = recomposed + (coeff, b.get_variable());
     bits.push(Boolean::from(b));
   }
-  cs.enforce(|| "byte recomposes from its bits", |lc| lc + &recomposed, |lc| lc + CS::one(), |lc| lc + byte.get_variable());
+  cs.enforce(
+    || "byte recomposes from its bits",
+    |lc| lc + &recomposed,
+    |lc| lc + CS::one(),
+    |lc| lc + byte.get_variable(),
+  );
   Ok(bits)
 }
 
@@ -306,12 +296,7 @@ pub type ValidityWindow<Scalar> = (Vec<AllocatedNum<Scalar>>, Vec<AllocatedNum<S
 /// not when it was issued or when it expires -- those are a stable
 /// per-credential fingerprint, and publishing them is one of the leaks
 /// that made the previous circuit revision linkable.
-pub fn bind_validity<Scalar, CS>(
-  mut cs: CS,
-  bits: &[Boolean],
-  native: &[u8],
-  validity_info_offset: usize,
-) -> Result<ValidityWindow<Scalar>, SynthesisError>
+pub fn bind_validity<Scalar, CS>(mut cs: CS, bits: &[Boolean], native: &[u8], validity_info_offset: usize) -> Result<ValidityWindow<Scalar>, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -431,11 +416,7 @@ fn tstr_header(len: usize) -> Result<Vec<u8>, SynthesisError> {
   if len >= 256 {
     return Err(reject(format!("text-string header for {len} bytes needs more than two bytes")));
   }
-  Ok(if len < 24 {
-    vec![0x60 | len as u8]
-  } else {
-    vec![0x78, len as u8]
-  })
+  Ok(if len < 24 { vec![0x60 | len as u8] } else { vec![0x78, len as u8] })
 }
 
 /// How many bytes `<tstr header><namespace><entry-count map header>`
@@ -549,10 +530,7 @@ where
   let mut count_sum = LinearCombination::<Scalar>::zero();
   let mut count_lc = LinearCombination::<Scalar>::zero();
   for n in 1..=MAX_NAMESPACE_ENTRIES {
-    let b = bellpepper_core::boolean::AllocatedBit::alloc(
-      cs.namespace(|| format!("count {n}")),
-      Some(n == num_entries),
-    )?;
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(cs.namespace(|| format!("count {n}")), Some(n == num_entries))?;
     count_sum = count_sum + b.get_variable();
     count_lc = count_lc + (Scalar::from(n as u64), b.get_variable());
     count_sel.push(b);
@@ -606,10 +584,7 @@ where
     let mut width_sum = LinearCombination::<Scalar>::zero();
     let real_width = if is_live { digest_id_width(native, here_native)? } else { 0 };
     for (w, _) in DIGEST_ID_WIDTHS {
-      let b = bellpepper_core::boolean::AllocatedBit::alloc(
-        cs.namespace(|| format!("width {w}")),
-        Some(is_live && w == real_width),
-      )?;
+      let b = bellpepper_core::boolean::AllocatedBit::alloc(cs.namespace(|| format!("width {w}")), Some(is_live && w == real_width))?;
       width_sum = width_sum + b.get_variable();
       width_sel.push(b);
     }
@@ -728,12 +703,7 @@ pub fn doc_type_prefix_len(doc_type: &str) -> Result<usize, SynthesisError> {
 /// A byte's value as a linear combination of its eight big-endian bits,
 /// scaled by `scale`. Free: no constraint, just a re-weighting of
 /// variables the caller has already allocated for the hash.
-pub fn byte_lc<Scalar: PrimeField>(
-  bits: &[Boolean],
-  one: bellpepper_core::Variable,
-  byte_idx: usize,
-  scale: Scalar,
-) -> LinearCombination<Scalar> {
+pub fn byte_lc<Scalar: PrimeField>(bits: &[Boolean], one: bellpepper_core::Variable, byte_idx: usize, scale: Scalar) -> LinearCombination<Scalar> {
   let mut lc = LinearCombination::zero();
   for j in 0..8 {
     let mut coeff = scale;
@@ -894,7 +864,12 @@ where
       );
       acc = acc + term.get_variable();
     }
-    cs.enforce(|| format!("pack {p} is the selected window"), |lc| lc + &acc, |lc| lc + CS::one(), |lc| lc + out.get_variable());
+    cs.enforce(
+      || format!("pack {p} is the selected window"),
+      |lc| lc + &acc,
+      |lc| lc + CS::one(),
+      |lc| lc + out.get_variable(),
+    );
     packs.push(out);
   }
 
@@ -968,10 +943,7 @@ where
   let mut sum = LinearCombination::<Scalar>::zero();
   let mut len_lc = LinearCombination::<Scalar>::zero();
   for n in 1..=ANCHOR_TEXT_WINDOW {
-    let b = bellpepper_core::boolean::AllocatedBit::alloc(
-      cs.namespace(|| format!("length {n}")),
-      Some(n == prefix_len),
-    )?;
+    let b = bellpepper_core::boolean::AllocatedBit::alloc(cs.namespace(|| format!("length {n}")), Some(n == prefix_len))?;
     sum = sum + b.get_variable();
     len_lc = len_lc + (Scalar::from(n as u64), b.get_variable());
     len_sel.push(b);
@@ -1025,9 +997,7 @@ where
       lc = lc + (coeff, masked_bytes[lo + i].get_variable());
       value = value.and_then(|a| masked_bytes[lo + i].get_value().map(|b| a + coeff * b));
     }
-    let out = AllocatedNum::alloc(cs.namespace(|| format!("masked pack {p}")), || {
-      value.ok_or(SynthesisError::AssignmentMissing)
-    })?;
+    let out = AllocatedNum::alloc(cs.namespace(|| format!("masked pack {p}")), || value.ok_or(SynthesisError::AssignmentMissing))?;
     cs.enforce(
       || format!("masked pack {p} recombines"),
       |lc2| lc2 + &lc,
@@ -1136,10 +1106,7 @@ where
   let mut recomposed = LinearCombination::<Scalar>::zero();
   let mut coeff = Scalar::ONE;
   for i in 0..bits_needed {
-    let bit = bellpepper_core::boolean::AllocatedBit::alloc(
-      cs.namespace(|| format!("difference bit {i}")),
-      Some((native_difference >> i) & 1 == 1),
-    )?;
+    let bit = bellpepper_core::boolean::AllocatedBit::alloc(cs.namespace(|| format!("difference bit {i}")), Some((native_difference >> i) & 1 == 1))?;
     recomposed = recomposed + (coeff, bit.get_variable());
     coeff = coeff.double();
   }
@@ -1257,7 +1224,10 @@ where
   CS: ConstraintSystem<Scalar>,
 {
   if shape.num_entries >= 256 {
-    return Err(reject(format!("{} valueDigests entries needs a wider map header than this binding encodes", shape.num_entries)));
+    return Err(reject(format!(
+      "{} valueDigests entries needs a wider map header than this binding encodes",
+      shape.num_entries
+    )));
   }
 
   // ---- Anchor 1: `6C "valueDigests"` -------------------------------
@@ -1417,14 +1387,7 @@ where
       .checked_add(delta)
       .ok_or_else(|| reject(format!("the deviceKeyInfo landmark at {} overflows", landmarks.device_key_info)))?;
     window_end(at, 32, native.len(), label)?;
-    let w = select_window::<Scalar, _>(
-      cs.namespace(|| label),
-      bits,
-      native,
-      &anchor_offsets(native.len()),
-      at,
-      32,
-    )?;
+    let w = select_window::<Scalar, _>(cs.namespace(|| label), bits, native, &anchor_offsets(native.len()), at, 32)?;
     cs.enforce(
       || format!("{label} sits at +{delta} from deviceKeyInfo"),
       |lc| lc + &w.offset - &end_window.offset - (Scalar::from(delta as u64), CS::one()),
@@ -1440,9 +1403,7 @@ where
       shift *= Scalar::from(256u64);
     }
     let value = w.packs[0].get_value().and_then(|hi| w.packs[1].get_value().map(|lo| hi * shift + lo));
-    let coord = AllocatedNum::alloc(cs.namespace(|| format!("{label} value")), || {
-      value.ok_or(SynthesisError::AssignmentMissing)
-    })?;
+    let coord = AllocatedNum::alloc(cs.namespace(|| format!("{label} value")), || value.ok_or(SynthesisError::AssignmentMissing))?;
     cs.enforce(
       || format!("{label} recombines its packs"),
       |lc| lc + (shift, w.packs[0].get_variable()) + w.packs[1].get_variable(),

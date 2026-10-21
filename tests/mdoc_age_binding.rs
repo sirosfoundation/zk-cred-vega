@@ -14,9 +14,9 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 use sha2::{Digest, Sha256};
-use zk_cred_vega::mdoc_age::{synthesize, DateEncoding, DeviceAuthWitness, MdocAgeWitness};
-use zk_cred_vega::offset_bind::Landmarks;
 use zk_cred_vega::Engine_;
+use zk_cred_vega::mdoc_age::{DateEncoding, DeviceAuthWitness, MdocAgeWitness, synthesize};
+use zk_cred_vega::offset_bind::Landmarks;
 
 type Scalar = <Engine_ as vega_prover::traits::Engine>::Scalar;
 
@@ -44,7 +44,7 @@ const ALL_DOCS: [&str; 4] = ["mdl_iso18013", "pid_arf18", "photo_id_23220", "pho
 /// Signs a verifier digest with the holder's device key, the way a
 /// wallet's secure element would.
 fn sign_device_auth(private_key_hex: &str, digest: &[u8; 32]) -> DeviceAuthWitness {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+  use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
   let bytes: [u8; 32] = hex::decode(private_key_hex).unwrap().try_into().unwrap();
   let sk = SigningKey::from_bytes(&bytes.into()).unwrap();
   let sig: Signature = sk.sign_prehash(digest).unwrap();
@@ -58,8 +58,7 @@ struct Loaded {
 }
 
 fn load(name: &str) -> Loaded {
-  let raw = std::fs::read_to_string(format!("test-vectors/{name}.json"))
-    .expect("fixture missing — run `cargo run --release --example gen_mdoc_fixtures`");
+  let raw = std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture missing — run `cargo run --release --example gen_mdoc_fixtures`");
   let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
   let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
@@ -91,7 +90,7 @@ fn load(name: &str) -> Loaded {
       sig_structure: sig,
       landmarks: Landmarks {
         value_digests_key: lm["value_digests_key_offset"].as_u64().unwrap() as usize,
-      validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
+        validity_info: lm["validity_info_offset"].as_u64().unwrap() as usize,
         namespace_key: lm["namespace_key_offset"].as_u64().unwrap() as usize,
         region_start: lm["region_start"].as_u64().unwrap() as usize,
         device_key_info: lm["device_key_info_offset"].as_u64().unwrap() as usize,
@@ -231,7 +230,10 @@ fn a_digest_planted_in_the_device_key_is_rejected() {
   let out = synthesize(&mut cs, &attack, &l.ecdsa, CUTOFF, NOW, SESSION).expect("synthesis succeeds — this is a soundness check");
   assert!(!out.old_enough.get_value().unwrap(), "2015-01-01 is after the cutoff");
   let failed = cs.which_is_unsatisfied().expect("the planted digest must not satisfy the circuit");
-  assert!(failed.contains("inside the region"), "expected the region range-bind to reject this, got {failed}");
+  assert!(
+    failed.contains("inside the region"),
+    "expected the region range-bind to reject this, got {failed}"
+  );
 }
 
 /// Rejection is by *location*, not by a mismatched hash.
@@ -273,7 +275,10 @@ fn a_digest_before_the_namespace_sub_map_is_rejected() {
 #[test]
 fn a_proof_is_bound_to_its_namespace_and_entry_count() {
   for (label, mutate) in [
-    ("namespace", Box::new(|w: &mut MdocAgeWitness| w.namespace = "org.iso.18013.5.1".to_string()) as Box<dyn Fn(&mut MdocAgeWitness)>),
+    (
+      "namespace",
+      Box::new(|w: &mut MdocAgeWitness| w.namespace = "org.iso.18013.5.1".to_string()) as Box<dyn Fn(&mut MdocAgeWitness)>,
+    ),
     ("entry count", Box::new(|w: &mut MdocAgeWitness| w.num_entries -= 1)),
   ] {
     let l = load("photo_id_23220");
@@ -346,20 +351,37 @@ fn malformed_witnesses_return_errors_rather_than_panicking() {
   type Corruption = (&'static str, Box<dyn Fn(&mut MdocAgeWitness)>);
   let l = load("pid_arf18");
   let cases: Vec<Corruption> = vec![
-    ("Sig_structure over budget", Box::new(|w: &mut MdocAgeWitness| w.sig_structure = vec![0u8; 8192])),
+    (
+      "Sig_structure over budget",
+      Box::new(|w: &mut MdocAgeWitness| w.sig_structure = vec![0u8; 8192]),
+    ),
     ("item over budget", Box::new(|w: &mut MdocAgeWitness| w.item_bytes = vec![0u8; 4096])),
-    ("inverted region", Box::new(|w: &mut MdocAgeWitness| w.landmarks.device_key_info = w.landmarks.region_start - 1)),
-    ("docType landmark past the end", Box::new(|w: &mut MdocAgeWitness| w.landmarks.doc_type_key = usize::MAX - 64)),
+    (
+      "inverted region",
+      Box::new(|w: &mut MdocAgeWitness| w.landmarks.device_key_info = w.landmarks.region_start - 1),
+    ),
+    (
+      "docType landmark past the end",
+      Box::new(|w: &mut MdocAgeWitness| w.landmarks.doc_type_key = usize::MAX - 64),
+    ),
     ("too many entries", Box::new(|w: &mut MdocAgeWitness| w.num_entries = 300)),
     ("namespace too long", Box::new(|w: &mut MdocAgeWitness| w.namespace = "n".repeat(300))),
-    ("unreachable elementValue offset", Box::new(|w: &mut MdocAgeWitness| w.element_value_key_offset = 7)),
-    ("namespace key before the table", Box::new(|w: &mut MdocAgeWitness| w.landmarks.namespace_key = 0)),
+    (
+      "unreachable elementValue offset",
+      Box::new(|w: &mut MdocAgeWitness| w.element_value_key_offset = 7),
+    ),
+    (
+      "namespace key before the table",
+      Box::new(|w: &mut MdocAgeWitness| w.landmarks.namespace_key = 0),
+    ),
   ];
   for (name, mutate) in cases {
     let mut w = l.witness.clone();
     mutate(&mut w);
     let mut cs = TestConstraintSystem::<Scalar>::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, NOW, SESSION).map(|_| ())));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      synthesize(&mut cs, &w, &l.ecdsa, CUTOFF, NOW, SESSION).map(|_| ())
+    }));
     match result {
       Err(_) => panic!("{name}: panicked instead of returning an error"),
       Ok(Ok(())) => panic!("{name}: was accepted, but the witness is malformed"),
@@ -412,10 +434,7 @@ fn a_proof_does_not_replay_to_a_different_session() {
 
   let mut cs = TestConstraintSystem::<Scalar>::new();
   let _ = synthesize(&mut cs, &l.witness, &l.ecdsa, CUTOFF, NOW, OTHER).expect("synthesis");
-  assert!(
-    cs.which_is_unsatisfied().is_some(),
-    "a proof made for one session must not satisfy another"
-  );
+  assert!(cs.which_is_unsatisfied().is_some(), "a proof made for one session must not satisfy another");
 }
 
 /// The device key never becomes a public value.
@@ -465,11 +484,7 @@ fn the_device_key_is_never_exposed_to_the_verifier() {
   assert_eq!(out.cutoff.len(), 10);
   assert_eq!(out.device_auth_digest.len(), 2);
   assert_eq!(out.namespace.len(), PACKS);
-  assert_eq!(
-    exposed.len(),
-    2 * PACKS + 1 + 10 + 2 + 2,
-    "the public surface grew — check it is intended"
-  );
+  assert_eq!(exposed.len(), 2 * PACKS + 1 + 10 + 2 + 2, "the public surface grew — check it is intended");
 }
 
 /// Reassembles an anchor window from its packed field elements, the way
@@ -646,8 +661,8 @@ fn the_verifier_clock_is_part_of_the_accepted_statement() {
 /// else.
 #[test]
 fn the_acceptance_path_parses_the_published_anchor_windows() {
-  use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
   use vega_prover::traits::circuit::VegaCircuit;
+  use zk_cred_vega::mdoc_age_circuit::{ExpectedContext, MdocAgeCircuit, check_public_values};
 
   for (name, doc_type, namespace) in [
     ("mdl_iso18013", "org.iso.18013.5.1.mDL", "org.iso.18013.5.1"),
@@ -792,7 +807,7 @@ fn a_digest_from_a_later_namespace_is_rejected() {
 #[test]
 fn an_answer_about_another_namespace_is_rejected() {
   use vega_prover::traits::circuit::VegaCircuit;
-  use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
+  use zk_cred_vega::mdoc_age_circuit::{ExpectedContext, MdocAgeCircuit, check_public_values};
 
   let l = load("photo_id_cross_namespace");
   let other = l.json["claims"]
@@ -857,7 +872,7 @@ fn an_answer_about_another_namespace_is_rejected() {
 #[test]
 fn a_credential_from_an_unnamed_issuer_is_rejected() {
   use vega_prover::traits::circuit::VegaCircuit;
-  use zk_cred_vega::mdoc_age_circuit::{check_public_values, ExpectedContext, MdocAgeCircuit};
+  use zk_cred_vega::mdoc_age_circuit::{ExpectedContext, MdocAgeCircuit, check_public_values};
 
   let l = load("mdl_iso18013");
   let c = MdocAgeCircuit::<Engine_> {

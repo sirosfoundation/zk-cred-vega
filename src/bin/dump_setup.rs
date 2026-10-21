@@ -17,12 +17,8 @@ fn main() {
 
   let pk_path = out_dir.join("vega-mc-p256-v1-prover-key.bin");
   let vk_path = out_dir.join("vega-mc-p256-v1-verifier-key.bin");
-  std::fs::File::create(&pk_path)
-    .and_then(|mut f| f.write_all(&pk_bytes))
-    .expect("write pk");
-  std::fs::File::create(&vk_path)
-    .and_then(|mut f| f.write_all(&vk_bytes))
-    .expect("write vk");
+  std::fs::File::create(&pk_path).and_then(|mut f| f.write_all(&pk_bytes)).expect("write pk");
+  std::fs::File::create(&vk_path).and_then(|mut f| f.write_all(&vk_bytes)).expect("write vk");
 
   println!("wrote {} ({} bytes)", pk_path.display(), pk_bytes.len());
   println!("wrote {} ({} bytes)", vk_path.display(), vk_bytes.len());

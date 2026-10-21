@@ -79,9 +79,9 @@
 //! independent cryptographic review. See the crate README.
 
 use bellpepper_core::{
+  ConstraintSystem, LinearCombination, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, LinearCombination, SynthesisError,
 };
 use ff::PrimeFieldBits;
 
@@ -382,11 +382,7 @@ pub struct MdocAgeOutputs<Scalar: ff::PrimeField> {
   pub device_auth_digest: Vec<AllocatedNum<Scalar>>,
 }
 
-fn alloc_bits<CS: ConstraintSystem<Scalar>, Scalar: ff::PrimeField>(
-  cs: &mut CS,
-  bytes: &[u8],
-  tag: &str,
-) -> Result<Vec<Boolean>, SynthesisError> {
+fn alloc_bits<CS: ConstraintSystem<Scalar>, Scalar: ff::PrimeField>(cs: &mut CS, bytes: &[u8], tag: &str) -> Result<Vec<Boolean>, SynthesisError> {
   bytes
     .iter()
     .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1 == 1))
@@ -444,11 +440,7 @@ where
     )));
   };
   let indices: Vec<usize> = (0..candidates.len()).collect();
-  let sel = crate::onehot_cursor::alloc_one_hot::<Scalar, _>(
-    cs.namespace(|| "elementValue offset and encoding"),
-    &indices,
-    real,
-  )?;
+  let sel = crate::onehot_cursor::alloc_one_hot::<Scalar, _>(cs.namespace(|| "elementValue offset and encoding"), &indices, real)?;
 
   for (k, &(base, enc)) in candidates.iter().enumerate() {
     // CIRCUIT-01: the last byte this candidate reads must be inside the
@@ -499,7 +491,12 @@ where
       );
       acc = acc + term.get_variable();
     }
-    cs.enforce(|| format!("date {j} is the selected byte"), |lc| lc + &acc, |lc| lc + one, |lc| lc + d.get_variable());
+    cs.enforce(
+      || format!("date {j} is the selected byte"),
+      |lc| lc + &acc,
+      |lc| lc + one,
+      |lc| lc + d.get_variable(),
+    );
     out.push(d);
   }
   Ok(out)
@@ -517,11 +514,7 @@ where
 /// published artifact per cutoff — i.e. per day. Allocating the cutoff
 /// makes the shape identical for every date, at the cost of the few
 /// constraints the constant-folding used to save.
-fn date_not_after<Scalar, CS>(
-  mut cs: CS,
-  date: &[AllocatedNum<Scalar>],
-  cutoff: &[AllocatedNum<Scalar>],
-) -> Result<Boolean, SynthesisError>
+fn date_not_after<Scalar, CS>(mut cs: CS, date: &[AllocatedNum<Scalar>], cutoff: &[AllocatedNum<Scalar>]) -> Result<Boolean, SynthesisError>
 where
   Scalar: PrimeFieldBits,
   CS: ConstraintSystem<Scalar>,
@@ -612,24 +605,14 @@ impl<Scalar: PrimeFieldBits> Hasher<'_, Scalar> {
     blocks: usize,
   ) -> Result<(Vec<Boolean>, Vec<Boolean>), SynthesisError> {
     match self {
-      Hasher::SingleCircuit => {
-        crate::sha256_var::sha256_var_sized(cs.namespace(|| "hash"), raw_bits, real_len, max_bytes, blocks)
-      }
+      Hasher::SingleCircuit => crate::sha256_var::sha256_var_sized(cs.namespace(|| "hash"), raw_bits, real_len, max_bytes, blocks),
       Hasher::Folded { shared, layout, message } => {
-        let (buffer_bits, active, len_selector) =
-          crate::sha256_var::padded_buffer_bits(cs, raw_bits, real_len, max_bytes, blocks)?;
+        let (buffer_bits, active, len_selector) = crate::sha256_var::padded_buffer_bits(cs, raw_bits, real_len, max_bytes, blocks)?;
         crate::sha256_mc::bind_message_to_shared(cs, shared, layout, *message, &buffer_bits)?;
         let terminal = crate::sha256_var::terminal_block_for_len(real_len) - 1;
         // `len_selector` ties the selected block to the padding boundary
         // rather than leaving them two independent witnesses -- MC-03.
-        let digest = crate::sha256_mc::select_digest(
-          cs,
-          shared,
-          layout,
-          *message,
-          terminal,
-          Some(&len_selector),
-        )?;
+        let digest = crate::sha256_mc::select_digest(cs, shared, layout, *message, terminal, Some(&len_selector))?;
         Ok((digest, active))
       }
     }
@@ -715,15 +698,7 @@ where
   let issuer_qx = AllocatedNum::alloc(cs.namespace(|| "qx"), || Ok(ecdsa.qx))?;
   let issuer_qy = AllocatedNum::alloc(cs.namespace(|| "qy"), || Ok(ecdsa.qy))?;
   let z_bn = crate::mdoc_core::bits_be_to_bignat::<Scalar, CS>(&z_bits)?;
-  crate::ecdsa::verify_ecdsa_p256_with_digest(
-    cs.namespace(|| "ecdsa"),
-    &issuer_qx,
-    &issuer_qy,
-    &ecdsa.r,
-    &ecdsa.s,
-    &ecdsa.s_inv,
-    &z_bn,
-  )?;
+  crate::ecdsa::verify_ecdsa_p256_with_digest(cs.namespace(|| "ecdsa"), &issuer_qx, &issuer_qy, &ecdsa.r, &ecdsa.s, &ecdsa.s_inv, &z_bn)?;
 
   // 3. Where this credential's digests actually live.
   let binding = offset_bind::bind_digest_region::<Scalar, _>(
@@ -742,14 +717,7 @@ where
   //    checks this whole proof would accept a digest planted anywhere in
   //    the signed bytes — see `offset_bind`'s module docs.
   let candidates = offset_bind::window_offsets(MAX_SIG_STRUCTURE_BYTES, 32);
-  let located = offset_bind::select_window::<Scalar, _>(
-    cs.namespace(|| "locate digest"),
-    &sig_bits,
-    &padded,
-    &candidates,
-    witness.digest_offset,
-    32,
-  )?;
+  let located = offset_bind::select_window::<Scalar, _>(cs.namespace(|| "locate digest"), &sig_bits, &padded, &candidates, witness.digest_offset, 32)?;
   offset_bind::enforce_ge(
     cs.namespace(|| "digest starts inside the region"),
     &located.offset,
@@ -761,9 +729,7 @@ where
     cs.namespace(|| "digest ends inside the region"),
     &binding.region_end,
     &(located.offset.clone() + (Scalar::from(32u64), one)),
-    offset_bind::native_region_end_of(&padded, witness.landmarks.region_start, witness.num_entries)?
-      .wrapping_sub(witness.digest_offset + 32)
-      & 0xffff,
+    offset_bind::native_region_end_of(&padded, witness.landmarks.region_start, witness.num_entries)?.wrapping_sub(witness.digest_offset + 32) & 0xffff,
     16,
   )?;
 
@@ -800,9 +766,7 @@ where
     witness.date_encoding,
   )?;
 
-
-  let (valid_from, valid_until) =
-    offset_bind::bind_validity(cs.namespace(|| "validity"), &sig_bits, &padded, witness.landmarks.validity_info)?;
+  let (valid_from, valid_until) = offset_bind::bind_validity(cs.namespace(|| "validity"), &sig_bits, &padded, witness.landmarks.validity_info)?;
 
   Ok(CredentialBinding {
     issuer_qx,
@@ -883,7 +847,12 @@ where
       acc
     };
     let out = AllocatedNum::alloc(cs.namespace(|| format!("device auth pack {p}")), || Ok(value))?;
-    cs.enforce(|| format!("device auth pack {p} recombines"), |l| l + &lc, |l| l + one, |l| l + out.get_variable());
+    cs.enforce(
+      || format!("device auth pack {p} recombines"),
+      |l| l + &lc,
+      |l| l + one,
+      |l| l + out.get_variable(),
+    );
     device_auth_packed.push(out);
   }
 
@@ -915,10 +884,12 @@ where
     .collect::<Result<Vec<_>, _>>()?;
   let old_enough = date_not_after(cs.namespace(|| "age"), birth_date, &cutoff_vars)?;
 
-
-
-
-  Ok(SessionOutputs { cutoff: cutoff_vars, now: now_vars, old_enough, device_auth_digest: device_auth_packed })
+  Ok(SessionOutputs {
+    cutoff: cutoff_vars,
+    now: now_vars,
+    old_enough,
+    device_auth_digest: device_auth_packed,
+  })
 }
 
 /// The session half's results.
@@ -970,7 +941,6 @@ where
   })
 }
 
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -997,8 +967,7 @@ mod tests {
     let p = enc.prefix();
     v[base + VALUE_KEY_LEN..base + VALUE_KEY_LEN + p.len()].copy_from_slice(p);
     v[base + enc.date_rel()..base + enc.date_rel() + 10].copy_from_slice(date);
-    v[base + enc.identifier_rel()..base + enc.identifier_rel() + IDENTIFIER_LITERAL.len()]
-      .copy_from_slice(IDENTIFIER_LITERAL);
+    v[base + enc.identifier_rel()..base + enc.identifier_rel() + IDENTIFIER_LITERAL.len()].copy_from_slice(IDENTIFIER_LITERAL);
     v
   }
 

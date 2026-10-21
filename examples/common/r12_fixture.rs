@@ -37,8 +37,8 @@ pub struct Presentation {
 /// mistyped command and the actionable thing is the message telling you
 /// to generate it.
 pub fn load() -> Presentation {
-  let fixture = std::fs::read_to_string("test-vectors/mdl_4claims_mixed_disclosure.json")
-    .expect("fixture (run `cargo run --release --example gen_test_mdocs` first)");
+  let fixture =
+    std::fs::read_to_string("test-vectors/mdl_4claims_mixed_disclosure.json").expect("fixture (run `cargo run --release --example gen_test_mdocs` first)");
   let f: serde_json::Value = serde_json::from_str(&fixture).unwrap();
   let hexb = |s: &str| hex::decode(s).unwrap();
 
@@ -75,5 +75,10 @@ pub fn load() -> Presentation {
     valid_until_ts: ts("valid_until_ts"),
   };
 
-  Presentation { claims, ecdsa, body, nonce: [0x5A; zk_cred_vega::BLIND_NONCE_BYTES] }
+  Presentation {
+    claims,
+    ecdsa,
+    body,
+    nonce: [0x5A; zk_cred_vega::BLIND_NONCE_BYTES],
+  }
 }

@@ -149,7 +149,7 @@ struct TestMdoc {
 }
 
 fn gen_one(description: &str, out_path: &std::path::Path) {
-  use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+  use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::hazmat::PrehashSigner};
 
   let mut rng = rand::thread_rng();
 

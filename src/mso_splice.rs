@@ -23,8 +23,8 @@
 use crate::cbor_uint::{self, MAX_CBOR_UINT_BYTES};
 use crate::onehot_cursor::{alloc_one_hot, convolve_sum};
 use bellpepper_core::{
-  boolean::{AllocatedBit, Boolean},
   ConstraintSystem, SynthesisError,
+  boolean::{AllocatedBit, Boolean},
 };
 use ff::PrimeField;
 
@@ -104,7 +104,11 @@ enum Placement<'a> {
   },
   /// `content` (always fully real, fixed length) contributes at output
   /// offset `cursor`, for the active `cursor` value.
-  Fixed { cursor_onehot: &'a [Boolean], cursor_values: &'a [usize], content: &'a [Boolean] },
+  Fixed {
+    cursor_onehot: &'a [Boolean],
+    cursor_values: &'a [usize],
+    content: &'a [Boolean],
+  },
 }
 
 /// Builds `output_len_bytes*8` output bits from `placements` (covering
@@ -117,7 +121,12 @@ enum Placement<'a> {
 /// unions across *different* placements are safe exactly when their
 /// ranges never overlap for any witness — true here because entry `i+1`
 /// (and the suffix) never starts before entry `i` ends.
-fn assemble_from_placements<Scalar, CS>(mut cs: CS, output_len_bytes: usize, range: (usize, usize), placements: &[Placement]) -> Result<Vec<Boolean>, SynthesisError>
+fn assemble_from_placements<Scalar, CS>(
+  mut cs: CS,
+  output_len_bytes: usize,
+  range: (usize, usize),
+  placements: &[Placement],
+) -> Result<Vec<Boolean>, SynthesisError>
 where
   Scalar: PrimeField,
   CS: ConstraintSystem<Scalar>,
@@ -329,13 +338,12 @@ mod tests {
     bits
       .chunks(8)
       .map(|byte_bits| {
-        byte_bits.iter().enumerate().fold(0u8, |byte, (i, bit)| {
-          if bit.get_value().expect("has a value") {
-            byte | (1 << (7 - i))
-          } else {
-            byte
-          }
-        })
+        byte_bits.iter().enumerate().fold(
+          0u8,
+          |byte, (i, bit)| {
+            if bit.get_value().expect("has a value") { byte | (1 << (7 - i)) } else { byte }
+          },
+        )
       })
       .collect()
   }
@@ -363,8 +371,7 @@ mod tests {
       }
     });
 
-    let (assembled, real_len) =
-      assemble_mso_sig_structure::<Scalar, _>(cs.namespace(|| "assemble"), &prefix_bits, &entries, &suffix_bits).expect("assemble");
+    let (assembled, real_len) = assemble_mso_sig_structure::<Scalar, _>(cs.namespace(|| "assemble"), &prefix_bits, &entries, &suffix_bits).expect("assemble");
 
     if let Some(reason) = cs.which_is_unsatisfied() {
       panic!("digest_ids={digest_ids:?}: unsatisfied at {reason}");

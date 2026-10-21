@@ -4,11 +4,10 @@
 //! Usage: `cargo run --release --example dump_age_setup -- <out-dir>`
 
 use vega_prover::traits::Engine;
-use zk_cred_vega::mdoc_age_circuit::{self, MdocAgeCircuit};
 use zk_cred_vega::Engine_;
+use zk_cred_vega::mdoc_age_circuit::{self, MdocAgeCircuit};
 
 type Scalar = <Engine_ as Engine>::Scalar;
-
 
 /// Builds a circuit from a committed test fixture.
 ///
@@ -17,22 +16,25 @@ type Scalar = <Engine_ as Engine>::Scalar;
 /// the shape is identical across document types -- so a fixture is the
 /// right source for a published artifact's provenance.
 fn prototype_from_fixture(name: &str) -> MdocAgeCircuit<Engine_> {
-  use zk_cred_vega::mdoc_age::{DateEncoding, DeviceAuthWitness, MdocAgeWitness};
   use num_bigint::{BigInt, Sign};
   use sha2::{Digest, Sha256};
+  use zk_cred_vega::mdoc_age::{DateEncoding, DeviceAuthWitness, MdocAgeWitness};
 
-  let json: serde_json::Value =
-    serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
+  let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("test-vectors/{name}.json")).expect("fixture")).unwrap();
   let sig = hex::decode(json["sig_structure_hex"].as_str().unwrap()).unwrap();
   let lm = &json["landmarks"];
   let ns = json["namespace"].as_str().unwrap();
-  let t = json["claims"].as_array().unwrap().iter()
-    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns).unwrap();
+  let t = json["claims"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|c| c["element_identifier"] == "birth_date" && c["namespace"] == ns)
+    .unwrap();
   let session = [0x5au8; 32];
 
   let kb: [u8; 32] = hex::decode(json["device_private_key_hex"].as_str().unwrap()).unwrap().try_into().unwrap();
   let device_auth = {
-    use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
     let sk = SigningKey::from_bytes(&kb.into()).unwrap();
     let sg: Signature = sk.sign_prehash(&session).unwrap();
     let n = zk_cred_vega::p256_ecc::p256_order();

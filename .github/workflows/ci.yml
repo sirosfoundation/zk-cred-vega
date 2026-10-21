@@ -33,6 +33,14 @@ jobs:
       # in debug builds that the full-pipeline tests time out.
       - run: cargo test --locked --release --all-features
 
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-toolchain
+      - run: cargo fmt --all -- --check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
