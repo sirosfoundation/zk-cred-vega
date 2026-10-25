@@ -126,6 +126,10 @@ item to that list, and to this table, only on purpose.
   the first entry.)
 - **Rulebook range.** With both age bounds given the window must be at least 365 days and
   `le >= ge`; otherwise `InvalidInput`.
+- **Verification outcomes.** A proof past the cap, undecodable or with bytes after its end is
+  `ProofEncoding`; one that does not verify, or whose step instance reports another position, is
+  `ProofInvalid`; one that verifies for other public values than the named ones is `Mismatch`.
+  These are the system rulebook's `proof_encoding`, `proof_invalid` and `public_input`.
 - **Coarse refusals.** `Refused` carries `SeedMismatch`, `IssuerSignature`, `DeviceSignature` or
   `Credential`, never the broken rule (the rule path is available with `--features debug-rules`).
 - **Issuer profile and key.** Attribute names are unique under the nym_auth issuance profile. The

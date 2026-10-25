@@ -173,10 +173,14 @@ pub enum Error {
   Refused(Refusal),
   /// The prover failed.
   Prover(String),
-  /// The proof does not verify (the prover's own verification failed).
+  /// The proof bytes are not one `vega-v1` proof: past [`MAX_PROOF`], not decodable, or with
+  /// bytes after its end.
+  ProofEncoding(String),
+  /// The proof does not verify, or a step instance reports another position than its own
+  /// (tests 1 and 2 of the system rulebook's Section 4).
   ProofInvalid(String),
-  /// The proof verifies, but not for the values the verifier named (another issuer key, date,
-  /// time, challenge or verifier_input, or a step instance at another position).
+  /// The proof verifies, but the core reports other public values than the verifier named:
+  /// another issuer key, date, time, challenge or verifier_input (test 3).
   Mismatch(String),
   /// A bug: a panic was caught.
   Internal(String),
@@ -190,6 +194,7 @@ impl std::fmt::Display for Error {
       Error::UnknownCircuit(h) => write!(f, "circuit shapes {h} are not approved"),
       Error::Refused(r) => write!(f, "inputs refused: {:?}", r.code),
       Error::Prover(t) => write!(f, "prover failed: {t}"),
+      Error::ProofEncoding(t) => write!(f, "proof encoding: {t}"),
       Error::ProofInvalid(t) => write!(f, "proof invalid: {t}"),
       Error::Mismatch(t) => write!(f, "proof does not match the named values: {t}"),
       Error::Internal(t) => write!(f, "internal error: {t}"),
@@ -331,7 +336,7 @@ fn days(d: &Date) -> i64 {
   era * 146_097 + doe - 719_468
 }
 
-/// `YYYY-MM-DD`, a real calendar date with a year from 1 to 9999.
+/// `YYYY-MM-DD`, a date of the proleptic Gregorian calendar with a year from 0000 to 9999.
 fn date(s: &str) -> Result<Date, Error> {
   let bad = || Error::Input(format!("not a date YYYY-MM-DD: {s:?}"));
   let b = s.as_bytes();
@@ -339,9 +344,7 @@ fn date(s: &str) -> Result<Date, Error> {
     return Err(bad());
   }
   match (number(&s[0..4]), number(&s[5..7]), number(&s[8..10])) {
-    (Some(year), Some(month), Some(day)) if year >= 1 && (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day) => {
-      Ok(Date { year, month, day })
-    }
+    (Some(year), Some(month), Some(day)) if (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day) => Ok(Date { year, month, day }),
     _ => Err(bad()),
   }
 }
@@ -563,20 +566,20 @@ pub fn verify(keys: &Keys, statement: &Statement, proof: &[u8]) -> Result<[u8; 3
   guarded(|| {
     let (public, verifier_input) = public(statement, keys.circuit)?;
     if proof.len() > MAX_PROOF {
-      return Err(Error::Input(format!("the proof is {} bytes, more than {MAX_PROOF}", proof.len())));
+      return Err(Error::ProofEncoding(format!("the proof is {} bytes, more than {MAX_PROOF}", proof.len())));
     }
-    let decoded: Proof = bincode::deserialize(proof).map_err(|e| Error::Input(format!("decoding the proof: {e}")))?;
+    let decoded: Proof = bincode::deserialize(proof).map_err(|e| Error::ProofEncoding(format!("decoding the proof: {e}")))?;
     // bincode reads a prefix and ignores what follows: accept only a proof that is its own
     // encoding, with no trailing bytes.
     match bincode::serialized_size(&decoded) {
       Ok(n) if n == proof.len() as u64 => {}
-      _ => return Err(Error::Input("the proof has bytes after its end".into())),
+      _ => return Err(Error::ProofEncoding("the proof has bytes after its end".into())),
     }
     let mut expected = public.values(TimeEncoding::Digits);
     expected.extend(NymPublic::verifier_values(&verifier_input));
     app::accept_pseudonym(&keys.circuit.layout, &keys.verifier, &decoded, &expected).map_err(|r| match r {
       Rejection::Invalid(e) => Error::ProofInvalid(format!("{e:?}")),
-      Rejection::Position { instance, .. } => Error::Mismatch(format!("step instance {instance} reports another position")),
+      Rejection::Position { instance, .. } => Error::ProofInvalid(format!("step instance {instance} reports another position")),
       Rejection::PublicValues { .. } => Error::Mismatch("the proof's public values are not the named ones".into()),
     })
   })
@@ -600,6 +603,7 @@ mod tests {
       (Error::UnknownCircuit("ab".into()), "circuit shapes ab are not approved"),
       (Error::Refused(Refusal::new(RefusalCode::SeedMismatch, "a/b/c")), "inputs refused: SeedMismatch"),
       (Error::Prover("x".into()), "prover failed: x"),
+      (Error::ProofEncoding("x".into()), "proof encoding: x"),
       (Error::ProofInvalid("x".into()), "proof invalid: x"),
       (Error::Mismatch("x".into()), "proof does not match the named values: x"),
       (Error::Internal("x".into()), "internal error: x"),

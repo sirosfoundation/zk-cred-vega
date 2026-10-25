@@ -280,15 +280,22 @@ fn times_and_dates_are_digits_only_and_real_calendar_values() {
     t.time = bad.into();
     assert!(matches!(statement::verify(keys(), &t.statement(), proof), Err(Error::Input(_))), "{bad}");
   }
-  for bad in ["2008-02-30", "2008-1-07x", "+008-10-07", "2008-10- 7", "0000-01-01"] {
+  for bad in ["2008-02-30", "2008-1-07x", "+008-10-07", "2008-10- 7", "0000-02-30"] {
     let mut t = c.clone();
     t.cutoff = bad.into();
     assert!(matches!(statement::verify(keys(), &t.statement(), proof), Err(Error::Input(_))), "{bad}");
   }
-  // a valid leap day passes the parser
-  let mut t = c.clone();
-  t.cutoff = "2008-02-29".into();
-  assert!(!matches!(statement::verify(keys(), &t.statement(), proof), Err(Error::Input(_))));
+  // a valid leap day passes the parser, and so does year 0000, a leap year of the proleptic
+  // Gregorian calendar
+  for (earliest, cutoff) in [("0000-00-00", "2008-02-29"), ("0000-00-00", "0000-02-29"), ("0000-01-01", "9999-12-31")] {
+    let mut t = c.clone();
+    t.earliest = earliest.into();
+    t.cutoff = cutoff.into();
+    assert!(
+      !matches!(statement::verify(keys(), &t.statement(), proof), Err(Error::Input(_))),
+      "{earliest} {cutoff}"
+    );
+  }
 }
 
 // ---- CIRCUIT-8: host-side issuer key validation ---------------------------------------------
@@ -403,10 +410,14 @@ fn a_proof_with_trailing_bytes_or_past_the_cap_is_refused() {
   assert!(statement::verify(keys(), &c.statement(), proof).is_ok());
   let mut longer = proof.clone();
   longer.push(0);
-  assert!(matches!(statement::verify(keys(), &c.statement(), &longer), Err(Error::Input(_))));
+  assert!(matches!(statement::verify(keys(), &c.statement(), &longer), Err(Error::ProofEncoding(_))));
+  assert!(matches!(
+    statement::verify(keys(), &c.statement(), &proof[..proof.len() - 1]),
+    Err(Error::ProofEncoding(_))
+  ));
   let mut padded = proof.clone();
   padded.extend(std::iter::repeat_n(0u8, 1 << 20));
-  assert!(matches!(statement::verify(keys(), &c.statement(), &padded), Err(Error::Input(_))));
+  assert!(matches!(statement::verify(keys(), &c.statement(), &padded), Err(Error::ProofEncoding(_))));
   assert!(padded.len() > MAX_PROOF);
 }
 

@@ -239,7 +239,7 @@ fn an_issuer_key_off_the_curve_and_trailing_proof_bytes_are_refused() {
   longer.push(0);
   assert!(matches!(
     nymauth_vega_verify(keys(), f.statement.clone(), longer),
-    Err(NymAuthVegaError::InvalidInput { .. })
+    Err(NymAuthVegaError::ProofEncoding { .. })
   ));
 }
 

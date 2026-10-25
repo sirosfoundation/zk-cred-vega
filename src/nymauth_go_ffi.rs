@@ -35,6 +35,7 @@ pub const ZK_NYM_PROVER_FAILED: i32 = 6;
 pub const ZK_NYM_PROOF_INVALID: i32 = 7;
 pub const ZK_NYM_MISMATCH: i32 = 8;
 pub const ZK_NYM_INTERNAL: i32 = 9;
+pub const ZK_NYM_PROOF_ENCODING: i32 = 10;
 pub const ZK_NYM_REFUSED_SEED_MISMATCH: i32 = 20;
 pub const ZK_NYM_REFUSED_ISSUER_SIGNATURE: i32 = 21;
 pub const ZK_NYM_REFUSED_DEVICE_SIGNATURE: i32 = 22;
@@ -92,6 +93,7 @@ fn code(e: &Error) -> i32 {
       RefusalCode::Credential => ZK_NYM_REFUSED_CREDENTIAL,
     },
     Error::Prover(_) => ZK_NYM_PROVER_FAILED,
+    Error::ProofEncoding(_) => ZK_NYM_PROOF_ENCODING,
     Error::ProofInvalid(_) => ZK_NYM_PROOF_INVALID,
     Error::Mismatch(_) => ZK_NYM_MISMATCH,
     Error::Internal(_) => ZK_NYM_INTERNAL,
@@ -401,6 +403,7 @@ mod tests {
       (Error::Shapes(String::new()), ZK_NYM_INVALID_SHAPES),
       (Error::UnknownCircuit(String::new()), ZK_NYM_UNKNOWN_CIRCUIT),
       (Error::Prover(String::new()), ZK_NYM_PROVER_FAILED),
+      (Error::ProofEncoding(String::new()), ZK_NYM_PROOF_ENCODING),
       (Error::ProofInvalid(String::new()), ZK_NYM_PROOF_INVALID),
       (Error::Mismatch(String::new()), ZK_NYM_MISMATCH),
       (Error::Internal(String::new()), ZK_NYM_INTERNAL),

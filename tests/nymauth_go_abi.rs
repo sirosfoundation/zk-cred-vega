@@ -94,7 +94,7 @@ fn verify_refuses_by_status_code() {
   longer.push(0);
   assert_eq!(
     unsafe { zk_cred_vega_nymauth_verify(keys(), &st, longer.as_ptr(), longer.len(), out.as_mut_ptr()) },
-    ZK_NYM_INVALID_INPUT
+    ZK_NYM_PROOF_ENCODING
   );
 }
 

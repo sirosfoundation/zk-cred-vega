@@ -30,13 +30,14 @@ extern "C" {
 /* Status codes. */
 #define ZK_NYM_OK                        0
 #define ZK_NYM_INVALID_ARG               1  /* null pointer, or a length past its cap */
-#define ZK_NYM_INVALID_INPUT             2  /* malformed value, range, issuer key, proof framing */
+#define ZK_NYM_INVALID_INPUT             2  /* malformed value, range, issuer key */
 #define ZK_NYM_INVALID_SHAPES            3
 #define ZK_NYM_UNKNOWN_CIRCUIT           4  /* shapes are not an approved circuit */
 #define ZK_NYM_PROVER_FAILED             6
-#define ZK_NYM_PROOF_INVALID             7
+#define ZK_NYM_PROOF_INVALID             7  /* the proof does not verify, or a step instance's position differs */
 #define ZK_NYM_MISMATCH                  8  /* proof verifies, but not for the named values */
 #define ZK_NYM_INTERNAL                  9  /* a panic was caught */
+#define ZK_NYM_PROOF_ENCODING            10 /* past the cap, not decodable, or bytes after its end */
 #define ZK_NYM_REFUSED_SEED_MISMATCH     20 /* prove: secret_seed does not open the credential's ssc */
 #define ZK_NYM_REFUSED_ISSUER_SIGNATURE  21
 #define ZK_NYM_REFUSED_DEVICE_SIGNATURE  22

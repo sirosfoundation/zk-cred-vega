@@ -173,7 +173,7 @@ func TestTamperedInputsAreRefused(t *testing.T) {
 		t.Fatal("a damaged proof was accepted")
 	}
 	_, err = k.Verify(&f.st, append(append([]byte(nil), f.refProof...), 0))
-	want(t, err, InvalidInput)
+	want(t, err, ProofEncoding)
 
 	// prove: a wrong seed and a wrong device signature are refused by code
 	h := &Holder{IssuerSigned: f.issuer, SecretSeed: append([]byte(nil), f.seed...), DeviceSignature: f.devSig}
@@ -201,7 +201,7 @@ func TestUnapprovedShapesAndBadArguments(t *testing.T) {
 	_, err = keys.Verify(&Statement{}, f.refProof)
 	want(t, err, InvalidInput)
 	_, err = keys.Verify(&f.st, nil)
-	want(t, err, InvalidInput)
+	want(t, err, ProofEncoding)
 }
 
 type vectorSet struct {

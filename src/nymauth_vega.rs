@@ -60,7 +60,10 @@ pub enum NymAuthVegaError {
   /// The prover failed.
   #[error("prover failed: {detail}")]
   ProverFailed { detail: String },
-  /// The proof does not verify.
+  /// The proof bytes are not one `vega-v1` proof.
+  #[error("proof encoding: {detail}")]
+  ProofEncoding { detail: String },
+  /// The proof does not verify, or a step instance reports another position.
   #[error("proof invalid: {detail}")]
   ProofInvalid { detail: String },
   /// The proof verifies but not for the values the verifier named.
@@ -81,6 +84,7 @@ impl From<Error> for NymAuthVegaError {
         detail: format!("{:?}", r.code),
       },
       Error::Prover(detail) => Self::ProverFailed { detail },
+      Error::ProofEncoding(detail) => Self::ProofEncoding { detail },
       Error::ProofInvalid(detail) => Self::ProofInvalid { detail },
       Error::Mismatch(detail) => Self::Mismatch { detail },
       Error::Internal(detail) => Self::Internal { detail },
@@ -254,6 +258,7 @@ mod tests {
       matches!(m(Error::Refused(Refusal::new(RefusalCode::DeviceSignature, "x/y"))), NymAuthVegaError::Refused { detail } if detail == "DeviceSignature")
     );
     assert!(matches!(m(Error::Prover("a".into())), NymAuthVegaError::ProverFailed { detail } if detail == "a"));
+    assert!(matches!(m(Error::ProofEncoding("a".into())), NymAuthVegaError::ProofEncoding { detail } if detail == "a"));
     assert!(matches!(m(Error::ProofInvalid("a".into())), NymAuthVegaError::ProofInvalid { detail } if detail == "a"));
     assert!(matches!(m(Error::Mismatch("a".into())), NymAuthVegaError::Mismatch { detail } if detail == "a"));
     assert!(matches!(m(Error::Internal("a".into())), NymAuthVegaError::Internal { detail } if detail == "a"));

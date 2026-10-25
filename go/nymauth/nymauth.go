@@ -40,6 +40,7 @@ const (
 	ProofInvalid           Status = C.ZK_NYM_PROOF_INVALID
 	Mismatch               Status = C.ZK_NYM_MISMATCH
 	Internal               Status = C.ZK_NYM_INTERNAL
+	ProofEncoding          Status = C.ZK_NYM_PROOF_ENCODING
 	RefusedSeedMismatch    Status = C.ZK_NYM_REFUSED_SEED_MISMATCH
 	RefusedIssuerSignature Status = C.ZK_NYM_REFUSED_ISSUER_SIGNATURE
 	RefusedDeviceSignature Status = C.ZK_NYM_REFUSED_DEVICE_SIGNATURE
