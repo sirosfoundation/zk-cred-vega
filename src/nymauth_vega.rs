@@ -36,6 +36,8 @@
 use std::sync::Arc;
 
 pub mod engine;
+#[cfg(target_family = "wasm")]
+pub mod js_api;
 
 use engine::statement::{self, Error, Holder, Keys, Statement};
 use zeroize::Zeroize;
