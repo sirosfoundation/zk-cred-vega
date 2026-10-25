@@ -42,8 +42,10 @@ codegen-units = 1
 # sirosfoundation/vega-prover@2a7dcb3 for the fix and its own real
 # before/after measurement. Upstream PRs (both this and the prep-state
 # fix) planned once verified on real hardware - see this repo's own
-# commit history for the exact diffs.
-vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "2a7dcb3" }
+# commit history for the exact diffs. Rev a04fafe (branch
+# fix/wasm-time-compatibility) times with web-time: std::time::Instant
+# panics on wasm32-unknown-unknown.
+vega-prover = { git = "https://github.com/sirosfoundation/vega-prover.git", rev = "a04fafe887b005587fba99dda91ea441143b3fbd" }
 # nymauth engine (src/nymauth_vega/engine): witness synthesis in parallel, wiped buffers.
 group = "0.13.0"
 rayon = "1.12"
