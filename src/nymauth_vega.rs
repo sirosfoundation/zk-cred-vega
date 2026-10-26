@@ -33,7 +33,8 @@
 //! [`NymAuthVegaError::Internal`]. The secret seed's Rust copies are zeroed before
 //! [`nymauth_vega_prove`] returns; the caller zeroes its own.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod engine;
 
@@ -181,6 +182,51 @@ pub fn prove_zeroing(keys: &NymAuthVegaKeys, statement: &NymAuthVegaStatement, h
     proof: proved.proof,
     pseudonym: proved.pseudonym.to_vec(),
   })
+}
+
+/// The rayon pools of `n` threads [`nymauth_vega_prove_with`] runs on, built once each.
+fn pool(threads: u32) -> Result<Arc<rayon::ThreadPool>, NymAuthVegaError> {
+  static POOLS: OnceLock<Mutex<HashMap<u32, Arc<rayon::ThreadPool>>>> = OnceLock::new();
+  let mut pools = POOLS.get_or_init(Default::default).lock().map_err(|_| NymAuthVegaError::Internal {
+    detail: "the thread pools' lock".into(),
+  })?;
+  if let Some(p) = pools.get(&threads) {
+    return Ok(p.clone());
+  }
+  let p = Arc::new(
+    rayon::ThreadPoolBuilder::new()
+      .num_threads(threads as usize)
+      .thread_name(|i| format!("nymauth-vega-{i}"))
+      .build()
+      .map_err(|e| NymAuthVegaError::Internal {
+        detail: format!("thread pool: {e}"),
+      })?,
+  );
+  pools.insert(threads, p.clone());
+  Ok(p)
+}
+
+/// [`nymauth_vega_prove`] on `threads` threads: 1 proves on one core, `n` on `n`, and 0 on rayon's
+/// global pool (one thread per core), which is how [`nymauth_vega_prove`] runs. The pools are built
+/// once per thread count and kept. The proof is the same whatever the count; only the time differs.
+/// `holder.secret_seed` is zeroed before this returns, on every path.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn nymauth_vega_prove_with(
+  keys: &NymAuthVegaKeys,
+  statement: NymAuthVegaStatement,
+  mut holder: NymAuthVegaHolder,
+  threads: u32,
+) -> Result<NymAuthVegaProof, NymAuthVegaError> {
+  match threads {
+    0 => prove_zeroing(keys, &statement, &mut holder),
+    n => match pool(n) {
+      Ok(p) => p.install(|| prove_zeroing(keys, &statement, &mut holder)),
+      Err(e) => {
+        holder.secret_seed[..].zeroize();
+        Err(e)
+      }
+    },
+  }
 }
 
 /// Accepts a proof for the values the verifier named, which the verifier derives itself:
